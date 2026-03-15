@@ -42,6 +42,12 @@ public sealed class TcmbWorker(
         }
     }
 
+    // Backfill başlangıç tarihi — TCMB 1995'ten itibaren yayında; 2010 makul MVP başlangıcı
+    private static readonly DateOnly BackfillStart = new(2010, 1, 1);
+
+    // Chunk boyutu: ara ara kaydet, ilerleme logla, bellek baskısı azalt
+    private const int BackfillChunkDays = 90;
+
     private async Task BackfillAsync(CancellationToken ct)
     {
         var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
@@ -49,7 +55,7 @@ public sealed class TcmbWorker(
         foreach (var asset in assets)
         {
             var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
-            var from = latestDate?.AddDays(1) ?? new DateOnly(2000, 1, 1);
+            var from = latestDate?.AddDays(1) ?? BackfillStart;
             var to = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-1)); // dün
 
             if (from > to)
@@ -60,7 +66,17 @@ public sealed class TcmbWorker(
             }
 
             logger.LogInformation("{Symbol} backfill başlıyor: {From} → {To}", asset.Symbol, from, to);
-            await FetchAndUpsertAsync(asset, from, to, ct);
+
+            // Chunk'lar halinde işle — her 90 günde bir kaydet
+            var chunkFrom = from;
+            while (chunkFrom <= to && !ct.IsCancellationRequested)
+            {
+                var chunkTo = chunkFrom.AddDays(BackfillChunkDays - 1);
+                if (chunkTo > to) chunkTo = to;
+
+                await FetchAndUpsertAsync(asset, chunkFrom, chunkTo, ct);
+                chunkFrom = chunkTo.AddDays(1);
+            }
         }
     }
 
