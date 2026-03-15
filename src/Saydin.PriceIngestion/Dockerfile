@@ -15,6 +15,10 @@ RUN dotnet publish src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj \
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd -r -u 1001 -s /sbin/nologin appuser
 USER appuser
 

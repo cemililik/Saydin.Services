@@ -5,11 +5,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="*" />
     <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="*" />
-    <PackageReference Include="Dapper" Version="*" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="*" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="*" />
-    <PackageReference Include="Npgsql" Version="*" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="*" />
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="*-*" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="*" />

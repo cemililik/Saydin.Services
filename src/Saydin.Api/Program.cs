@@ -1,3 +1,6 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Npgsql;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -9,7 +12,9 @@ using Saydin.Api.Endpoints;
 using Saydin.Api.Exceptions;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
+using Saydin.Shared.Data;
 using Saydin.Shared.Diagnostics;
+using Saydin.Shared.Entities;
 using StackExchange.Redis;
 
 // ─── Bootstrap Logger ────────────────────────────────────────────────────────
@@ -89,38 +94,50 @@ try
     builder.Services.AddExceptionHandler<PriceNotFoundExceptionHandler>();
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
+    // ─── OpenAPI ─────────────────────────────────────────────────────────────
+    builder.Services.AddOpenApi();
+
+    // ─── NpgsqlDataSource (singleton — tüm DbContext'ler aynı pool'u paylaşır) ───
+    var pgConnection = builder.Configuration.GetConnectionString("Postgres")
+        ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
+
+    var npgsqlDataSource = new NpgsqlDataSourceBuilder(pgConnection)
+        .MapEnum<AssetCategory>("asset_category")
+        .Build();
+    builder.Services.AddSingleton(npgsqlDataSource);
+
+    // ─── EF Core ─────────────────────────────────────────────────────────────
+    builder.Services.AddDbContext<SaydinDbContext>(options =>
+        options.UseNpgsql(npgsqlDataSource)
+               .UseSnakeCaseNamingConvention());
+
     // ─── Health Checks ───────────────────────────────────────────────────────
     builder.Services
         .AddHealthChecks()
-        .AddNpgSql(
-            builder.Configuration.GetConnectionString("Postgres")!,
-            name: "postgresql",
-            tags: ["db"])
+        .AddAsyncCheck("postgresql", async ct =>
+        {
+            await using var conn = await npgsqlDataSource.OpenConnectionAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT 1";
+            await cmd.ExecuteScalarAsync(ct);
+            return HealthCheckResult.Healthy();
+        }, tags: ["db"])
         .AddRedis(
             builder.Configuration.GetConnectionString("Redis")!,
             name: "redis",
             tags: ["cache"]);
 
-    // ─── OpenAPI ─────────────────────────────────────────────────────────────
-    builder.Services.AddOpenApi();
-
-    // ─── Dapper TypeHandlers (global, uygulama başlangıcında) ────────────────
-    PriceRepository.RegisterTypeHandlers();
-
-    // ─── Data Access ─────────────────────────────────────────────────────────
-    var pgConnection = builder.Configuration.GetConnectionString("Postgres")
-        ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
-
+    // ─── Redis ───────────────────────────────────────────────────────────────
     var redisConnection = builder.Configuration.GetConnectionString("Redis")
         ?? throw new InvalidOperationException("ConnectionStrings:Redis yapılandırılmamış.");
 
-    builder.Services.AddSingleton<IPriceRepository>(new PriceRepository(pgConnection));
     builder.Services.AddSingleton<IConnectionMultiplexer>(
         ConnectionMultiplexer.Connect(redisConnection));
 
-    // ─── Application Services ────────────────────────────────────────────────
-    builder.Services.AddSingleton<IAssetService, AssetService>();
-    // builder.Services.AddSingleton<IWhatIfCalculator, WhatIfCalculator>();  ← Faz 1
+    // ─── Repositories & Services ─────────────────────────────────────────────
+    builder.Services.AddScoped<IPriceRepository, PriceRepository>();
+    builder.Services.AddScoped<IAssetService, AssetService>();
+    // builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();  ← Faz 1
 
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();

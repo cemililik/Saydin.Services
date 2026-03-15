@@ -8,15 +8,14 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Dapper" Version="*" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="*" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="*" />
-    <PackageReference Include="Npgsql" Version="*" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="*" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="*" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="*" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="*" />
     <PackageReference Include="Serilog.Enrichers.Environment" Version="*" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="*" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="*" />
     <PackageReference Include="Serilog.Sinks.Console" Version="*" />
     <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="*" />
@@ -25,4 +24,5 @@
   <ItemGroup>
     <ProjectReference Include="..\Saydin.Shared\Saydin.Shared.csproj" />
   </ItemGroup>
+
 </Project>

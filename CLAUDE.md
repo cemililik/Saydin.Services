@@ -19,7 +19,11 @@ Bu repo iki .NET 10 servisini ve ortak kütüphaneyi içerir:
 - **API yaklaşımı:** Minimal API — `Controller` sınıfı YASAKTIR
 - **Endpoint organizasyonu:** `Endpoints/` klasöründe extension method'lar (`IEndpointRouteBuilder`)
 - **OpenAPI:** .NET 10 native `Microsoft.AspNetCore.OpenApi` paketi
-- **ORM:** Dapper veya EF Core (hangisi kullanılıyorsa tutarlı kal)
+- **ORM:** Entity Framework Core (`Npgsql.EntityFrameworkCore.PostgreSQL`) — Dapper YASAKTIR
+- **DbContext:** `SaydinDbContext` `Saydin.Shared/Data/` içinde yaşar, her iki servis tarafından paylaşılır
+- **Saydin.Api:** `AddDbContext<SaydinDbContext>()` → scoped lifetime
+- **Saydin.PriceIngestion:** `AddDbContextFactory<SaydinDbContext>()` → singleton-safe factory pattern
+- **Migration:** `dotnet ef migrations add <Ad> --project src/Saydin.Shared --startup-project src/Saydin.Api`
 - **HTTP Client:** `IHttpClientFactory` ile kayıtlı named client'lar — `new HttpClient()` YASAKTIR
 
 ### Servis Sınırları
@@ -228,10 +232,43 @@ public interface IExternalApiAdapter
 
 ## Veritabanı Kuralları
 
+### Entity Framework Core
+
+```csharp
+// DOĞRU ✓ — LINQ ile sorgu
+var price = await context.PricePoints
+    .Where(pp => pp.Asset.Symbol == symbol && pp.PriceDate == date)
+    .FirstOrDefaultAsync(ct);
+
+// YANLIŞ ✗ — Raw SQL string interpolation (injection riski)
+var price = await context.Database.ExecuteSqlRawAsync($"SELECT * WHERE symbol = '{symbol}'");
+
+// DOĞRU ✓ — UPSERT için ExecuteSqlInterpolatedAsync (parametreli, güvenli)
+await context.Database.ExecuteSqlInterpolatedAsync(
+    $"INSERT INTO price_points (...) VALUES ({assetId}, {date}, ...) ON CONFLICT DO UPDATE ...", ct);
+```
+
 - `price_points` tablosuna **her zaman UPSERT** kullanılır (`ON CONFLICT DO UPDATE`)
+- `SaydinDbContext` `Saydin.Shared/Data/` altında merkezi tanımlanır
+- Entity konfigürasyonları `Saydin.Shared/Data/Configurations/` altında `IEntityTypeConfiguration<T>` ile yapılır
+- PostgreSQL enum tipi (`asset_category`) EF Core ile `HasPostgresEnum<AssetCategory>()` ve `MapEnum<AssetCategory>()` üzerinden yönetilir — TypeHandler yazmak YASAKTIR
 - Migration dosyaları `infrastructure/postgres/migrations/` altında numaralandırılır
 - Mevcut migration dosyaları **asla değiştirilmez** — yeni migration eklenir
 - `ingestion_jobs` tablosuna başarı ve hata durumları yazılır
+
+### Migration Komutları
+
+```bash
+# Yeni migration oluştur
+dotnet ef migrations add <MigrationAdı> \
+  --project src/Saydin.Shared \
+  --startup-project src/Saydin.Api
+
+# Veritabanını güncelle
+dotnet ef database update \
+  --project src/Saydin.Shared \
+  --startup-project src/Saydin.Api
+```
 
 ---
 
@@ -260,6 +297,8 @@ public interface IExternalApiAdapter
 
 ## Yasak Listesi
 
+- **Dapper** — YASAK (EF Core kullan)
+- **Raw `Npgsql.NpgsqlConnection`** doğrudan açmak — YASAK (DbContext kullan)
 - Controller sınıfı (`[ApiController]`, `ControllerBase`) — YASAK
 - `new HttpClient()` — YASAK
 - `double`, `float` finansal değer için — YASAK

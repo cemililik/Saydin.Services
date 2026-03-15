@@ -9,6 +9,7 @@ public sealed class Asset
     public bool IsActive { get; init; }
     public string Source { get; init; } = default!;
     public string? SourceId { get; init; }
-    public DateOnly? DataAvailableFrom { get; init; }
-    public DateOnly? DataAvailableTo { get; init; }
+
+    // Navigation
+    public ICollection<PricePoint> PricePoints { get; init; } = [];
 }

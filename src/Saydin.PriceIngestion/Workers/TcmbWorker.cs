@@ -49,9 +49,7 @@ public sealed class TcmbWorker(
         foreach (var asset in assets)
         {
             var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
-            var from = latestDate?.AddDays(1)
-                       ?? asset.DataAvailableFrom
-                       ?? new DateOnly(2000, 1, 1);
+            var from = latestDate?.AddDays(1) ?? new DateOnly(2000, 1, 1);
             var to = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-1)); // dün
 
             if (from > to)

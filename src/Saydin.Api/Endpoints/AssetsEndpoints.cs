@@ -46,11 +46,11 @@ public static class AssetsEndpoints
         string symbol,
         DateOnly from,
         DateOnly to,
-        string interval,
         IAssetService assetService,
-        CancellationToken ct)
+        CancellationToken ct,
+        string interval = "daily")
     {
         var points = await assetService.GetPriceRangeAsync(symbol, from, to, interval, ct);
-        return Results.Ok(new { symbol, interval, points });
+        return Results.Ok(new { symbol, interval, pricePoints = points });
     }
 }

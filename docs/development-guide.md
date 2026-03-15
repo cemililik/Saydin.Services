@@ -23,15 +23,29 @@ docker-compose up -d
 Başlatılan servisler:
 - `saydin-postgres` → localhost:5432 (TimescaleDB)
 - `saydin-redis` → localhost:6379
-- `saydin-pgadmin` → http://localhost:5050 (kullanıcı: admin@saydin.local / admin)
-- `saydin-redis-insight` → http://localhost:5540
+- `saydin-pgadmin` → http://localhost:5050 (kullanıcı: admin@saydin.dev / admin)
+- `saydin-redis-insight` → http://localhost:5540 *(Redis Insight — bkz. bağlantı adımları aşağıda)*
 - `aspire-dashboard` → http://localhost:18888 (traces, logs, metrics)
 - `prometheus` → http://localhost:9090
 
+### Redis Insight Bağlantısı
+
+1. http://localhost:5540 adresini aç
+2. **"Add Redis Database"** butonuna tıkla
+3. Aşağıdaki bilgileri gir:
+   - **Host:** `redis` *(Docker servis adı — `localhost` değil)*
+   - **Port:** `6379`
+   - Şifre yok, boş bırak
+4. **"Add Redis Database"** ile kaydet
+
+> Redis Insight, Compose iç network'ünde çalışır. `localhost` yazılırsa kendi container'ını görür — Redis'e `redis` servis adıyla ulaşılır.
+
 ## 2. Veritabanı Migration
 
+### İlk Kurulum (SQL dosyası ile)
+
 ```bash
-# Migration dosyasını container'daki PostgreSQL'e uygula
+# Temel şemayı (TimescaleDB extension, enum, tablolar) uygula
 docker exec -i saydin-postgres psql -U saydin -d saydin \
   < src/Saydin.Services/infrastructure/postgres/migrations/001_initial.sql
 
@@ -39,6 +53,29 @@ docker exec -i saydin-postgres psql -U saydin -d saydin \
 docker exec saydin-postgres psql -U saydin -d saydin \
   -c "\dt" | grep -E "assets|price_points|users"
 ```
+
+### EF Core ile Yeni Migration Ekleme
+
+```bash
+cd src/Saydin.Services
+
+# Yeni migration oluştur (Saydin.Shared projesine, Saydin.Api startup projesi olarak)
+dotnet ef migrations add <MigrationAdı> \
+  --project src/Saydin.Shared \
+  --startup-project src/Saydin.Api
+
+# Veritabanını güncelle
+dotnet ef database update \
+  --project src/Saydin.Shared \
+  --startup-project src/Saydin.Api
+
+# Migration listesi
+dotnet ef migrations list \
+  --project src/Saydin.Shared \
+  --startup-project src/Saydin.Api
+```
+
+> **Not:** EF Core migrations için `Microsoft.EntityFrameworkCore.Design` paketi `Saydin.Api.csproj`'da mevcut.
 
 ## 3. Saydin.Api Çalıştırma
 

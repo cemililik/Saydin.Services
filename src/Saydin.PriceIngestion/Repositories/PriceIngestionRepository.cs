@@ -1,59 +1,38 @@
-using Dapper;
-using Npgsql;
+using Microsoft.EntityFrameworkCore;
+using Saydin.Shared.Data;
 using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Repositories;
 
-public sealed class PriceIngestionRepository(string connectionString) : IPriceIngestionRepository
+/// <summary>
+/// EF Core tabanlı ingestion repository.
+/// BackgroundService (singleton) içinden çağrıldığı için IDbContextFactory kullanır;
+/// her operasyon kendi kısa ömürlü DbContext'ini açar ve dispose eder.
+/// </summary>
+public sealed class PriceIngestionRepository(IDbContextFactory<SaydinDbContext> contextFactory)
+    : IPriceIngestionRepository
 {
-    static PriceIngestionRepository()
-    {
-        SqlMapper.AddTypeHandler(new DateOnlyTypeHandler());
-    }
-
     public async Task<IReadOnlyList<Asset>> GetActiveAssetsBySourceAsync(string source, CancellationToken ct)
     {
-        await using var conn = new NpgsqlConnection(connectionString);
-        await conn.OpenAsync(ct);
-
-        var assets = await conn.QueryAsync<Asset>(
-            """
-            SELECT
-                id           AS Id,
-                symbol       AS Symbol,
-                display_name AS DisplayName,
-                CASE category::text
-                    WHEN 'currency'       THEN 'Currency'
-                    WHEN 'precious_metal' THEN 'PreciousMetal'
-                    WHEN 'stock'          THEN 'Stock'
-                    WHEN 'crypto'         THEN 'Crypto'
-                END AS Category,
-                source       AS Source,
-                source_id    AS SourceId,
-                is_active    AS IsActive
-            FROM assets
-            WHERE source = @source
-              AND is_active = TRUE
-            """,
-            new { source });
-
-        return assets.AsList().AsReadOnly();
+        await using var context = await contextFactory.CreateDbContextAsync(ct);
+        return await context.Assets
+            .Where(a => a.Source == source && a.IsActive)
+            .ToListAsync(ct);
     }
 
     public async Task UpsertPricePointsAsync(IReadOnlyList<PricePoint> pricePoints, CancellationToken ct)
     {
         if (pricePoints.Count == 0) return;
 
-        await using var conn = new NpgsqlConnection(connectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var context = await contextFactory.CreateDbContextAsync(ct);
 
+        // ON CONFLICT ile idempotent UPSERT — EF Core raw SQL (parameterized, injection-safe)
         foreach (var point in pricePoints)
         {
-            await conn.ExecuteAsync(
-                """
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
                 INSERT INTO price_points (asset_id, price_date, close, open, high, low, volume)
-                VALUES (@AssetId, @PriceDate, @Close, @Open, @High, @Low, @Volume)
+                VALUES ({point.AssetId}, {point.PriceDate}, {point.Close}, {point.Open}, {point.High}, {point.Low}, {point.Volume})
                 ON CONFLICT (asset_id, price_date) DO UPDATE
                     SET close      = EXCLUDED.close,
                         open       = EXCLUDED.open,
@@ -61,35 +40,15 @@ public sealed class PriceIngestionRepository(string connectionString) : IPriceIn
                         low        = EXCLUDED.low,
                         updated_at = NOW()
                 """,
-                point,
-                tx);
+                ct);
         }
-
-        await tx.CommitAsync(ct);
     }
 
     public async Task<DateOnly?> GetLatestPriceDateAsync(Guid assetId, CancellationToken ct)
     {
-        await using var conn = new NpgsqlConnection(connectionString);
-        await conn.OpenAsync(ct);
-
-        var result = await conn.QueryFirstOrDefaultAsync<DateTime?>(
-            "SELECT MAX(price_date) FROM price_points WHERE asset_id = @assetId",
-            new { assetId });
-
-        return result.HasValue ? DateOnly.FromDateTime(result.Value) : null;
+        await using var context = await contextFactory.CreateDbContextAsync(ct);
+        return await context.PricePoints
+            .Where(pp => pp.AssetId == assetId)
+            .MaxAsync(pp => (DateOnly?)pp.PriceDate, ct);
     }
-}
-
-/// <summary>Dapper için DateOnly ↔ PostgreSQL date dönüştürücü.</summary>
-file sealed class DateOnlyTypeHandler : Dapper.SqlMapper.TypeHandler<DateOnly>
-{
-    public override void SetValue(System.Data.IDbDataParameter parameter, DateOnly value)
-    {
-        parameter.DbType = System.Data.DbType.Date;
-        parameter.Value  = value.ToDateTime(TimeOnly.MinValue);
-    }
-
-    public override DateOnly Parse(object value)
-        => DateOnly.FromDateTime(Convert.ToDateTime(value));
 }

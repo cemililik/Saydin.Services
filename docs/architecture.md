@@ -43,7 +43,7 @@ PostgreSQL + Redis
 
 - **Endpoints:** Route tanımları, request validation, response şekillendirme. İş mantığı yok.
 - **Services:** "Ya alsaydım" hesaplama motoru, cache yönetimi. Dış I/O doğrudan yok.
-- **Repositories:** SQL sorguları (Dapper). Sadece veri erişimi.
+- **Repositories:** Veri erişimi (Entity Framework Core LINQ). Sadece I/O, iş mantığı yok.
 
 ### Saydin.PriceIngestion — İç Katmanlar
 

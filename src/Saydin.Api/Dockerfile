@@ -17,6 +17,12 @@ RUN dotnet publish src/Saydin.Api/Saydin.Api.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
+# libgssapi-krb5-2: .NET runtime GSSAPI/Kerberos kütüphanesini yükler;
+# yoksa ilk Npgsql SCRAM-SHA-256 handshake bozulur.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Güvenlik: root olmayan kullanıcı
 RUN useradd -r -u 1001 -s /sbin/nologin appuser
 USER appuser

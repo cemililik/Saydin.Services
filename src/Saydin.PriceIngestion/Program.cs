@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -7,7 +8,9 @@ using Serilog.Sinks.OpenTelemetry;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
 using Saydin.PriceIngestion.Workers;
+using Saydin.Shared.Data;
 using Saydin.Shared.Diagnostics;
+using Saydin.Shared.Entities;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
@@ -66,13 +69,18 @@ try
         })
         .AddStandardResilienceHandler();   // Polly: retry + circuit-breaker + timeout
 
-    // ─── Adapters & Repositories ──────────────────────────────────────────────
-    var connectionString = builder.Configuration.GetConnectionString("Postgres")
+    // ─── EF Core ─────────────────────────────────────────────────────────────
+    var pgConnection = builder.Configuration.GetConnectionString("Postgres")
         ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
 
+    builder.Services.AddDbContextFactory<SaydinDbContext>(options =>
+        options.UseNpgsql(pgConnection, npgsql =>
+            npgsql.MapEnum<AssetCategory>("asset_category"))
+               .UseSnakeCaseNamingConvention());
+
+    // ─── Adapters & Repositories ──────────────────────────────────────────────
     builder.Services.AddSingleton<IExternalPriceAdapter, TcmbAdapter>();
-    builder.Services.AddSingleton<IPriceIngestionRepository>(
-        new PriceIngestionRepository(connectionString));
+    builder.Services.AddSingleton<IPriceIngestionRepository, PriceIngestionRepository>();
 
     // ─── Workers ─────────────────────────────────────────────────────────────
     builder.Services.AddSingleton<TcmbWorker>();
