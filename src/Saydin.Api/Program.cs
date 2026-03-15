@@ -147,7 +147,7 @@ try
     // ─── Repositories & Services ─────────────────────────────────────────────
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
-    // builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();  ← Faz 1
+    builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
 
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();
@@ -165,7 +165,7 @@ try
     app.MapPrometheusScrapingEndpoint();
     app.MapHealthChecks("/health");
 
-    // app.MapWhatIfEndpoints();  ← Faz 1: WhatIfCalculator implement edilince açılacak
+    app.MapWhatIfEndpoints();
     app.MapAssetsEndpoints();
 
     Log.Information("Saydin.Api başlatılıyor — ortam: {Environment}", app.Environment.EnvironmentName);

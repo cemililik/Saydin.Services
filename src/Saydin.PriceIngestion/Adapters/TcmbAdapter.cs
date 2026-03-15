@@ -50,6 +50,11 @@ public sealed class TcmbAdapter(
         DateOnly date,
         CancellationToken ct)
     {
+        // TCMB series kodu "TP.DK.USD.A" → XML'deki CurrencyCode "USD"
+        var xmlCurrencyCode = currencyCode.Contains('.')
+            ? currencyCode.Split('.')[2]
+            : currencyCode;
+
         // URL formatı: YYYYMM/DDMMYYYY.xml (base address ile birleşir)
         var url = $"{date:yyyyMM}/{date:ddMMyyyy}.xml";
 
@@ -67,7 +72,7 @@ public sealed class TcmbAdapter(
             response.EnsureSuccessStatusCode();
 
             var xml = await response.Content.ReadAsStringAsync(ct);
-            return TcmbMapper.Map(xml, assetId, currencyCode, date);
+            return TcmbMapper.Map(xml, assetId, xmlCurrencyCode, date);
         }
         catch (OperationCanceledException)
         {

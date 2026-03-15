@@ -34,11 +34,10 @@ public sealed class PriceIngestionRepository(IDbContextFactory<SaydinDbContext> 
                 INSERT INTO price_points (asset_id, price_date, close, open, high, low, volume)
                 VALUES ({point.AssetId}, {point.PriceDate}, {point.Close}, {point.Open}, {point.High}, {point.Low}, {point.Volume})
                 ON CONFLICT (asset_id, price_date) DO UPDATE
-                    SET close      = EXCLUDED.close,
-                        open       = EXCLUDED.open,
-                        high       = EXCLUDED.high,
-                        low        = EXCLUDED.low,
-                        updated_at = NOW()
+                    SET close = EXCLUDED.close,
+                        open  = EXCLUDED.open,
+                        high  = EXCLUDED.high,
+                        low   = EXCLUDED.low
                 """,
                 ct);
         }
