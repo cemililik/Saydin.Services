@@ -7,7 +7,10 @@ using Serilog.Events;
 using Serilog.Sinks.OpenTelemetry;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Exceptions;
+using Saydin.Api.Repositories;
+using Saydin.Api.Services;
 using Saydin.Shared.Diagnostics;
+using StackExchange.Redis;
 
 // ─── Bootstrap Logger ────────────────────────────────────────────────────────
 Log.Logger = new LoggerConfiguration()
@@ -101,9 +104,20 @@ try
     // ─── OpenAPI ─────────────────────────────────────────────────────────────
     builder.Services.AddOpenApi();
 
-    // ─── Application Services (implement & register sonraki adımda) ──────────
-    // builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
-    // builder.Services.AddScoped<IAssetService, AssetService>();
+    // ─── Data Access ─────────────────────────────────────────────────────────
+    var pgConnection = builder.Configuration.GetConnectionString("Postgres")
+        ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
+
+    var redisConnection = builder.Configuration.GetConnectionString("Redis")
+        ?? throw new InvalidOperationException("ConnectionStrings:Redis yapılandırılmamış.");
+
+    builder.Services.AddSingleton<IPriceRepository>(new PriceRepository(pgConnection));
+    builder.Services.AddSingleton<IConnectionMultiplexer>(
+        ConnectionMultiplexer.Connect(redisConnection));
+
+    // ─── Application Services ────────────────────────────────────────────────
+    builder.Services.AddSingleton<IAssetService, AssetService>();
+    // builder.Services.AddSingleton<IWhatIfCalculator, WhatIfCalculator>();  ← Faz 1
 
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();
