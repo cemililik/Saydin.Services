@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: .NET SDK kur
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Bağımlılıkları yükle
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Testleri çalıştır
+        run: dotnet test --no-build --configuration Release --verbosity normal
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Saydin.Api Docker image build
+        run: docker build -f src/Saydin.Api/Dockerfile -t saydin-api:ci .
+
+      - name: Saydin.PriceIngestion Docker image build
+        run: docker build -f src/Saydin.PriceIngestion/Dockerfile -t saydin-price-ingestion:ci .
