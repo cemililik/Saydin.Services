@@ -67,7 +67,37 @@ try
             client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Saydin/1.0 (+https://saydin.app)");
         })
-        .AddStandardResilienceHandler();   // Polly: retry + circuit-breaker + timeout
+        .AddStandardResilienceHandler();
+
+    builder.Services
+        .AddHttpClient("coingecko", client =>
+        {
+            client.BaseAddress = new Uri("https://api.coingecko.com/api/v3/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            var apiKey = builder.Configuration["ExternalApis:CoinGecko:ApiKey"];
+            if (!string.IsNullOrWhiteSpace(apiKey))
+                client.DefaultRequestHeaders.Add("x-cg-demo-api-key", apiKey);
+        })
+        .AddStandardResilienceHandler();
+
+    builder.Services
+        .AddHttpClient("goldapi", client =>
+        {
+            client.BaseAddress = new Uri("https://www.goldapi.io/api/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            var apiKey = builder.Configuration["ExternalApis:GoldApi:ApiKey"];
+            if (!string.IsNullOrWhiteSpace(apiKey))
+                client.DefaultRequestHeaders.Add("x-access-token", apiKey);
+        })
+        .AddStandardResilienceHandler();
+
+    builder.Services
+        .AddHttpClient("twelvedata", client =>
+        {
+            client.BaseAddress = new Uri("https://api.twelvedata.com/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+        })
+        .AddStandardResilienceHandler();
 
     // ─── EF Core ─────────────────────────────────────────────────────────────
     var pgConnection = builder.Configuration.GetConnectionString("Postgres")
@@ -79,11 +109,17 @@ try
                .UseSnakeCaseNamingConvention());
 
     // ─── Adapters & Repositories ──────────────────────────────────────────────
-    builder.Services.AddSingleton<IExternalPriceAdapter, TcmbAdapter>();
     builder.Services.AddSingleton<IPriceIngestionRepository, PriceIngestionRepository>();
+    builder.Services.AddSingleton<TcmbAdapter>();
+    builder.Services.AddSingleton<CoinGeckoAdapter>();
+    builder.Services.AddSingleton<GoldApiAdapter>();
+    builder.Services.AddSingleton<TwelveDataAdapter>();
 
     // ─── Workers ─────────────────────────────────────────────────────────────
     builder.Services.AddSingleton<TcmbWorker>();
+    builder.Services.AddSingleton<CoinGeckoWorker>();
+    builder.Services.AddSingleton<GoldApiWorker>();
+    builder.Services.AddSingleton<TwelveDataWorker>();
     builder.Services.AddHostedService<IngestionOrchestrator>();
 
     var host = builder.Build();

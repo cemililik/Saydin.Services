@@ -6,19 +6,20 @@ namespace Saydin.PriceIngestion.Workers;
 /// </summary>
 public sealed class IngestionOrchestrator(
     TcmbWorker tcmbWorker,
+    CoinGeckoWorker coinGeckoWorker,
+    GoldApiWorker goldApiWorker,
+    TwelveDataWorker twelveDataWorker,
     ILogger<IngestionOrchestrator> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("IngestionOrchestrator başlatıldı");
 
-        // TODO Faz 1: CoinGeckoWorker, GoldApiWorker, TwelveDataWorker paralel olarak eklenir
-        // await Task.WhenAll(
-        //     tcmbWorker.RunAsync(stoppingToken),
-        //     coinGeckoWorker.RunAsync(stoppingToken),
-        //     ...);
-
-        await tcmbWorker.RunAsync(stoppingToken);
+        await Task.WhenAll(
+            tcmbWorker.RunAsync(stoppingToken),
+            coinGeckoWorker.RunAsync(stoppingToken),
+            goldApiWorker.RunAsync(stoppingToken),
+            twelveDataWorker.RunAsync(stoppingToken));
     }
 
     public override Task StopAsync(CancellationToken stoppingToken)
