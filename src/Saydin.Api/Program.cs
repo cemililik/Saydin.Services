@@ -109,7 +109,8 @@ try
 
     // ─── EF Core ─────────────────────────────────────────────────────────────
     builder.Services.AddDbContext<SaydinDbContext>(options =>
-        options.UseNpgsql(npgsqlDataSource)
+        options.UseNpgsql(npgsqlDataSource, npgsql =>
+            npgsql.MapEnum<AssetCategory>("asset_category"))
                .UseSnakeCaseNamingConvention());
 
     // ─── Health Checks ───────────────────────────────────────────────────────
@@ -129,11 +130,19 @@ try
             tags: ["cache"]);
 
     // ─── Redis ───────────────────────────────────────────────────────────────
+    // AbortOnConnectFail=false: Redis startup'ta down olsa bile API ayağa kalkar.
+    // Cache-aside pattern gereği Redis yoksa DB'ye düşülür; health check Unhealthy raporlar.
     var redisConnection = builder.Configuration.GetConnectionString("Redis")
         ?? throw new InvalidOperationException("ConnectionStrings:Redis yapılandırılmamış.");
 
+    var redisOptions = ConfigurationOptions.Parse(redisConnection);
+    redisOptions.AbortOnConnectFail = false;
+
     builder.Services.AddSingleton<IConnectionMultiplexer>(
-        ConnectionMultiplexer.Connect(redisConnection));
+        ConnectionMultiplexer.Connect(redisOptions));
+
+    // ─── Response Compression ────────────────────────────────────────────────
+    builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
 
     // ─── Repositories & Services ─────────────────────────────────────────────
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
@@ -143,6 +152,7 @@ try
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();
 
+    app.UseResponseCompression();
     app.UseExceptionHandler();
     app.UseSerilogRequestLogging();
 
