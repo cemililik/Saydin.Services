@@ -1,0 +1,150 @@
+services:
+
+  # ============================================================
+  # VERİTABANI
+  # ============================================================
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: saydin-postgres
+    environment:
+      POSTGRES_DB: saydin
+      POSTGRES_USER: saydin
+      POSTGRES_PASSWORD: saydin_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # initdb.d: yalnızca ilk başlatmada çalışır (volume boşsa)
+      - ./infrastructure/postgres/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U saydin -d saydin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: saydin-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@saydin.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./infrastructure/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # CACHE
+  # ============================================================
+
+  redis:
+    image: redis:alpine
+    container_name: saydin-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: saydin-redis-insight
+    ports:
+      - "5540:5540"
+    volumes:
+      - redis_insight_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================
+  # OBSERVABİLİTY — Loglar + Trace + Metrik
+  # ============================================================
+
+  # Aspire Dashboard: tek arayüzde log, trace ve metrik görüntüleme.
+  # OTLP endpoint: localhost:4317 (gRPC)
+  # Dashboard UI:  http://localhost:18888
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    container_name: saydin-aspire-dashboard
+    environment:
+      DASHBOARD__FRONTEND__AUTHMODE: Unsecured
+      DASHBOARD__OTLP__AUTHMODE: Unsecured
+    ports:
+      - "18888:18888"   # Dashboard UI
+      - "4317:18889"    # OTLP/gRPC → .NET servisler buraya export eder
+    restart: unless-stopped
+
+  # Prometheus: metrik kazıma ve saklama.
+  # UI: http://localhost:9090
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: saydin-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  # ============================================================
+  # BACKEND SERVİSLER
+  # ============================================================
+
+  saydin-api:
+    build:
+      context: .
+      dockerfile: src/Saydin.Api/Dockerfile
+    container_name: saydin-api
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres;Database=saydin;Username=saydin;Password=saydin_dev"
+      ConnectionStrings__Redis: "redis:6379"
+      Otlp__Endpoint: "http://aspire-dashboard:18889"
+    ports:
+      - "5080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  saydin-price-ingestion:
+    build:
+      context: .
+      dockerfile: src/Saydin.PriceIngestion/Dockerfile
+    container_name: saydin-price-ingestion
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres;Database=saydin;Username=saydin;Password=saydin_dev"
+      Otlp__Endpoint: "http://aspire-dashboard:18889"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+  redis_data:
+  redis_insight_data:
+  prometheus_data:
