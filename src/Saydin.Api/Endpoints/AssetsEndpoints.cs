@@ -7,8 +7,7 @@ public static class AssetsEndpoints
     public static IEndpointRouteBuilder MapAssetsEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/assets")
-            .WithTags("Assets")
-            .WithOpenApi();
+            .WithTags("Assets");
 
         group.MapGet("/", GetAllAsync)
             .WithName("GetAssets")

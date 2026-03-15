@@ -6,6 +6,11 @@ namespace Saydin.PriceIngestion.Repositories;
 
 public sealed class PriceIngestionRepository(string connectionString) : IPriceIngestionRepository
 {
+    static PriceIngestionRepository()
+    {
+        SqlMapper.AddTypeHandler(new DateOnlyTypeHandler());
+    }
+
     public async Task<IReadOnlyList<Asset>> GetActiveAssetsBySourceAsync(string source, CancellationToken ct)
     {
         await using var conn = new NpgsqlConnection(connectionString);
@@ -17,11 +22,14 @@ public sealed class PriceIngestionRepository(string connectionString) : IPriceIn
                 id           AS Id,
                 symbol       AS Symbol,
                 display_name AS DisplayName,
-                category::text AS Category,
+                CASE category::text
+                    WHEN 'currency'       THEN 'Currency'
+                    WHEN 'precious_metal' THEN 'PreciousMetal'
+                    WHEN 'stock'          THEN 'Stock'
+                    WHEN 'crypto'         THEN 'Crypto'
+                END AS Category,
                 source       AS Source,
                 source_id    AS SourceId,
-                data_available_from AS DataAvailableFrom,
-                data_available_to   AS DataAvailableTo,
                 is_active    AS IsActive
             FROM assets
             WHERE source = @source
@@ -71,4 +79,17 @@ public sealed class PriceIngestionRepository(string connectionString) : IPriceIn
 
         return result.HasValue ? DateOnly.FromDateTime(result.Value) : null;
     }
+}
+
+/// <summary>Dapper için DateOnly ↔ PostgreSQL date dönüştürücü.</summary>
+file sealed class DateOnlyTypeHandler : Dapper.SqlMapper.TypeHandler<DateOnly>
+{
+    public override void SetValue(System.Data.IDbDataParameter parameter, DateOnly value)
+    {
+        parameter.DbType = System.Data.DbType.Date;
+        parameter.Value  = value.ToDateTime(TimeOnly.MinValue);
+    }
+
+    public override DateOnly Parse(object value)
+        => DateOnly.FromDateTime(Convert.ToDateTime(value));
 }

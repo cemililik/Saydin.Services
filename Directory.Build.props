@@ -9,11 +9,4 @@
     <RootNamespace>Saydin</RootNamespace>
   </PropertyGroup>
 
-  <!-- Ortak analiz araçları -->
-  <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.NetAnalyzers" Version="*">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
-    </PackageReference>
-  </ItemGroup>
 </Project>

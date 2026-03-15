@@ -8,8 +8,7 @@ public static class WhatIfEndpoints
     public static IEndpointRouteBuilder MapWhatIfEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/what-if")
-            .WithTags("WhatIf")
-            .WithOpenApi();
+            .WithTags("WhatIf");
 
         group.MapPost("/calculate", CalculateAsync)
             .WithName("CalculateWhatIf")

@@ -10,13 +10,12 @@ COPY src/Saydin.Shared/ src/Saydin.Shared/
 COPY src/Saydin.PriceIngestion/ src/Saydin.PriceIngestion/
 RUN dotnet publish src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj \
     -c Release \
-    -o /app/publish \
-    --no-restore
+    -o /app/publish
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
 WORKDIR /app
 
-RUN adduser --disabled-password --gecos "" appuser
+RUN useradd -r -u 1001 -s /sbin/nologin appuser
 USER appuser
 
 COPY --from=build /app/publish .

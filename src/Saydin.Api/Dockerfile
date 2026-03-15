@@ -12,14 +12,13 @@ COPY src/Saydin.Shared/ src/Saydin.Shared/
 COPY src/Saydin.Api/ src/Saydin.Api/
 RUN dotnet publish src/Saydin.Api/Saydin.Api.csproj \
     -c Release \
-    -o /app/publish \
-    --no-restore
+    -o /app/publish
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 # Güvenlik: root olmayan kullanıcı
-RUN adduser --disabled-password --gecos "" appuser
+RUN useradd -r -u 1001 -s /sbin/nologin appuser
 USER appuser
 
 COPY --from=build /app/publish .

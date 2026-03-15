@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Worker">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-Saydin.PriceIngestion-018ec718-f94c-4c3b-8a70-61b9ca660c17</UserSecretsId>
@@ -16,6 +16,7 @@
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="*" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="*" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="*" />
+    <PackageReference Include="Serilog.Enrichers.Environment" Version="*" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="*" />
     <PackageReference Include="Serilog.Sinks.Console" Version="*" />
     <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="*" />

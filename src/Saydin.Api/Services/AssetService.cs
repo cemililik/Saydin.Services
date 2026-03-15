@@ -73,7 +73,7 @@ public sealed class AssetService(
             if (!value.HasValue) return null;
 
             logger.LogDebug("Cache hit: {Key}", key);
-            return JsonSerializer.Deserialize<T>(value!, JsonOptions);
+            return JsonSerializer.Deserialize<T>(value.ToString(), JsonOptions);
         }
         catch (Exception ex)
         {

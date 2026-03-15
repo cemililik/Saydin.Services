@@ -104,6 +104,9 @@ try
     // ─── OpenAPI ─────────────────────────────────────────────────────────────
     builder.Services.AddOpenApi();
 
+    // ─── Dapper TypeHandlers (global, uygulama başlangıcında) ────────────────
+    PriceRepository.RegisterTypeHandlers();
+
     // ─── Data Access ─────────────────────────────────────────────────────────
     var pgConnection = builder.Configuration.GetConnectionString("Postgres")
         ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
@@ -131,7 +134,7 @@ try
     app.MapPrometheusScrapingEndpoint();
     app.MapHealthChecks("/health");
 
-    app.MapWhatIfEndpoints();
+    // app.MapWhatIfEndpoints();  ← Faz 1: WhatIfCalculator implement edilince açılacak
     app.MapAssetsEndpoints();
 
     Log.Information("Saydin.Api başlatılıyor — ortam: {Environment}", app.Environment.EnvironmentName);

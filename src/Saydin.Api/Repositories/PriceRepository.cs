@@ -7,10 +7,11 @@ namespace Saydin.Api.Repositories;
 
 public sealed class PriceRepository(string connectionString) : IPriceRepository
 {
-    // PostgreSQL enum (snake_case) → C# enum (PascalCase)
-    static PriceRepository()
+    /// <summary>Program.cs'den çağrılır — Dapper global TypeHandler'larını kaydeder.</summary>
+    public static void RegisterTypeHandlers()
     {
         SqlMapper.AddTypeHandler(new AssetCategoryTypeHandler());
+        SqlMapper.AddTypeHandler(new DateOnlyTypeHandler());
     }
 
     public async Task<IReadOnlyList<Asset>> GetAllActiveAssetsAsync(CancellationToken ct)
@@ -21,15 +22,18 @@ public sealed class PriceRepository(string connectionString) : IPriceRepository
         var assets = await conn.QueryAsync<Asset>(
             """
             SELECT
-                id                  AS Id,
-                symbol              AS Symbol,
-                display_name        AS DisplayName,
-                category            AS Category,
-                source              AS Source,
-                source_id           AS SourceId,
-                data_available_from AS DataAvailableFrom,
-                data_available_to   AS DataAvailableTo,
-                is_active           AS IsActive
+                id           AS Id,
+                symbol       AS Symbol,
+                display_name AS DisplayName,
+                CASE category::text
+                    WHEN 'currency'       THEN 'Currency'
+                    WHEN 'precious_metal' THEN 'PreciousMetal'
+                    WHEN 'stock'          THEN 'Stock'
+                    WHEN 'crypto'         THEN 'Crypto'
+                END AS Category,
+                source       AS Source,
+                source_id    AS SourceId,
+                is_active    AS IsActive
             FROM assets
             WHERE is_active = TRUE
             ORDER BY category, symbol
@@ -89,11 +93,28 @@ public sealed class PriceRepository(string connectionString) : IPriceRepository
     }
 }
 
+/// <summary>Dapper için DateOnly ↔ PostgreSQL date dönüştürücü.</summary>
+internal sealed class DateOnlyTypeHandler : SqlMapper.TypeHandler<DateOnly>
+{
+    public override void SetValue(IDbDataParameter parameter, DateOnly value)
+    {
+        parameter.DbType = System.Data.DbType.Date;
+        parameter.Value  = value.ToDateTime(TimeOnly.MinValue);
+    }
+
+    public override DateOnly Parse(object value) => value switch
+    {
+        DateOnly d  => d,
+        DateTime dt => DateOnly.FromDateTime(dt),
+        _           => DateOnly.FromDateTime(Convert.ToDateTime(value))
+    };
+}
+
 /// <summary>
 /// Dapper için PostgreSQL asset_category enum → C# AssetCategory dönüştürücü.
 /// DB değerleri snake_case ('precious_metal'), C# değerleri PascalCase ('PreciousMetal').
 /// </summary>
-file sealed class AssetCategoryTypeHandler : SqlMapper.TypeHandler<AssetCategory>
+internal sealed class AssetCategoryTypeHandler : SqlMapper.TypeHandler<AssetCategory>
 {
     public override void SetValue(IDbDataParameter parameter, AssetCategory value)
         => parameter.Value = value switch
