@@ -13,7 +13,7 @@
 ## 1. Altyapıyı Başlatma
 
 ```bash
-# Proje kökünden (Saydın/)
+# docker-compose.yml bu dizinde (src/Saydin.Services/) bulunur
 cp .env.example .env
 # .env dosyasını düzenle — API key'leri doldur (CoinGecko, GoldAPI, Twelve Data)
 
@@ -27,6 +27,8 @@ Başlatılan servisler:
 - `saydin-redis-insight` → http://localhost:5540 *(Redis Insight — bkz. bağlantı adımları aşağıda)*
 - `aspire-dashboard` → http://localhost:18888 (traces, logs, metrics)
 - `prometheus` → http://localhost:9090
+- `saydin-api` → http://localhost:5080
+- `saydin-price-ingestion` → (port expose edilmez, arka planda çalışır)
 
 ### Redis Insight Bağlantısı
 
@@ -84,7 +86,7 @@ dotnet ef migrations list \
 ```bash
 cd src/Saydin.Services
 docker build -f src/Saydin.Api/Dockerfile -t saydin-api .
-docker run -p 5000:8080 \
+docker run -p 5080:8080 \
   -e ConnectionStrings__Postgres="Host=host.docker.internal;Database=saydin;Username=saydin;Password=saydin_pass" \
   -e ConnectionStrings__Redis="host.docker.internal:6379" \
   -e Otlp__Endpoint="http://host.docker.internal:4317" \
@@ -105,7 +107,8 @@ dotnet user-secrets set "ConnectionStrings:Redis" "localhost:6379" \
   --project src/Saydin.Api
 
 dotnet run --project src/Saydin.Api
-# → http://localhost:5000
+# → http://localhost:5080
+# → Scalar API dokümantasyonu: http://localhost:5080/scalar/v1 (Development modunda)
 ```
 
 ## 4. Saydin.PriceIngestion Çalıştırma
@@ -116,9 +119,18 @@ dotnet user-secrets init --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ConnectionStrings:Postgres" \
   "Host=localhost;Database=saydin;Username=saydin;Password=saydin_pass" \
   --project src/Saydin.PriceIngestion
+dotnet user-secrets set "ExternalApis:CoinGecko:ApiKey" "<your-key>" \
+  --project src/Saydin.PriceIngestion
+dotnet user-secrets set "ExternalApis:GoldApi:ApiKey" "<your-key>" \
+  --project src/Saydin.PriceIngestion
+dotnet user-secrets set "ExternalApis:TwelveData:ApiKey" "<your-key>" \
+  --project src/Saydin.PriceIngestion
+# TCMB için API key gerekmez
 
 dotnet run --project src/Saydin.PriceIngestion
 ```
+
+> **Not:** API key eksikse ilgili adapter graceful skip yapar (servisi durdurmaz). CoinGecko key olmadan 403 alınır ve adapter atlanır.
 
 ## 5. Testleri Çalıştırma
 
@@ -144,8 +156,8 @@ dotnet restore
 # Build
 dotnet build
 
-# Tüm container'ları durdur
-docker-compose down  # (proje kökünden)
+# Tüm container'ları durdur (src/Saydin.Services/ dizininden)
+docker-compose down
 
 # PostgreSQL'e bağlan
 docker exec -it saydin-postgres psql -U saydin -d saydin
@@ -161,19 +173,19 @@ docker logs -f saydin-api 2>&1 | jq .
 
 ```bash
 # Sağlık
-curl http://localhost:5000/health | jq
+curl http://localhost:5080/health | jq
 
 # Asset listesi
-curl http://localhost:5000/v1/assets | jq
+curl http://localhost:5080/v1/assets | jq
 
 # Tek gün fiyat
-curl "http://localhost:5000/v1/assets/USDTRY/price/2020-01-01" | jq
+curl "http://localhost:5080/v1/assets/USDTRY/price/2020-01-01" | jq
 
 # Fiyat aralığı
-curl "http://localhost:5000/v1/assets/USDTRY/price-range?from=2020-01-01&to=2020-12-31" | jq
+curl "http://localhost:5080/v1/assets/USDTRY/price-range?from=2020-01-01&to=2020-12-31" | jq
 
 # "Ya alsaydım" hesaplama
-curl -X POST http://localhost:5000/v1/what-if/calculate \
+curl -X POST http://localhost:5080/v1/what-if/calculate \
   -H "Content-Type: application/json" \
   -H "X-Device-ID: dev-test-001" \
   -d '{
@@ -185,7 +197,7 @@ curl -X POST http://localhost:5000/v1/what-if/calculate \
   }' | jq
 
 # Prometheus metrikleri
-curl http://localhost:5000/metrics
+curl http://localhost:5080/metrics
 ```
 
 ## 8. Ortam Değişkenleri
@@ -195,13 +207,25 @@ curl http://localhost:5000/metrics
 | `ConnectionStrings__Postgres` | PostgreSQL bağlantı dizesi | `Host=localhost;...` |
 | `ConnectionStrings__Redis` | Redis bağlantı dizesi | `localhost:6379` |
 | `Otlp__Endpoint` | OTLP collector endpoint | `http://localhost:4317` |
-| `ExternalApi__CoinGecko__ApiKey` | CoinGecko API anahtarı | (freemium: opsiyonel) |
-| `ExternalApi__GoldApi__ApiKey` | GoldAPI.io API anahtarı | |
-| `ExternalApi__TwelveData__ApiKey` | Twelve Data API anahtarı | |
+| `ExternalApis__CoinGecko__ApiKey` | CoinGecko API anahtarı | (key yoksa graceful skip) |
+| `ExternalApis__GoldApi__ApiKey` | GoldAPI.io API anahtarı | (key yoksa graceful skip) |
+| `ExternalApis__TwelveData__ApiKey` | Twelve Data API anahtarı | (key yoksa graceful skip) |
 
 > **Güvenlik:** API key'leri asla `appsettings.json`'a yazmayın. Geliştirmede `dotnet user-secrets`, production'da environment variable kullanın.
 
-## 9. Yaygın Sorunlar
+## 9. CI/CD — GitHub Actions
+
+Her `push` ve `pull_request`'te otomatik çalışır:
+
+1. **Build** — `dotnet build`
+2. **Test** — `dotnet test`
+3. **Docker Build** — `saydin-api` ve `saydin-price-ingestion` image'larını oluşturur
+
+CI pipeline `.github/workflows/` dizininde tanımlıdır.
+
+---
+
+## 10. Yaygın Sorunlar
 
 ### "Connection refused" — PostgreSQL
 
