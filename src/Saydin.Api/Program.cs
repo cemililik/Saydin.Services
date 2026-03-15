@@ -8,6 +8,7 @@ using OpenTelemetry.Trace;
 using Serilog;
 using Serilog.Events;
 using Serilog.Sinks.OpenTelemetry;
+using Scalar.AspNetCore;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Exceptions;
 using Saydin.Api.Repositories;
@@ -146,7 +147,10 @@ try
     app.UseSerilogRequestLogging();
 
     if (app.Environment.IsDevelopment())
+    {
         app.MapOpenApi();
+        app.MapScalarApiReference();
+    }
 
     app.MapPrometheusScrapingEndpoint();
     app.MapHealthChecks("/health");

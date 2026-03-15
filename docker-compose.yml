@@ -117,6 +117,7 @@ services:
       dockerfile: src/Saydin.Api/Dockerfile
     container_name: saydin-api
     environment:
+      ASPNETCORE_ENVIRONMENT: Development
       ConnectionStrings__Postgres: "Host=postgres;Database=saydin;Username=saydin;Password=saydin_dev"
       ConnectionStrings__Redis: "redis:6379"
       Otlp__Endpoint: "http://aspire-dashboard:18889"
