@@ -93,6 +93,9 @@ try
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();
     builder.Services.AddExceptionHandler<PriceNotFoundExceptionHandler>();
+    builder.Services.AddExceptionHandler<AssetNotFoundExceptionHandler>();
+    builder.Services.AddExceptionHandler<ScenarioNotFoundExceptionHandler>();
+    builder.Services.AddExceptionHandler<ScenarioLimitExceededExceptionHandler>();
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
     // ─── OpenAPI ─────────────────────────────────────────────────────────────
@@ -148,6 +151,8 @@ try
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
     builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
+    builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
+    builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
 
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();
@@ -167,6 +172,7 @@ try
 
     app.MapWhatIfEndpoints();
     app.MapAssetsEndpoints();
+    app.MapScenariosEndpoints();
 
     Log.Information("Saydin.Api başlatılıyor — ortam: {Environment}", app.Environment.EnvironmentName);
     await app.RunAsync();

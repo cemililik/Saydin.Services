@@ -7,6 +7,8 @@ public sealed class SaydinDbContext(DbContextOptions<SaydinDbContext> options) :
 {
     public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<PricePoint> PricePoints => Set<PricePoint>();
+    public DbSet<User> Users => Set<User>();
+    public DbSet<SavedScenario> SavedScenarios => Set<SavedScenario>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

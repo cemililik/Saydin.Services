@@ -1,0 +1,18 @@
+rule_settings:
+  enable:
+    - default
+
+  disable:
+    # Minimal API pattern — controller önermelerini kapat
+    - add-missing-default-ctor
+
+github:
+  labels:
+    - sourcery
+
+  ignore:
+    - "**/*.Designer.cs"
+    - "**/obj/**"
+    - "**/bin/**"
+    - "**/migrations/**"
+    - "docs/**"

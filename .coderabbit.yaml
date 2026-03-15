@@ -1,0 +1,52 @@
+language: "en"
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - master
+
+  path_filters:
+    - "!**/obj/**"
+    - "!**/bin/**"
+    - "!**/publish/**"
+    - "!**/*.Designer.cs"
+    - "!**/migrations/**"
+    - "!docs/**"
+
+  path_instructions:
+    - path: "src/Saydin.Api/**"
+      instructions: |
+        Bu proje .NET 10 Minimal API kullanır, Controller class YASAKTIR.
+        Tüm finansal değerler decimal tipinde olmalı, float/double YASAK.
+        Endpoint handler'lar doğrudan repository'e erişemez, Service katmanını kullanmalı.
+        DTO'lar record type olmalı.
+        Log mesajlarında string interpolation değil parametreli mesaj kullanılmalı.
+        API key'ler appsettings.json'a yazılmamalı.
+
+    - path: "src/Saydin.PriceIngestion/**"
+      instructions: |
+        Bu servis hiçbir HTTP endpoint expose etmez.
+        Dış API çağrıları try/catch ile sarılmalı, exception sessizce yutulmamalı.
+        Tüm finansal değerler decimal/NUMERIC, float/double YASAK.
+        rate limit ve circuit breaker kontrolü yapılmalı.
+
+    - path: "src/Saydin.Shared/**"
+      instructions: |
+        Bu kütüphane hem Api hem PriceIngestion tarafından kullanılır.
+        Tek yönlü bağımlılık: servisler Shared'e bağımlı, Shared servislere bağımlı değil.
+
+    - path: "tests/**"
+      instructions: |
+        Test adlandırma: MethodName_Scenario_ExpectedResult.
+        Veritabanı testlerinde mock kullanılmaz, gerçek PostgreSQL kullanılır.
+        Her public service methodu için unit test zorunlu.
+
+chat:
+  auto_reply: true
