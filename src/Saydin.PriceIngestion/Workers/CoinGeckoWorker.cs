@@ -9,7 +9,9 @@ public sealed class CoinGeckoWorker(
     ILogger<CoinGeckoWorker> logger)
     : BaseAssetWorker(adapter, repository, logger)
 {
-    protected override DateOnly BackfillStartDate => new(2017, 1, 1);
+    // MVP: son 2 yıl. Demo key yalnızca ~365 güne erişim sağlıyor.
+    protected override DateOnly BackfillStartDate =>
+        DateOnly.FromDateTime(DateTime.UtcNow.AddYears(-2));
     protected override int ChunkDays => 365;
     protected override TimeOnly DailyRunUtcTime => new(2, 0, 0);
 }

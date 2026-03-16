@@ -16,6 +16,11 @@ public abstract class BaseAssetWorker(
     protected abstract int ChunkDays { get; }
     protected abstract TimeOnly DailyRunUtcTime { get; }
 
+    /// <summary>
+    /// Chunk'lar arası bekleme süresi. Rate-limit'i olan API'ler override eder.
+    /// </summary>
+    protected virtual TimeSpan ChunkDelay => TimeSpan.Zero;
+
     public async Task RunAsync(CancellationToken ct)
     {
         await BackfillAsync(ct);
@@ -45,7 +50,8 @@ public abstract class BaseAssetWorker(
         foreach (var asset in assets)
         {
             var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
-            var from = latestDate?.AddDays(1) ?? BackfillStartDate;
+            var effectiveStart = BackfillStartDate;
+        var from = latestDate?.AddDays(1) ?? effectiveStart;
             var to = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-1));
 
             if (from > to)
@@ -65,6 +71,9 @@ public abstract class BaseAssetWorker(
 
                 await FetchAndUpsertAsync(asset, chunkFrom, chunkTo, ct);
                 chunkFrom = chunkTo.AddDays(1);
+
+                if (ChunkDelay > TimeSpan.Zero && chunkFrom <= to)
+                    await Task.Delay(ChunkDelay, ct);
             }
         }
     }

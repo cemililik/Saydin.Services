@@ -121,7 +121,7 @@ dotnet user-secrets set "ConnectionStrings:Postgres" \
   --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ExternalApis:CoinGecko:ApiKey" "<your-key>" \
   --project src/Saydin.PriceIngestion
-dotnet user-secrets set "ExternalApis:GoldApi:ApiKey" "<your-key>" \
+dotnet user-secrets set "ExternalApis:OpenExchangeRates:AppId" "<your-app-id>" \
   --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ExternalApis:TwelveData:ApiKey" "<your-key>" \
   --project src/Saydin.PriceIngestion
@@ -130,7 +130,7 @@ dotnet user-secrets set "ExternalApis:TwelveData:ApiKey" "<your-key>" \
 dotnet run --project src/Saydin.PriceIngestion
 ```
 
-> **Not:** API key eksikse ilgili adapter graceful skip yapar (servisi durdurmaz). CoinGecko key olmadan 403 alınır ve adapter atlanır.
+> **Not:** API key eksikse ilgili adapter graceful skip yapar (servisi durdurmaz). CoinGecko key olmadan 403 alınır ve adapter atlanır. OpenExchangeRates ücretsiz planda aylık 1000 istek sınırı vardır.
 
 ## 5. Testleri Çalıştırma
 
@@ -208,7 +208,7 @@ curl http://localhost:5080/metrics
 | `ConnectionStrings__Redis` | Redis bağlantı dizesi | `localhost:6379` |
 | `Otlp__Endpoint` | OTLP collector endpoint | `http://localhost:4317` |
 | `ExternalApis__CoinGecko__ApiKey` | CoinGecko API anahtarı | (key yoksa graceful skip) |
-| `ExternalApis__GoldApi__ApiKey` | GoldAPI.io API anahtarı | (key yoksa graceful skip) |
+| `ExternalApis__OpenExchangeRates__AppId` | Open Exchange Rates App ID | (key yoksa graceful skip) |
 | `ExternalApis__TwelveData__ApiKey` | Twelve Data API anahtarı | (key yoksa graceful skip) |
 
 > **Güvenlik:** API key'leri asla `appsettings.json`'a yazmayın. Geliştirmede `dotnet user-secrets`, production'da environment variable kullanın.

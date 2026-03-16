@@ -5,6 +5,7 @@ namespace Saydin.Api.Repositories;
 public interface IPriceRepository
 {
     Task<IReadOnlyList<Asset>> GetAllActiveAssetsAsync(CancellationToken ct);
+    Task<int> GetActiveAssetCountAsync(CancellationToken ct);
     Task<PricePoint?> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct);
     Task<DateOnly?> GetLatestPriceDateAsync(string symbol, CancellationToken ct);
     Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(

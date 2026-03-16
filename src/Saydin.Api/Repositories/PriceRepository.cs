@@ -13,6 +13,9 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
             .ThenBy(a => a.Symbol)
             .ToListAsync(ct);
 
+    public Task<int> GetActiveAssetCountAsync(CancellationToken ct)
+        => context.Assets.CountAsync(a => a.IsActive, ct);
+
     public async Task<PricePoint?> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct)
         => await context.PricePoints
             .Where(pp => pp.Asset.Symbol == symbol && pp.PriceDate == date)

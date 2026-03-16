@@ -80,14 +80,23 @@ try
         })
         .AddStandardResilienceHandler();
 
+    // GoldAPI pasif — OpenExchangeRates ile değiştirildi. Key geçersizliği nedeniyle devre dışı.
+    // builder.Services
+    //     .AddHttpClient("goldapi", client =>
+    //     {
+    //         client.BaseAddress = new Uri("https://www.goldapi.io/api/");
+    //         client.Timeout = TimeSpan.FromSeconds(30);
+    //         var apiKey = builder.Configuration["ExternalApis:GoldApi:ApiKey"];
+    //         if (!string.IsNullOrWhiteSpace(apiKey))
+    //             client.DefaultRequestHeaders.Add("x-access-token", apiKey);
+    //     })
+    //     .AddStandardResilienceHandler();
+
     builder.Services
-        .AddHttpClient("goldapi", client =>
+        .AddHttpClient("openexchangerates", client =>
         {
-            client.BaseAddress = new Uri("https://www.goldapi.io/api/");
+            client.BaseAddress = new Uri("https://openexchangerates.org/api/");
             client.Timeout = TimeSpan.FromSeconds(30);
-            var apiKey = builder.Configuration["ExternalApis:GoldApi:ApiKey"];
-            if (!string.IsNullOrWhiteSpace(apiKey))
-                client.DefaultRequestHeaders.Add("x-access-token", apiKey);
         })
         .AddStandardResilienceHandler();
 
@@ -112,13 +121,15 @@ try
     builder.Services.AddSingleton<IPriceIngestionRepository, PriceIngestionRepository>();
     builder.Services.AddSingleton<TcmbAdapter>();
     builder.Services.AddSingleton<CoinGeckoAdapter>();
-    builder.Services.AddSingleton<GoldApiAdapter>();
+    // builder.Services.AddSingleton<GoldApiAdapter>();  // Pasif
+    builder.Services.AddSingleton<OpenExchangeRatesAdapter>();
     builder.Services.AddSingleton<TwelveDataAdapter>();
 
     // ─── Workers ─────────────────────────────────────────────────────────────
     builder.Services.AddSingleton<TcmbWorker>();
     builder.Services.AddSingleton<CoinGeckoWorker>();
-    builder.Services.AddSingleton<GoldApiWorker>();
+    // builder.Services.AddSingleton<GoldApiWorker>();  // Pasif
+    builder.Services.AddSingleton<OpenExchangeRatesWorker>();
     builder.Services.AddSingleton<TwelveDataWorker>();
     builder.Services.AddHostedService<IngestionOrchestrator>();
 

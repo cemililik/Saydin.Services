@@ -7,7 +7,8 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class IngestionOrchestrator(
     TcmbWorker tcmbWorker,
     CoinGeckoWorker coinGeckoWorker,
-    GoldApiWorker goldApiWorker,
+    // GoldApiWorker goldApiWorker,  // Pasif: OpenExchangeRates ile değiştirildi
+    OpenExchangeRatesWorker openExchangeRatesWorker,
     TwelveDataWorker twelveDataWorker,
     ILogger<IngestionOrchestrator> logger) : BackgroundService
 {
@@ -18,7 +19,8 @@ public sealed class IngestionOrchestrator(
         await Task.WhenAll(
             tcmbWorker.RunAsync(stoppingToken),
             coinGeckoWorker.RunAsync(stoppingToken),
-            goldApiWorker.RunAsync(stoppingToken),
+            openExchangeRatesWorker.RunAsync(stoppingToken),
+            // goldApiWorker.RunAsync(stoppingToken),  // Pasif
             twelveDataWorker.RunAsync(stoppingToken));
     }
 
