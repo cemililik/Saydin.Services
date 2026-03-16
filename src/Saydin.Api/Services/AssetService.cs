@@ -47,6 +47,22 @@ public sealed class AssetService(
         return price;
     }
 
+    public async Task<DateOnly> GetLatestPriceDateAsync(string symbol, CancellationToken ct)
+    {
+        var cacheKey = $"latest-date:{symbol.ToUpperInvariant()}";
+
+        var cached = await TryGetCachedAsync<string>(cacheKey);
+        if (cached is not null && DateOnly.TryParse(cached, out var cachedDate))
+            return cachedDate;
+
+        var date = await repository.GetLatestPriceDateAsync(symbol.ToUpperInvariant(), ct)
+            ?? throw new PriceNotFoundException(symbol, DateOnly.FromDateTime(DateTime.UtcNow));
+
+        await TrySetCacheAsync(cacheKey, date.ToString("yyyy-MM-dd"), TimeSpan.FromHours(1));
+
+        return date;
+    }
+
     public async Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(
         string symbol, DateOnly from, DateOnly to, string interval, CancellationToken ct)
     {

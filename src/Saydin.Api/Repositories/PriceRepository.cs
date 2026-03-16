@@ -18,6 +18,12 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
             .Where(pp => pp.Asset.Symbol == symbol && pp.PriceDate == date)
             .FirstOrDefaultAsync(ct);
 
+    public async Task<DateOnly?> GetLatestPriceDateAsync(string symbol, CancellationToken ct)
+        => await context.PricePoints
+            .Where(pp => pp.Asset.Symbol == symbol)
+            .Select(pp => (DateOnly?)pp.PriceDate)
+            .MaxAsync(ct);
+
     public async Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(
         string symbol, DateOnly from, DateOnly to, CancellationToken ct)
         => await context.PricePoints

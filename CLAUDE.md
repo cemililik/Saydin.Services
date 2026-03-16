@@ -11,6 +11,27 @@ Bu repo iki .NET 10 servisini ve ortak kütüphaneyi içerir:
 
 ---
 
+## Geliştirme Ortamı Kuralı (KRİTİK)
+
+**Lokal makinede .NET 10 SDK kurulu değildir.**
+`dotnet build`, `dotnet test`, `dotnet run` gibi komutları **doğrudan çalıştırma.**
+Tüm build, test ve çalıştırma işlemleri **Docker Compose** üzerinden yapılır:
+
+```bash
+# Servisleri başlat
+docker compose up -d
+
+# Build & test
+docker compose run --rm api dotnet test
+
+# Sadece build
+docker compose run --rm api dotnet build
+```
+
+Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
+
+---
+
 ## Mimari Kurallar (KESINLIKLE UYULACAK)
 
 ### Teknoloji

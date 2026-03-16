@@ -29,7 +29,8 @@ public sealed class WhatIfCalculator(
         await EnforceDailyLimitAsync(deviceId, ct);
 
         var symbol     = request.AssetSymbol.ToUpperInvariant();
-        var sellDate   = request.SellDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var sellDate   = request.SellDate
+            ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
         var amountType = request.AmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
