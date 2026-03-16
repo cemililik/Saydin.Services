@@ -142,14 +142,22 @@ public sealed class WhatIfCalculator(
 
         try
         {
-            var db    = redis.GetDatabase();
-            var count = await db.StringIncrementAsync(key);
+            var db     = redis.GetDatabase();
+            var ttlMs  = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
 
-            if (count == 1)
-            {
-                var ttl = DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow;
-                await db.KeyExpireAsync(key, ttl);
-            }
+            // Atomik: INCR + PEXPIRE (sadece ilk artışta) tek script'te
+            const string script = """
+                local count = redis.call('INCR', KEYS[1])
+                if count == 1 then
+                  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+                end
+                return count
+                """;
+
+            var count = (long)await db.ScriptEvaluateAsync(
+                script,
+                keys: [key],
+                values: [ttlMs]);
 
             if (count > FreeUserDailyLimit)
                 throw new DailyLimitExceededException(FreeUserDailyLimit);
