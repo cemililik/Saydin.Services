@@ -24,8 +24,10 @@ public static class WhatIfEndpoints
         IWhatIfCalculator calculator,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Request.Headers["X-Device-ID"].ToString();
-        var result   = await calculator.CalculateAsync(deviceId, request, ct);
+        // Filter tarafından validate edilip Items'a yazıldı
+        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
+            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var result = await calculator.CalculateAsync(deviceId, request, ct);
         return Results.Ok(result);
     }
 }
