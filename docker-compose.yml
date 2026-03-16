@@ -17,6 +17,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       # initdb.d: yalnızca ilk başlatmada çalışır (volume boşsa)
       - ./infrastructure/postgres/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+      - ./infrastructure/postgres/migrations/002_add_assets.sql:/docker-entrypoint-initdb.d/002_add_assets.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U saydin -d saydin"]
       interval: 10s
@@ -138,6 +139,9 @@ services:
     environment:
       ConnectionStrings__Postgres: "Host=postgres;Database=saydin;Username=saydin;Password=saydin_dev"
       Otlp__Endpoint: "http://aspire-dashboard:18889"
+      ExternalApis__CoinGecko__ApiKey: ${COINGECKO_API_KEY:-}
+      ExternalApis__GoldApi__ApiKey: ${GOLDAPI_API_KEY:-}
+      ExternalApis__TwelveData__ApiKey: ${TWELVEDATA_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
