@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Repositories;
 using Saydin.Shared.Exceptions;
 using StackExchange.Redis;
 
@@ -8,16 +9,20 @@ namespace Saydin.Api.Services;
 
 public sealed class WhatIfCalculator(
     IAssetService assetService,
+    ISavedScenarioRepository scenarioRepository,
     IConnectionMultiplexer redis,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
+    private const int FreeUserDailyLimit = 10;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public async Task<WhatIfResponse> CalculateAsync(WhatIfRequest request, CancellationToken ct)
+    public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
     {
+        await EnforceDailyLimitAsync(deviceId, ct);
+
         var symbol   = request.AssetSymbol.ToUpperInvariant();
         var sellDate = request.SellDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
         var amountType = request.AmountType.ToLowerInvariant();
@@ -116,6 +121,42 @@ public sealed class WhatIfCalculator(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Redis yazma hatası: {Key}", key);
+        }
+    }
+
+    private async Task EnforceDailyLimitAsync(string deviceId, CancellationToken ct)
+    {
+        try
+        {
+            var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
+            if (user?.Tier == "premium")
+                return;
+
+            var userId  = user?.Id.ToString() ?? deviceId;
+            var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            var key     = $"usage:whatif:{userId}:{dateKey}";
+
+            var db    = redis.GetDatabase();
+            var count = await db.StringIncrementAsync(key);
+
+            if (count == 1)
+            {
+                var midnight    = DateTime.UtcNow.Date.AddDays(1);
+                var ttl         = midnight - DateTime.UtcNow;
+                await db.KeyExpireAsync(key, ttl);
+            }
+
+            if (count > FreeUserDailyLimit)
+                throw new DailyLimitExceededException(FreeUserDailyLimit);
+        }
+        catch (DailyLimitExceededException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Redis erişim hatası — limit kontrolünü pas geç, hesaplamaya devam et
+            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
         }
     }
 }
