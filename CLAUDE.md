@@ -311,3 +311,25 @@ dotnet ef database update \
 - Log mesajında string interpolation — YASAK (kullan: parametreli mesaj)
 - `Console.WriteLine` veya `Debug.WriteLine` — YASAK (kullan: `ILogger<T>`)
 - Exception handler olmadan endpoint yazmak — YASAK (GlobalExceptionHandler her zaman var)
+
+---
+
+## Dokümantasyon Standardı
+
+### Nereye Yazılır?
+
+| Kapsam | Konum |
+|--------|-------|
+| Servis mimarisi (katmanlar, sınırlar, resilience, cache, DB erişim) | `src/Saydin.Services/docs/architecture.md` |
+| .NET geliştirme iş akışı (komutlar, Docker, migration, test, sorun giderme) | `src/Saydin.Services/docs/development-guide.md` |
+| Proje geneli mimari (istemci + servisler arası ilişki, API sözleşmesi, DB şeması) | Kök `docs/` dizini |
+| Mimari kararlar (ADR) | Kök `docs/decisions/` dizini |
+
+### Kurallar
+
+- **Backend'e özgü** her doküman `src/Saydin.Services/docs/` içine gider — kök `docs/` içine konmaz.
+- Kök `docs/`'a yalnızca birden fazla bileşeni (istemci + servisler) kapsayan belgeler eklenir.
+- Yeni endpoint, adapter veya servis eklendiğinde ilgili `docs/` dosyaları güncellenir.
+- Yeni API endpoint eklendiğinde kök `docs/architecture/api-contract.md` de güncellenir.
+- Büyük mimari karar alındığında kök `docs/decisions/ADR-XXX-<konu>.md` oluşturulur.
+- Dokümanlar kod değişikliğiyle aynı commit'te güncellenir; ayrı PR açılmaz.
