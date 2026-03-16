@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -38,6 +39,36 @@ public sealed class AssetService(
         await TrySetCacheAsync(listKey, assets, TimeSpan.FromHours(6));
 
         return assets;
+    }
+
+    public async Task<IReadOnlyList<AssetResponse>> GetAllAssetInfoAsync(CancellationToken ct)
+    {
+        const string sigKey = "assets:sig";
+
+        var sig = await TryGetCachedAsync<string>(sigKey);
+        if (sig is null)
+        {
+            var count = await repository.GetActiveAssetCountAsync(ct);
+            sig = count.ToString();
+            await TrySetCacheAsync(sigKey, sig, TimeSpan.FromMinutes(5));
+        }
+
+        var listKey = $"assets:info:{sig}";
+        var cached = await TryGetCachedAsync<List<AssetResponse>>(listKey);
+        if (cached is not null) return cached;
+
+        var rows = await repository.GetAllActiveAssetsWithDateRangesAsync(ct);
+        var result = rows
+            .Select(r => new AssetResponse(
+                r.Asset.Symbol,
+                r.Asset.DisplayName,
+                r.Asset.Category,
+                r.FirstDate,
+                r.LastDate))
+            .ToList();
+
+        await TrySetCacheAsync(listKey, result, TimeSpan.FromHours(1));
+        return result;
     }
 
     public async Task<PricePoint> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct)

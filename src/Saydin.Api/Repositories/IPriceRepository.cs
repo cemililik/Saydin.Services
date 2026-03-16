@@ -6,6 +6,8 @@ public interface IPriceRepository
 {
     Task<IReadOnlyList<Asset>> GetAllActiveAssetsAsync(CancellationToken ct);
     Task<int> GetActiveAssetCountAsync(CancellationToken ct);
+    Task<IReadOnlyList<(Asset Asset, DateOnly? FirstDate, DateOnly? LastDate)>>
+        GetAllActiveAssetsWithDateRangesAsync(CancellationToken ct);
     Task<PricePoint?> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct);
     Task<DateOnly?> GetLatestPriceDateAsync(string symbol, CancellationToken ct);
     Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(
