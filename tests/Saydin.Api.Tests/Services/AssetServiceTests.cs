@@ -195,6 +195,39 @@ public class AssetServiceTests
             .GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task GetAllAssetInfoAsync_SigCachedButInfoNotCached_QueriesRepository()
+    {
+        var asset = new Asset
+        {
+            Id = Guid.NewGuid(), Symbol = "USDTRY", DisplayName = "Dolar/TL",
+            Category = AssetCategory.Currency, Source = "tcmb", IsActive = true
+        };
+
+        // sig hit, info miss
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString() == "assets:sig"),
+                Arg.Any<CommandFlags>())
+           .Returns(new RedisValue("\"1\""));
+
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString() == "assets:info:1"),
+                Arg.Any<CommandFlags>())
+           .Returns(RedisValue.Null);
+
+        _repository.GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>())
+                   .Returns(new List<(Asset Asset, DateOnly? FirstDate, DateOnly? LastDate)>
+                   {
+                       (asset, new DateOnly(2020, 1, 1), new DateOnly(2024, 12, 31))
+                   }.AsReadOnly());
+
+        var result = await _sut.GetAllAssetInfoAsync(CancellationToken.None);
+
+        result.Should().HaveCount(1);
+        await _repository.Received(1)
+            .GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>());
+    }
+
     // ── GetAllAsync ──────────────────────────────────────────────────────────
 
     [Fact]

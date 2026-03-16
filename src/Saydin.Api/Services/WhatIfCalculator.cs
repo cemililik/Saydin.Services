@@ -85,7 +85,7 @@ public sealed class WhatIfCalculator(
             var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, "daily", ct);
             priceHistory = SamplePriceHistory(range);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Fiyat geçmişi alınamadı: {Symbol}", symbol);
             priceHistory = Array.Empty<PriceHistoryPoint>();
@@ -126,7 +126,7 @@ public sealed class WhatIfCalculator(
         var result = new List<PriceHistoryPoint>(maxPoints);
         for (var i = 0; i < maxPoints; i++)
         {
-            var idx = (int)Math.Round((double)i * (points.Count - 1) / (maxPoints - 1));
+            var idx = Math.Min((int)((double)i * (points.Count - 1) / (maxPoints - 1)), points.Count - 1);
             result.Add(new PriceHistoryPoint(points[idx].PriceDate, points[idx].Close));
         }
         return result;

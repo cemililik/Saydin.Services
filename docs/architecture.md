@@ -127,7 +127,7 @@ Her domain exception için ayrı `IExceptionHandler` yazılır ve zincire ekleni
 ```
 price:{symbol}:{date}              → TTL 24 saat   (tek gün fiyatı)
 prices:{symbol}:{from}:{to}        → TTL 1 saat    (tarih aralığı)
-whatif:v2:{symbol}:{buy}:{sell}:… → TTL 1 saat    (hesaplama sonucu + priceHistory; v2: priceHistory eklendi)
+whatif:v2:{symbol}:{buy}:{sell}:... → TTL 1 saat    (hesaplama sonucu + priceHistory; v2: priceHistory eklendi)
 assets:sig                         → TTL 5 dakika  (aktif asset sayısı — imza)
 assets:list:{count}                → TTL 6 saat    (tüm asset listesi — sadece temel alanlar)
 assets:info:{sig}                  → TTL 1 saat    (firstPriceDate/lastPriceDate dahil zenginleştirilmiş liste)

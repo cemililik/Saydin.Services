@@ -429,6 +429,9 @@ public class WhatIfCalculatorTests
         result.PriceHistory.Should().HaveCount(60);
         result.PriceHistory[0].Date.Should().Be(points.First().PriceDate);
         result.PriceHistory[^1].Date.Should().Be(points.Last().PriceDate);
+        result.PriceHistory.Should().BeInAscendingOrder(p => p.Date);
+        result.PriceHistory.Should().AllSatisfy(p =>
+            p.Date.Should().BeInRange(points.First().PriceDate, points.Last().PriceDate));
     }
 
     [Fact]
@@ -456,11 +459,28 @@ public class WhatIfCalculatorTests
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
         var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
-        result.PriceHistory.Should().AllSatisfy(p =>
-        {
-            p.Price.Should().BeGreaterThan(0);
-            p.Date.Should().BeOnOrAfter(BuyDate);
-        });
+        result.PriceHistory.Should().HaveCount(5);
+        result.PriceHistory[0].Date.Should().Be(BuyDate);
+        result.PriceHistory[0].Price.Should().Be(5.95m);
+        result.PriceHistory[4].Date.Should().Be(BuyDate.AddDays(4));
+        result.PriceHistory[4].Price.Should().Be(5.99m);
+        result.PriceHistory.Should().BeInAscendingOrder(p => p.Date);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_PriceHistoryFetchFails_ReturnsEmptyPriceHistory()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .ThrowsAsync(new TimeoutException("Bağlantı zaman aşımı"));
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.PriceHistory.Should().BeEmpty();
     }
 
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────

@@ -30,19 +30,35 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
     public async Task<IReadOnlyList<(Asset Asset, DateOnly? FirstDate, DateOnly? LastDate)>>
         GetAllActiveAssetsWithDateRangesAsync(CancellationToken ct)
     {
-        var rows = await context.Assets
+        var assets = await context.Assets
             .Where(a => a.IsActive)
             .OrderBy(a => a.Category)
             .ThenBy(a => a.Symbol)
-            .Select(a => new
-            {
-                Asset = a,
-                FirstDate = a.PricePoints.Min(pp => (DateOnly?)pp.PriceDate),
-                LastDate  = a.PricePoints.Max(pp => (DateOnly?)pp.PriceDate),
-            })
             .ToListAsync(ct);
 
-        return rows.Select(r => (r.Asset, r.FirstDate, r.LastDate)).ToList();
+        if (assets.Count == 0)
+            return Array.Empty<(Asset, DateOnly?, DateOnly?)>();
+
+        var assetIds = assets.Select(a => a.Id).ToHashSet();
+
+        var ranges = await context.PricePoints
+            .Where(pp => assetIds.Contains(pp.AssetId))
+            .GroupBy(pp => pp.AssetId)
+            .Select(g => new
+            {
+                AssetId   = g.Key,
+                FirstDate = g.Min(pp => (DateOnly?)pp.PriceDate),
+                LastDate  = g.Max(pp => (DateOnly?)pp.PriceDate),
+            })
+            .ToDictionaryAsync(r => r.AssetId, ct);
+
+        return assets
+            .Select(a =>
+            {
+                ranges.TryGetValue(a.Id, out var r);
+                return (a, r?.FirstDate, r?.LastDate);
+            })
+            .ToList();
     }
 
     public async Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(
