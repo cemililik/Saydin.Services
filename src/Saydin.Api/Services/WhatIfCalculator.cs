@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Repositories;
 using Saydin.Shared.Exceptions;
 using StackExchange.Redis;
 
@@ -8,18 +9,27 @@ namespace Saydin.Api.Services;
 
 public sealed class WhatIfCalculator(
     IAssetService assetService,
+    ISavedScenarioRepository scenarioRepository,
     IConnectionMultiplexer redis,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
+    private const int    FreeUserDailyLimit    = 10;
+    private const string PremiumTier           = "premium";
+    private const string WhatIfUsageKeyPrefix  = "usage:whatif:";
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public async Task<WhatIfResponse> CalculateAsync(WhatIfRequest request, CancellationToken ct)
+    public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
     {
-        var symbol   = request.AssetSymbol.ToUpperInvariant();
-        var sellDate = request.SellDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+
+        await EnforceDailyLimitAsync(deviceId, ct);
+
+        var symbol     = request.AssetSymbol.ToUpperInvariant();
+        var sellDate   = request.SellDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
         var amountType = request.AmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
@@ -60,25 +70,25 @@ public sealed class WhatIfCalculator(
                     $"Geçersiz amountType: '{request.AmountType}'. Beklenen: try, units, grams");
         }
 
-        var finalValueTry    = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
-        var profitLossTry    = finalValueTry - initialValueTry;
+        var finalValueTry     = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
+        var profitLossTry     = finalValueTry - initialValueTry;
         var profitLossPercent = initialValueTry == 0
             ? 0m
             : Math.Round(profitLossTry / initialValueTry * 100, 2, MidpointRounding.AwayFromZero);
 
         var response = new WhatIfResponse(
-            AssetSymbol:      symbol,
-            AssetDisplayName: asset.DisplayName,
-            BuyDate:          request.BuyDate,
-            SellDate:         sellDate,
-            BuyPrice:         buyPrice,
-            SellPrice:        sellPrice,
-            UnitsAcquired:    unitsAcquired,
-            InitialValueTry:  initialValueTry,
-            FinalValueTry:    finalValueTry,
-            ProfitLossTry:    profitLossTry,
+            AssetSymbol:       symbol,
+            AssetDisplayName:  asset.DisplayName,
+            BuyDate:           request.BuyDate,
+            SellDate:          sellDate,
+            BuyPrice:          buyPrice,
+            SellPrice:         sellPrice,
+            UnitsAcquired:     unitsAcquired,
+            InitialValueTry:   initialValueTry,
+            FinalValueTry:     finalValueTry,
+            ProfitLossTry:     profitLossTry,
             ProfitLossPercent: profitLossPercent,
-            IsProfit:         profitLossTry >= 0
+            IsProfit:          profitLossTry >= 0
         );
 
         await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
@@ -116,6 +126,46 @@ public sealed class WhatIfCalculator(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Redis yazma hatası: {Key}", key);
+        }
+    }
+
+    private async Task EnforceDailyLimitAsync(string deviceId, CancellationToken ct)
+    {
+        // Repository hataları (DB bağlantısı vb.) kasıtlı olarak yukarı kabarcıklanır
+        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
+        if (user?.Tier == PremiumTier)
+            return;
+
+        var userId  = user?.Id.ToString() ?? deviceId;
+        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var key     = $"{WhatIfUsageKeyPrefix}{userId}:{dateKey}";
+
+        try
+        {
+            var db     = redis.GetDatabase();
+            var ttlMs  = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
+
+            // Atomik: INCR + PEXPIRE (sadece ilk artışta) tek script'te
+            const string script = """
+                local count = redis.call('INCR', KEYS[1])
+                if count == 1 then
+                  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+                end
+                return count
+                """;
+
+            var count = (long)await db.ScriptEvaluateAsync(
+                script,
+                keys: [key],
+                values: [ttlMs]);
+
+            if (count > FreeUserDailyLimit)
+                throw new DailyLimitExceededException(FreeUserDailyLimit);
+        }
+        catch (Exception ex) when (ex is not DailyLimitExceededException)
+        {
+            // Redis erişim hatası — limit kontrolünü pas geç, hesaplamaya devam et
+            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
         }
     }
 }

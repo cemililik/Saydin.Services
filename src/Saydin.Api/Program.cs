@@ -96,6 +96,7 @@ try
     builder.Services.AddExceptionHandler<AssetNotFoundExceptionHandler>();
     builder.Services.AddExceptionHandler<ScenarioNotFoundExceptionHandler>();
     builder.Services.AddExceptionHandler<ScenarioLimitExceededExceptionHandler>();
+    builder.Services.AddExceptionHandler<DailyLimitExceededExceptionHandler>();
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
     // ─── OpenAPI ─────────────────────────────────────────────────────────────

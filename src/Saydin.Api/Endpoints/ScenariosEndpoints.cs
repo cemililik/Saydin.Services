@@ -5,8 +5,6 @@ namespace Saydin.Api.Endpoints;
 
 public static class ScenariosEndpoints
 {
-    private const string DeviceIdHeader = "X-Device-ID";
-
     public static IEndpointRouteBuilder MapScenariosEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/scenarios")
@@ -30,13 +28,16 @@ public static class ScenariosEndpoints
         return app;
     }
 
+    private static string GetDeviceId(HttpContext httpContext) =>
+        httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
+            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+
     private static async Task<IResult> GetScenariosAsync(
         HttpContext httpContext,
         ISavedScenarioService service,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Request.Headers[DeviceIdHeader].ToString();
-        var scenarios = await service.GetScenariosAsync(deviceId, ct);
+        var scenarios = await service.GetScenariosAsync(GetDeviceId(httpContext), ct);
         return Results.Ok(scenarios);
     }
 
@@ -46,8 +47,7 @@ public static class ScenariosEndpoints
         ISavedScenarioService service,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Request.Headers[DeviceIdHeader].ToString();
-        var scenario = await service.SaveScenarioAsync(deviceId, request, ct);
+        var scenario = await service.SaveScenarioAsync(GetDeviceId(httpContext), request, ct);
         return Results.Created($"/v1/scenarios/{scenario.Id}", scenario);
     }
 
@@ -57,26 +57,7 @@ public static class ScenariosEndpoints
         ISavedScenarioService service,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Request.Headers[DeviceIdHeader].ToString();
-        await service.DeleteScenarioAsync(deviceId, id, ct);
+        await service.DeleteScenarioAsync(GetDeviceId(httpContext), id, ct);
         return Results.NoContent();
     }
-}
-
-file static class RouteBuilderExtensions
-{
-    internal static RouteHandlerBuilder RequireDeviceId(this RouteHandlerBuilder builder)
-        => builder.AddEndpointFilter(async (ctx, next) =>
-        {
-            var deviceId = ctx.HttpContext.Request.Headers["X-Device-ID"].ToString();
-            if (string.IsNullOrWhiteSpace(deviceId))
-            {
-                return Results.Problem(
-                    title: "X-Device-ID gerekli",
-                    detail: "Bu endpoint'e erişmek için X-Device-ID header'ı gönderilmelidir.",
-                    statusCode: StatusCodes.Status400BadRequest,
-                    type: "https://saydin.app/errors/missing-device-id");
-            }
-            return await next(ctx);
-        });
 }

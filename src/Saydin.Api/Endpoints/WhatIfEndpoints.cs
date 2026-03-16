@@ -12,17 +12,22 @@ public static class WhatIfEndpoints
 
         group.MapPost("/calculate", CalculateAsync)
             .WithName("CalculateWhatIf")
-            .WithSummary("Ya-alsaydım hesabı yapar");
+            .WithSummary("Ya-alsaydım hesabı yapar")
+            .RequireDeviceId();
 
         return app;
     }
 
     private static async Task<IResult> CalculateAsync(
+        HttpContext httpContext,
         WhatIfRequest request,
         IWhatIfCalculator calculator,
         CancellationToken ct)
     {
-        var result = await calculator.CalculateAsync(request, ct);
+        // Filter tarafından validate edilip Items'a yazıldı
+        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
+            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var result = await calculator.CalculateAsync(deviceId, request, ct);
         return Results.Ok(result);
     }
 }

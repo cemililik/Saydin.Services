@@ -5,5 +5,5 @@ namespace Saydin.Api.Services;
 
 public interface IWhatIfCalculator
 {
-    Task<WhatIfResponse> CalculateAsync(WhatIfRequest request, CancellationToken ct);
+    Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct);
 }
