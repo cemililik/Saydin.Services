@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
@@ -98,6 +100,13 @@ try
     builder.Services.AddExceptionHandler<ScenarioLimitExceededExceptionHandler>();
     builder.Services.AddExceptionHandler<DailyLimitExceededExceptionHandler>();
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+
+    // ─── JSON Serialization ──────────────────────────────────────────────────
+    builder.Services.ConfigureHttpJsonOptions(opts =>
+    {
+        opts.SerializerOptions.Converters.Add(
+            new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower));
+    });
 
     // ─── OpenAPI ─────────────────────────────────────────────────────────────
     builder.Services.AddOpenApi();

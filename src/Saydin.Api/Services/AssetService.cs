@@ -18,14 +18,24 @@ public sealed class AssetService(
 
     public async Task<IReadOnlyList<Asset>> GetAllAsync(CancellationToken ct)
     {
-        const string cacheKey = "assets:list";
+        // Signature = aktif asset sayısı. 5 dakikada bir DB'den taze okunur.
+        // Yeni asset eklenince sayı değişir → yeni cache key oluşur → otomatik invalidasyon.
+        const string sigKey = "assets:sig";
 
-        var cached = await TryGetCachedAsync<List<Asset>>(cacheKey);
+        var sig = await TryGetCachedAsync<string>(sigKey);
+        if (sig is null)
+        {
+            var count = await repository.GetActiveAssetCountAsync(ct);
+            sig = count.ToString();
+            await TrySetCacheAsync(sigKey, sig, TimeSpan.FromMinutes(5));
+        }
+
+        var listKey = $"assets:list:{sig}";
+        var cached = await TryGetCachedAsync<List<Asset>>(listKey);
         if (cached is not null) return cached;
 
         var assets = await repository.GetAllActiveAssetsAsync(ct);
-
-        await TrySetCacheAsync(cacheKey, assets, TimeSpan.FromHours(6));
+        await TrySetCacheAsync(listKey, assets, TimeSpan.FromHours(6));
 
         return assets;
     }
@@ -45,6 +55,22 @@ public sealed class AssetService(
         await TrySetCacheAsync(cacheKey, price, TimeSpan.FromHours(24));
 
         return price;
+    }
+
+    public async Task<DateOnly> GetLatestPriceDateAsync(string symbol, CancellationToken ct)
+    {
+        var cacheKey = $"latest-date:{symbol.ToUpperInvariant()}";
+
+        var cached = await TryGetCachedAsync<string>(cacheKey);
+        if (cached is not null && DateOnly.TryParse(cached, out var cachedDate))
+            return cachedDate;
+
+        var date = await repository.GetLatestPriceDateAsync(symbol.ToUpperInvariant(), ct)
+            ?? throw new PriceNotFoundException(symbol, DateOnly.FromDateTime(DateTime.UtcNow));
+
+        await TrySetCacheAsync(cacheKey, date.ToString("yyyy-MM-dd"), TimeSpan.FromHours(1));
+
+        return date;
     }
 
     public async Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(

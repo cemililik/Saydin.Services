@@ -67,10 +67,14 @@ PostgreSQL (price_points tablosu, UPSERT)
 
 | Adapter | API | Asset | Zamanlama |
 |---|---|---|---|
-| `TcmbAdapter` | TCMB XML | USD/TRY, EUR/TRY | 16:30 Türkiye (piyasa kapanışı) |
-| `CoinGeckoAdapter` | CoinGecko API | BTC, ETH | 06:00 UTC |
-| `GoldApiAdapter` | GoldAPI.io | XAU/TRY, XAG/TRY | 07:00 UTC |
+| `TcmbAdapter` | TCMB XML | USD/TRY, EUR/TRY, GBP/TRY, CHF/TRY vb. | 16:30 Türkiye (piyasa kapanışı) |
+| `CoinGeckoAdapter` | CoinGecko API | BTC, ETH, BNB, XRP | 06:00 UTC |
+| `OpenExchangeRatesAdapter` | Open Exchange Rates | XAU/TRY (altın), XAG/TRY (gümüş) — gram bazında | 22:00 UTC |
 | `TwelveDataAdapter` | Twelve Data | THYAO, GARAN | 19:00 Türkiye (BIST kapanışı) |
+
+**Not:** `OpenExchangeRatesAdapter` USD-base yanıtındaki XAU/XAG oranlarını
+`(1 / metalRate) * tryRate / 31.1034768` formülüyle gram/TRY'ye çevirir.
+Aynı tarih için XAU ve XAG tek HTTP isteğiyle alınır (day-level in-memory cache).
 
 ## Servis Sınırları (KESIN KURAL)
 
@@ -121,13 +125,16 @@ Her domain exception için ayrı `IExceptionHandler` yazılır ve zincire ekleni
 ## Cache Stratejisi (Redis)
 
 ```
-price:{symbol}:{date}         → TTL 24 saat   (tek gün fiyatı)
-prices:{symbol}:{from}:{to}   → TTL 1 saat    (tarih aralığı)
-whatif:{symbol}:{buy}:{sell}  → TTL 1 saat    (hesaplama sonucu)
-assets:list                   → TTL 6 saat    (tüm asset listesi)
+price:{symbol}:{date}              → TTL 24 saat   (tek gün fiyatı)
+prices:{symbol}:{from}:{to}        → TTL 1 saat    (tarih aralığı)
+whatif:{symbol}:{buy}:{sell}:...   → TTL 1 saat    (hesaplama sonucu)
+assets:sig                         → TTL 5 dakika  (aktif asset sayısı — imza)
+assets:list:{count}                → TTL 6 saat    (tüm asset listesi)
 ```
 
-Cache anahtarı normalize edilmiş parametrelerle oluşturulur. Backfill veya manuel update sonrası ilgili cache key invalidate edilir.
+Cache anahtarı normalize edilmiş parametrelerle oluşturulur.
+
+**Asset listesi cache invalidation:** `assets:sig` anahtarı aktif asset sayısını tutar (5 dk TTL). Her istekte `sig` ile hesaplanan `assets:list:{sig}` anahtarı aranır. Yeni asset eklendiğinde `sig` süresi dolduğunda otomatik yenilenir — manuel Redis flush gerekmez.
 
 ## Observability
 
