@@ -162,21 +162,10 @@ public sealed class WhatIfCalculator(
             if (count > FreeUserDailyLimit)
                 throw new DailyLimitExceededException(FreeUserDailyLimit);
         }
-        catch (DailyLimitExceededException)
+        catch (Exception ex) when (ex is not DailyLimitExceededException)
         {
-            throw;
-        }
-        catch (RedisConnectionException ex)
-        {
-            logger.LogWarning(ex, "Daily limit Redis bağlantı hatası, limit kontrolü atlandı");
-        }
-        catch (RedisTimeoutException ex)
-        {
-            logger.LogWarning(ex, "Daily limit Redis zaman aşımı, limit kontrolü atlandı");
-        }
-        catch (RedisServerException ex)
-        {
-            logger.LogWarning(ex, "Daily limit Redis sunucu hatası, limit kontrolü atlandı");
+            // Redis erişim hatası — limit kontrolünü pas geç, hesaplamaya devam et
+            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
         }
     }
 }
