@@ -430,8 +430,10 @@ public class WhatIfCalculatorTests
         result.PriceHistory[0].Date.Should().Be(points.First().PriceDate);
         result.PriceHistory[^1].Date.Should().Be(points.Last().PriceDate);
         result.PriceHistory.Should().BeInAscendingOrder(p => p.Date);
+        var first = points.First().PriceDate;
+        var last  = points.Last().PriceDate;
         result.PriceHistory.Should().AllSatisfy(p =>
-            p.Date.Should().BeInRange(points.First().PriceDate, points.Last().PriceDate));
+            p.Date.Should().Match<DateOnly>(d => d >= first && d <= last));
     }
 
     [Fact]
