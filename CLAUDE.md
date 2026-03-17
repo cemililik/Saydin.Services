@@ -32,6 +32,19 @@ Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
 
 ---
 
+## Commit Kuralı (KRİTİK)
+
+**Kod değişikliklerini commit etmeden önce mutlaka build ve testleri çalıştır.**
+
+```bash
+docker compose run --rm api dotnet build
+docker compose run --rm api dotnet test
+```
+
+Build veya test başarısız olursa commit atma, önce hatayı düzelt.
+
+---
+
 ## Mimari Kurallar (KESINLIKLE UYULACAK)
 
 ### Teknoloji
