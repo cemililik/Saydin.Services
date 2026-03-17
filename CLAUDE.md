@@ -32,6 +32,14 @@ Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
 
 ---
 
+## Cache Kuralı (KRİTİK)
+
+**Cache ile ilgili herhangi bir işlem yapmadan önce `docs/cache-strategy.md` dosyasını oku.**
+Cache key ekleme, TTL değiştirme, limit mantığı güncelleme veya Redis kullanımı değiştirme
+durumlarında işlem sonrası bu dokümanı güncelle.
+
+---
+
 ## Commit Kuralı (KRİTİK)
 
 **Kod değişikliklerini commit etmeden önce mutlaka build ve testleri çalıştır.**
