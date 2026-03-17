@@ -24,6 +24,7 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | What-if hesaplama | `whatif:v2:{symbol}:{buyDate}:{sellDate}:{amount}:{amountType}` | 1 saat | `WhatIfCalculator` |
 | Asset listesi | `assets:list` | 6 saat | `AssetService` |
 | Tek fiyat noktası | `price:{symbol}:{date}` | 24 saat | `AssetService` |
+| En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
 | Fiyat aralığı | `prices:{symbol}:{from}:{to}` | 1 saat | `AssetService` |
 | En son fiyat tarihi | `latest_date:{symbol}` | 1 saat | `AssetService` |
 | Günlük kullanım sayacı | `usage:whatif:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `WhatIfCalculator` |
@@ -76,6 +77,18 @@ redis-cli DEL assets:list
 
 **TTL seçimi:** 24 saat — Tarihi fiyatlar değişmez. Bugünün fiyatı için TTL daha kısa
 tutulabilir ama şu an ayrım yapılmıyor. Kabul edilebilir.
+
+### En Yakın Fiyat Noktası (`nearest-price:{symbol}:{date}`)
+
+**Neden cache'leniyor:** Kullanıcı hafta sonu veya tatil günü seçtiğinde `GetNearestPriceAsync`
+çağrılır. Bu sorgu ±7 günlük pencerede DB'yi tarar ve aynı tarih için her seferinde aynı
+sonucu döner.
+
+**Davranış:** İstek edilen tarihe ≤ olan en yakın işlem günü önce denenir (geriye doğru);
+bulunamazsa > olan ilk işlem günü döner (ileriye doğru). Sonuç `PricePoint` olarak cache'lenir.
+
+**TTL seçimi:** 24 saat — Tarihi piyasa tatilleri değişmez. Bugünün fiyatı `whatif:v2:...`
+cache'inden bağımsız olduğundan ayrım yapılmıyor. Kabul edilebilir.
 
 ---
 

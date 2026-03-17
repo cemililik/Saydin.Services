@@ -273,4 +273,68 @@ public class AssetServiceTests
         result[0].Close.Should().Be(5.95m);
         result[2].Close.Should().Be(6.05m);
     }
+
+    // ── GetNearestPriceAsync ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetNearestPriceAsync_ExactDateExists_ReturnsThatDay()
+    {
+        var date = new DateOnly(2020, 1, 2); // Perşembe
+        var expected = new PricePoint { AssetId = Guid.NewGuid(), PriceDate = date, Close = 5.95m };
+
+        _repository.GetNearestPriceAsync("USDTRY", date, 7, Arg.Any<CancellationToken>())
+                   .Returns(expected);
+
+        var result = await _sut.GetNearestPriceAsync("USDTRY", date, CancellationToken.None);
+
+        result.PriceDate.Should().Be(date);
+        result.Close.Should().Be(5.95m);
+    }
+
+    [Fact]
+    public async Task GetNearestPriceAsync_WeekendDate_ReturnsPreviousFriday()
+    {
+        var saturday = new DateOnly(2020, 1, 4); // Cumartesi
+        var friday   = new DateOnly(2020, 1, 3); // Cuma
+        var pricePoint = new PricePoint { AssetId = Guid.NewGuid(), PriceDate = friday, Close = 5.93m };
+
+        _repository.GetNearestPriceAsync("USDTRY", saturday, 7, Arg.Any<CancellationToken>())
+                   .Returns(pricePoint);
+
+        var result = await _sut.GetNearestPriceAsync("USDTRY", saturday, CancellationToken.None);
+
+        result.PriceDate.Should().Be(friday);
+    }
+
+    [Fact]
+    public async Task GetNearestPriceAsync_NoPriceInWindow_ThrowsPriceNotFoundException()
+    {
+        var date = new DateOnly(2020, 1, 1);
+
+        _repository.GetNearestPriceAsync("USDTRY", date, 7, Arg.Any<CancellationToken>())
+                   .Returns((PricePoint?)null);
+
+        var act = () => _sut.GetNearestPriceAsync("USDTRY", date, CancellationToken.None);
+
+        await act.Should().ThrowAsync<PriceNotFoundException>();
+    }
+
+    [Fact]
+    public async Task GetNearestPriceAsync_CacheHit_DoesNotCallRepository()
+    {
+        var date  = new DateOnly(2020, 1, 3);
+        var point = new PricePoint { AssetId = Guid.NewGuid(), PriceDate = date, Close = 5.95m };
+        var json  = System.Text.Json.JsonSerializer.Serialize(point,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+
+        _db.StringGetAsync(
+               Arg.Is<RedisKey>(k => k.ToString().Contains("nearest-price")),
+               Arg.Any<CommandFlags>())
+           .Returns(new RedisValue(json));
+
+        await _sut.GetNearestPriceAsync("USDTRY", date, CancellationToken.None);
+
+        await _repository.DidNotReceive()
+            .GetNearestPriceAsync(Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
+    }
 }
