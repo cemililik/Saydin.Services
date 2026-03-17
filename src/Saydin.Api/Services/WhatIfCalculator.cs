@@ -33,6 +33,54 @@ public sealed class WhatIfCalculator(
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         await CheckDailyLimitAsync(user, deviceId);
 
+        var response = await CalculateCoreAsync(request, ct);
+
+        // Yalnızca başarılı hesaplamalar kotadan düşülür
+        await IncrementDailyUsageAsync(user, deviceId);
+        return response;
+    }
+
+    public async Task<CompareResponse> CompareAsync(string deviceId, CompareRequest request, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+
+        if (request.AssetSymbols.Count is < 2 or > 5)
+            throw new ArgumentException("Karşılaştırma için 2 ile 5 arasında sembol gereklidir.");
+
+        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
+        await CheckDailyLimitAsync(user, deviceId);
+
+        // Her sembol için paralel hesaplama — her biri kendi cache'inden yararlanır
+        var tasks = request.AssetSymbols
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(symbol => CalculateCoreAsync(new WhatIfRequest(
+                AssetSymbol: symbol,
+                BuyDate:     request.BuyDate,
+                SellDate:    request.SellDate,
+                Amount:      request.Amount,
+                AmountType:  request.AmountType), ct))
+            .ToList();
+
+        var results = await Task.WhenAll(tasks);
+
+        // Karlılığa göre sırala (en yüksek ProfitLossPercent → Rank 1)
+        var ranked = results
+            .OrderByDescending(r => r.ProfitLossPercent)
+            .Select((r, i) => new CompareResultItem(Rank: i + 1, Calculation: r))
+            .ToList();
+
+        // Karşılaştırma da 1 hak olarak sayılır
+        await IncrementDailyUsageAsync(user, deviceId);
+
+        logger.LogInformation(
+            "Karşılaştırma hesaplandı: {Symbols} {BuyDate}→{SellDate}",
+            string.Join(",", request.AssetSymbols), request.BuyDate, request.SellDate);
+
+        return new CompareResponse(ranked);
+    }
+
+    private async Task<WhatIfResponse> CalculateCoreAsync(WhatIfRequest request, CancellationToken ct)
+    {
         var symbol     = request.AssetSymbol.ToUpperInvariant();
         var sellDate   = request.SellDate
             ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
@@ -45,11 +93,7 @@ public sealed class WhatIfCalculator(
 
         var cached = await TryGetCachedAsync<WhatIfResponse>(cacheKey);
         if (cached is not null)
-        {
-            // Cache hit: hesaplama yapılmasa da kullanıcının hakkından düşülür
-            await IncrementDailyUsageAsync(user, deviceId);
             return cached;
-        }
 
         // Fiyatlar AssetService üzerinden gelir — Redis cache'li
         var buyPricePoint  = await assetService.GetPriceAsync(symbol, request.BuyDate, ct);
@@ -116,9 +160,6 @@ public sealed class WhatIfCalculator(
         );
 
         await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
-
-        // Yalnızca başarılı hesaplamalar kotadan düşülür
-        await IncrementDailyUsageAsync(user, deviceId);
 
         logger.LogInformation(
             "WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} {AmountType}:{Amount} → %{ProfitLossPercent}",
