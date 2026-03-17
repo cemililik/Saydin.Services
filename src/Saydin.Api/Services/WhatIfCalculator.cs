@@ -1,6 +1,8 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -12,11 +14,11 @@ public sealed class WhatIfCalculator(
     IAssetService assetService,
     ISavedScenarioRepository scenarioRepository,
     IConnectionMultiplexer redis,
+    IOptions<FreemiumOptions> options,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
-    private const int    FreeUserDailyLimit    = 10;
-    private const string PremiumTier           = "premium";
-    private const string WhatIfUsageKeyPrefix  = "usage:whatif:";
+    private const string PremiumTier          = "premium";
+    private const string WhatIfUsageKeyPrefix = "usage:whatif:";
     private const int    MaxPriceHistoryPoints = 60;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -28,7 +30,8 @@ public sealed class WhatIfCalculator(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
-        await EnforceDailyLimitAsync(deviceId, ct);
+        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
+        await CheckDailyLimitAsync(user, deviceId);
 
         var symbol     = request.AssetSymbol.ToUpperInvariant();
         var sellDate   = request.SellDate
@@ -41,7 +44,12 @@ public sealed class WhatIfCalculator(
         var cacheKey = $"whatif:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}";
 
         var cached = await TryGetCachedAsync<WhatIfResponse>(cacheKey);
-        if (cached is not null) return cached;
+        if (cached is not null)
+        {
+            // Cache hit: hesaplama yapılmasa da kullanıcının hakkından düşülür
+            await IncrementDailyUsageAsync(user, deviceId);
+            return cached;
+        }
 
         // Fiyatlar AssetService üzerinden gelir — Redis cache'li
         var buyPricePoint  = await assetService.GetPriceAsync(symbol, request.BuyDate, ct);
@@ -109,6 +117,9 @@ public sealed class WhatIfCalculator(
 
         await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
 
+        // Yalnızca başarılı hesaplamalar kotadan düşülür
+        await IncrementDailyUsageAsync(user, deviceId);
+
         logger.LogInformation(
             "WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} {AmountType}:{Amount} → %{ProfitLossPercent}",
             symbol, request.BuyDate, sellDate, amountType, request.Amount, profitLossPercent);
@@ -161,23 +172,34 @@ public sealed class WhatIfCalculator(
         }
     }
 
-    private async Task EnforceDailyLimitAsync(string deviceId, CancellationToken ct)
+    private async Task CheckDailyLimitAsync(User? user, string deviceId)
     {
-        // Repository hataları (DB bağlantısı vb.) kasıtlı olarak yukarı kabarcıklanır
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        if (user?.Tier == PremiumTier)
-            return;
+        if (user?.Tier == PremiumTier) return;
 
-        var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        var key     = $"{WhatIfUsageKeyPrefix}{userId}:{dateKey}";
-
+        var key = BuildUsageKey(user, deviceId);
         try
         {
-            var db     = redis.GetDatabase();
-            var ttlMs  = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
+            var db    = redis.GetDatabase();
+            var value = await db.StringGetAsync(key);
+            var count = value.HasValue ? (long)value : 0;
 
-            // Atomik: INCR + PEXPIRE (sadece ilk artışta) tek script'te
+            if (count >= options.Value.DailyCalculationLimit)
+                throw new DailyLimitExceededException(options.Value.DailyCalculationLimit);
+        }
+        catch (Exception ex) when (ex is not DailyLimitExceededException)
+        {
+            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
+        }
+    }
+
+    private async Task IncrementDailyUsageAsync(User? user, string deviceId)
+    {
+        if (user?.Tier == PremiumTier) return;
+
+        var key   = BuildUsageKey(user, deviceId);
+        var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
+        try
+        {
             const string script = """
                 local count = redis.call('INCR', KEYS[1])
                 if count == 1 then
@@ -185,19 +207,18 @@ public sealed class WhatIfCalculator(
                 end
                 return count
                 """;
-
-            var count = (long)await db.ScriptEvaluateAsync(
-                script,
-                keys: [key],
-                values: [ttlMs]);
-
-            if (count > FreeUserDailyLimit)
-                throw new DailyLimitExceededException(FreeUserDailyLimit);
+            await redis.GetDatabase().ScriptEvaluateAsync(script, keys: [key], values: [ttlMs]);
         }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
+        catch (Exception ex)
         {
-            // Redis erişim hatası — limit kontrolünü pas geç, hesaplamaya devam et
-            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
+            logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
         }
+    }
+
+    private static string BuildUsageKey(User? user, string deviceId)
+    {
+        var userId  = user?.Id.ToString() ?? deviceId;
+        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        return $"{WhatIfUsageKeyPrefix}{userId}:{dateKey}";
     }
 }

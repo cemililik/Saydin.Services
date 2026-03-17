@@ -13,6 +13,7 @@ using Serilog.Sinks.OpenTelemetry;
 using Scalar.AspNetCore;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Exceptions;
+using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Data;
@@ -156,6 +157,10 @@ try
 
     // ─── Response Compression ────────────────────────────────────────────────
     builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
+
+    // ─── Options ─────────────────────────────────────────────────────────────
+    builder.Services.Configure<FreemiumOptions>(
+        builder.Configuration.GetSection(FreemiumOptions.SectionName));
 
     // ─── Repositories & Services ─────────────────────────────────────────────
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();

@@ -1,5 +1,7 @@
+using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -8,9 +10,9 @@ namespace Saydin.Api.Services;
 
 public sealed class SavedScenarioService(
     ISavedScenarioRepository repository,
+    IOptions<FreemiumOptions> options,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
-    private const int FreeUserScenarioLimit = 5;
 
     public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct)
     {
@@ -31,9 +33,10 @@ public sealed class SavedScenarioService(
 
         if (user.Tier == "free")
         {
+            var limit = options.Value.ScenarioLimit;
             var count = await repository.CountByUserIdAsync(user.Id, ct);
-            if (count >= FreeUserScenarioLimit)
-                throw new ScenarioLimitExceededException(FreeUserScenarioLimit);
+            if (count >= limit)
+                throw new ScenarioLimitExceededException(limit);
         }
 
         var asset = await repository.GetActiveAssetBySymbolAsync(request.AssetSymbol, ct)
