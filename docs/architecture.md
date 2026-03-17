@@ -127,14 +127,20 @@ Her domain exception için ayrı `IExceptionHandler` yazılır ve zincire ekleni
 ```
 price:{symbol}:{date}              → TTL 24 saat   (tek gün fiyatı)
 prices:{symbol}:{from}:{to}        → TTL 1 saat    (tarih aralığı)
-whatif:{symbol}:{buy}:{sell}:...   → TTL 1 saat    (hesaplama sonucu)
+whatif:v2:{symbol}:{buy}:{sell}:... → TTL 1 saat    (hesaplama sonucu + priceHistory; v2: priceHistory eklendi)
 assets:sig                         → TTL 5 dakika  (aktif asset sayısı — imza)
-assets:list:{count}                → TTL 6 saat    (tüm asset listesi)
+assets:list:{count}                → TTL 6 saat    (tüm asset listesi — sadece temel alanlar)
+assets:info:{sig}                  → TTL 1 saat    (firstPriceDate/lastPriceDate dahil zenginleştirilmiş liste)
 ```
 
 Cache anahtarı normalize edilmiş parametrelerle oluşturulur.
 
-**Asset listesi cache invalidation:** `assets:sig` anahtarı aktif asset sayısını tutar (5 dk TTL). Her istekte `sig` ile hesaplanan `assets:list:{sig}` anahtarı aranır. Yeni asset eklendiğinde `sig` süresi dolduğunda otomatik yenilenir — manuel Redis flush gerekmez.
+**`whatif` cache versiyonlama:** `priceHistory` alanı eklendikten sonra anahtar `whatif:v2:...` olarak güncellendi. Eski `whatif:...` anahtarları geçersiz — farklı anahtar prefix'i sayesinde manuel flush gerekmez.
+
+**Asset listesi cache stratejisi:**
+- `assets:sig` — aktif asset sayısını tutar (5 dk TTL). İmza değeri değiştiğinde `assets:list` ve `assets:info` otomatik yenilenir.
+- `assets:list:{sig}` — temel asset listesi (6 saat TTL). Sadece sembol/isim/kategori alanları.
+- `assets:info:{sig}` — `firstPriceDate`/`lastPriceDate` dahil zenginleştirilmiş liste (1 saat TTL). Flutter tarih picker aralığı için kullanılır. Fiyat verisi geldikçe daha sık yenilenmesi için TTL daha kısa tutulur.
 
 ## Observability
 

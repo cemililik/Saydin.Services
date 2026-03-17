@@ -27,6 +27,40 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
             .Select(pp => (DateOnly?)pp.PriceDate)
             .MaxAsync(ct);
 
+    public async Task<IReadOnlyList<(Asset Asset, DateOnly? FirstDate, DateOnly? LastDate)>>
+        GetAllActiveAssetsWithDateRangesAsync(CancellationToken ct)
+    {
+        var assets = await context.Assets
+            .Where(a => a.IsActive)
+            .OrderBy(a => a.Category)
+            .ThenBy(a => a.Symbol)
+            .ToListAsync(ct);
+
+        if (assets.Count == 0)
+            return Array.Empty<(Asset, DateOnly?, DateOnly?)>();
+
+        var assetIds = assets.Select(a => a.Id).ToHashSet();
+
+        var ranges = await context.PricePoints
+            .Where(pp => assetIds.Contains(pp.AssetId))
+            .GroupBy(pp => pp.AssetId)
+            .Select(g => new
+            {
+                AssetId   = g.Key,
+                FirstDate = g.Min(pp => (DateOnly?)pp.PriceDate),
+                LastDate  = g.Max(pp => (DateOnly?)pp.PriceDate),
+            })
+            .ToDictionaryAsync(r => r.AssetId, ct);
+
+        return assets
+            .Select(a =>
+            {
+                ranges.TryGetValue(a.Id, out var r);
+                return (a, r?.FirstDate, r?.LastDate);
+            })
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(
         string symbol, DateOnly from, DateOnly to, CancellationToken ct)
         => await context.PricePoints

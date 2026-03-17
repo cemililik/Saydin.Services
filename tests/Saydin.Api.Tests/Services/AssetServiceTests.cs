@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
+using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Entities;
@@ -109,6 +110,122 @@ public class AssetServiceTests
         var result = await _sut.GetPriceAsync("USDTRY", date, CancellationToken.None);
 
         result.Close.Should().Be(5.95m);
+    }
+
+    // ── GetAllAssetInfoAsync ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetAllAssetInfoAsync_ReturnsMappedAssetResponses()
+    {
+        var asset = new Asset
+        {
+            Id = Guid.NewGuid(), Symbol = "USDTRY", DisplayName = "Dolar/TL",
+            Category = AssetCategory.Currency, Source = "tcmb", IsActive = true
+        };
+        var firstDate = new DateOnly(2020, 1, 1);
+        var lastDate  = new DateOnly(2024, 12, 31);
+
+        _repository.GetActiveAssetCountAsync(Arg.Any<CancellationToken>()).Returns(1);
+        _repository.GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>())
+                   .Returns(new List<(Asset Asset, DateOnly? FirstDate, DateOnly? LastDate)>
+                   {
+                       (asset, firstDate, lastDate)
+                   }.AsReadOnly());
+
+        var result = await _sut.GetAllAssetInfoAsync(CancellationToken.None);
+
+        result.Should().HaveCount(1);
+        result[0].Symbol.Should().Be("USDTRY");
+        result[0].FirstPriceDate.Should().Be(firstDate);
+        result[0].LastPriceDate.Should().Be(lastDate);
+    }
+
+    [Fact]
+    public async Task GetAllAssetInfoAsync_NullDates_PassedThroughAsNull()
+    {
+        var asset = new Asset
+        {
+            Id = Guid.NewGuid(), Symbol = "NEWASSET", DisplayName = "Yeni Varlık",
+            Category = AssetCategory.Crypto, Source = "coingecko", IsActive = true
+        };
+
+        _repository.GetActiveAssetCountAsync(Arg.Any<CancellationToken>()).Returns(1);
+        _repository.GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>())
+                   .Returns(new List<(Asset Asset, DateOnly? FirstDate, DateOnly? LastDate)>
+                   {
+                       (asset, null, null)
+                   }.AsReadOnly());
+
+        var result = await _sut.GetAllAssetInfoAsync(CancellationToken.None);
+
+        result[0].FirstPriceDate.Should().BeNull();
+        result[0].LastPriceDate.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task GetAllAssetInfoAsync_CacheHit_SkipsRepository()
+    {
+        var cachedList = new List<AssetResponse>
+        {
+            new("USDTRY", "Dolar/TL", AssetCategory.Currency,
+                new DateOnly(2020, 1, 1), new DateOnly(2024, 12, 31))
+        };
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            cachedList,
+            new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+            });
+
+        // sig cached → "\"1\""
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString() == "assets:sig"),
+                Arg.Any<CommandFlags>())
+           .Returns(new RedisValue("\"1\""));
+
+        // info cached
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString() == "assets:info:1"),
+                Arg.Any<CommandFlags>())
+           .Returns(new RedisValue(json));
+
+        await _sut.GetAllAssetInfoAsync(CancellationToken.None);
+
+        await _repository.DidNotReceive()
+            .GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GetAllAssetInfoAsync_SigCachedButInfoNotCached_QueriesRepository()
+    {
+        var asset = new Asset
+        {
+            Id = Guid.NewGuid(), Symbol = "USDTRY", DisplayName = "Dolar/TL",
+            Category = AssetCategory.Currency, Source = "tcmb", IsActive = true
+        };
+
+        // sig hit, info miss
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString() == "assets:sig"),
+                Arg.Any<CommandFlags>())
+           .Returns(new RedisValue("\"1\""));
+
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString() == "assets:info:1"),
+                Arg.Any<CommandFlags>())
+           .Returns(RedisValue.Null);
+
+        _repository.GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>())
+                   .Returns(new List<(Asset Asset, DateOnly? FirstDate, DateOnly? LastDate)>
+                   {
+                       (asset, new DateOnly(2020, 1, 1), new DateOnly(2024, 12, 31))
+                   }.AsReadOnly());
+
+        var result = await _sut.GetAllAssetInfoAsync(CancellationToken.None);
+
+        result.Should().HaveCount(1);
+        await _repository.Received(1)
+            .GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>());
     }
 
     // ── GetAllAsync ──────────────────────────────────────────────────────────

@@ -343,7 +343,8 @@ public class WhatIfCalculatorTests
             BuyDate: BuyDate, SellDate: SellDate,
             BuyPrice: 5.95m, SellPrice: 8.50m,
             UnitsAcquired: 1m, InitialValueTry: 5.95m, FinalValueTry: 8.50m,
-            ProfitLossTry: 2.55m, ProfitLossPercent: 42.86m, IsProfit: true);
+            ProfitLossTry: 2.55m, ProfitLossPercent: 42.86m, IsProfit: true,
+            PriceHistory: Array.Empty<PriceHistoryPoint>());
 
         var json = System.Text.Json.JsonSerializer.Serialize(
             cached,
@@ -377,7 +378,131 @@ public class WhatIfCalculatorTests
         await _assetService.Received().GetPriceAsync("USDTRY", Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
     }
 
+    // ── SamplePriceHistory (CalculateAsync üzerinden) ─────────────────────────
+
+    [Fact]
+    public async Task CalculateAsync_PriceHistoryUnder60Points_AllPointsIncluded()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        SetupPriceRange(30);
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.PriceHistory.Should().HaveCount(30);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_PriceHistoryOver60Points_SampledTo60()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        SetupPriceRange(100);
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.PriceHistory.Should().HaveCount(60);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_PriceHistoryOver60Points_FirstAndLastAlwaysIncluded()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var points = Enumerable.Range(0, 100)
+            .Select(i => new PricePoint
+            {
+                AssetId   = AssetId,
+                PriceDate = BuyDate.AddDays(i),
+                Close     = 5.95m + i * 0.02m
+            })
+            .ToList();
+
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(points.AsReadOnly());
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.PriceHistory.Should().HaveCount(60);
+        result.PriceHistory[0].Date.Should().Be(points.First().PriceDate);
+        result.PriceHistory[^1].Date.Should().Be(points.Last().PriceDate);
+        result.PriceHistory.Should().BeInAscendingOrder(p => p.Date);
+        var first = points.First().PriceDate;
+        var last  = points.Last().PriceDate;
+        result.PriceHistory.Should().AllSatisfy(p =>
+            (p.Date >= first && p.Date <= last).Should().BeTrue());
+    }
+
+    [Fact]
+    public async Task CalculateAsync_EmptyPriceRange_ReturnsEmptyPriceHistory()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(Array.Empty<PricePoint>().ToList().AsReadOnly());
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.PriceHistory.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_PriceHistory_ExactlyContainedInResponse()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        SetupPriceRange(5);
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.PriceHistory.Should().HaveCount(5);
+        result.PriceHistory[0].Date.Should().Be(BuyDate);
+        result.PriceHistory[0].Price.Should().Be(5.95m);
+        result.PriceHistory[4].Date.Should().Be(BuyDate.AddDays(4));
+        result.PriceHistory[4].Price.Should().Be(5.99m);
+        result.PriceHistory.Should().BeInAscendingOrder(p => p.Date);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_PriceHistoryFetchFails_ReturnsEmptyPriceHistory()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .ThrowsAsync(new TimeoutException("Bağlantı zaman aşımı"));
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.PriceHistory.Should().BeEmpty();
+    }
+
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────
+
+    private void SetupPriceRange(int count)
+    {
+        var points = Enumerable.Range(0, count)
+            .Select(i => new PricePoint
+            {
+                AssetId   = AssetId,
+                PriceDate = BuyDate.AddDays(i),
+                Close     = 5.95m + i * 0.01m
+            })
+            .ToList();
+
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(points.AsReadOnly());
+    }
 
     private void SetupPrices(
         decimal buyPrice, decimal sellPrice,
@@ -399,6 +524,10 @@ public class WhatIfCalculatorTests
             _assetService.GetPriceAsync(Arg.Any<string>(), today, Arg.Any<CancellationToken>())
                          .Returns(new PricePoint { AssetId = AssetId, PriceDate = today, Close = sellPrice });
         }
+
+        // SellDate null olduğunda GetLatestPriceDateAsync çağrılır — effectiveSell döndür
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(effectiveSell);
     }
 
     private static WhatIfRequest MakeRequest(

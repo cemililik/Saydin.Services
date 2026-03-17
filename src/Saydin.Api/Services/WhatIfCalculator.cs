@@ -2,6 +2,7 @@ using System.Text.Json;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
+using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 using StackExchange.Redis;
 
@@ -16,6 +17,7 @@ public sealed class WhatIfCalculator(
     private const int    FreeUserDailyLimit    = 10;
     private const string PremiumTier           = "premium";
     private const string WhatIfUsageKeyPrefix  = "usage:whatif:";
+    private const int    MaxPriceHistoryPoints = 60;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -36,7 +38,7 @@ public sealed class WhatIfCalculator(
         if (request.BuyDate > sellDate)
             throw new ArgumentException("Alış tarihi satış tarihinden sonra olamaz.");
 
-        var cacheKey = $"whatif:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}";
+        var cacheKey = $"whatif:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}";
 
         var cached = await TryGetCachedAsync<WhatIfResponse>(cacheKey);
         if (cached is not null) return cached;
@@ -77,6 +79,18 @@ public sealed class WhatIfCalculator(
             ? 0m
             : Math.Round(profitLossTry / initialValueTry * 100, 2, MidpointRounding.AwayFromZero);
 
+        IReadOnlyList<PriceHistoryPoint> priceHistory;
+        try
+        {
+            var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, "daily", ct);
+            priceHistory = SamplePriceHistory(range);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Fiyat geçmişi alınamadı: {Symbol}", symbol);
+            priceHistory = Array.Empty<PriceHistoryPoint>();
+        }
+
         var response = new WhatIfResponse(
             AssetSymbol:       symbol,
             AssetDisplayName:  asset.DisplayName,
@@ -89,7 +103,8 @@ public sealed class WhatIfCalculator(
             FinalValueTry:     finalValueTry,
             ProfitLossTry:     profitLossTry,
             ProfitLossPercent: profitLossPercent,
-            IsProfit:          profitLossTry >= 0
+            IsProfit:          profitLossTry >= 0,
+            PriceHistory:      priceHistory
         );
 
         await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
@@ -99,6 +114,22 @@ public sealed class WhatIfCalculator(
             symbol, request.BuyDate, sellDate, amountType, request.Amount, profitLossPercent);
 
         return response;
+    }
+
+    private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(
+        IReadOnlyList<PricePoint> points, int maxPoints = MaxPriceHistoryPoints)
+    {
+        if (points.Count == 0) return Array.Empty<PriceHistoryPoint>();
+        if (points.Count <= maxPoints)
+            return points.Select(p => new PriceHistoryPoint(p.PriceDate, p.Close)).ToList();
+
+        var result = new List<PriceHistoryPoint>(maxPoints);
+        for (var i = 0; i < maxPoints; i++)
+        {
+            var idx = Math.Min((int)((double)i * (points.Count - 1) / (maxPoints - 1)), points.Count - 1);
+            result.Add(new PriceHistoryPoint(points[idx].PriceDate, points[idx].Close));
+        }
+        return result;
     }
 
     private async Task<T?> TryGetCachedAsync<T>(string key) where T : class

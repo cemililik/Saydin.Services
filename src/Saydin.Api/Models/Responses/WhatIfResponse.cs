@@ -1,5 +1,7 @@
 namespace Saydin.Api.Models.Responses;
 
+public record PriceHistoryPoint(DateOnly Date, decimal Price);
+
 public record WhatIfResponse(
     string AssetSymbol,
     string AssetDisplayName,
@@ -12,5 +14,6 @@ public record WhatIfResponse(
     decimal FinalValueTry,
     decimal ProfitLossTry,
     decimal ProfitLossPercent,
-    bool IsProfit
+    bool IsProfit,
+    IReadOnlyList<PriceHistoryPoint> PriceHistory
 );

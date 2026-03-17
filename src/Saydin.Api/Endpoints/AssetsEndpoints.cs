@@ -28,7 +28,7 @@ public static class AssetsEndpoints
         IAssetService assetService,
         CancellationToken ct)
     {
-        var assets = await assetService.GetAllAsync(ct);
+        var assets = await assetService.GetAllAssetInfoAsync(ct);
         return Results.Ok(new { assets });
     }
 
