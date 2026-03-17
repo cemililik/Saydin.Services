@@ -433,7 +433,7 @@ public class WhatIfCalculatorTests
         var first = points.First().PriceDate;
         var last  = points.Last().PriceDate;
         result.PriceHistory.Should().AllSatisfy(p =>
-            p.Date.Should().Match<DateOnly>(d => d >= first && d <= last));
+            (p.Date >= first && p.Date <= last).Should().BeTrue());
     }
 
     [Fact]
