@@ -13,8 +13,9 @@ namespace Saydin.Api.Services;
 public sealed class WhatIfCalculator(
     IAssetService assetService,
     ISavedScenarioRepository scenarioRepository,
+    IInflationRepository inflationRepository,
     IConnectionMultiplexer redis,
-    IOptions<FreemiumOptions> options,
+    IOptions<PlanOptions> options,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
     private const string PremiumTier          = "premium";
@@ -50,18 +51,26 @@ public sealed class WhatIfCalculator(
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         await CheckDailyLimitAsync(user, deviceId);
 
-        // Her sembol için paralel hesaplama — her biri kendi cache'inden yararlanır
-        var tasks = request.AssetSymbols
+        // DbContext scoped olduğu için paralel çalıştırılamaz; sıralı çalıştırılır.
+        // Redis cache'i sayesinde tekrar eden semboller hızla yanıtlanır.
+        var symbols = request.AssetSymbols
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(symbol => CalculateCoreAsync(new WhatIfRequest(
-                AssetSymbol: symbol,
-                BuyDate:     request.BuyDate,
-                SellDate:    request.SellDate,
-                Amount:      request.Amount,
-                AmountType:  request.AmountType), ct))
             .ToList();
 
-        var results = await Task.WhenAll(tasks);
+        var resultList = new List<WhatIfResponse>(symbols.Count);
+        foreach (var symbol in symbols)
+        {
+            var item = await CalculateCoreAsync(new WhatIfRequest(
+                AssetSymbol:       symbol,
+                BuyDate:           request.BuyDate,
+                SellDate:          request.SellDate,
+                Amount:            request.Amount,
+                AmountType:        request.AmountType,
+                IncludeInflation:  request.IncludeInflation), ct);
+            resultList.Add(item);
+        }
+
+        var results = resultList.ToArray();
 
         // Karlılığa göre sırala (en yüksek ProfitLossPercent → Rank 1)
         var ranked = results
@@ -89,15 +98,21 @@ public sealed class WhatIfCalculator(
         if (request.BuyDate > sellDate)
             throw new ArgumentException("Alış tarihi satış tarihinden sonra olamaz.");
 
-        var cacheKey = $"whatif:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}";
+        var inflationSuffix = request.IncludeInflation ? ":inf" : "";
+        var cacheKey = $"whatif:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}{inflationSuffix}";
 
         var cached = await TryGetCachedAsync<WhatIfResponse>(cacheKey);
         if (cached is not null)
             return cached;
 
         // Fiyatlar AssetService üzerinden gelir — Redis cache'li
-        var buyPricePoint  = await assetService.GetPriceAsync(symbol, request.BuyDate, ct);
-        var sellPricePoint = await assetService.GetPriceAsync(symbol, sellDate, ct);
+        // Haftasonu/tatil durumunda en yakın işlem günü kullanılır (±7 gün)
+        var buyPricePoint  = await assetService.GetNearestPriceAsync(symbol, request.BuyDate, ct);
+        var sellPricePoint = await assetService.GetNearestPriceAsync(symbol, sellDate, ct);
+
+        // Kullanıcının seçtiği tarih ile fiilen kullanılan tarih farklıysa bildir
+        var actualBuyDate  = buyPricePoint.PriceDate  != request.BuyDate ? buyPricePoint.PriceDate  : (DateOnly?)null;
+        var actualSellDate = sellPricePoint.PriceDate != sellDate         ? sellPricePoint.PriceDate : (DateOnly?)null;
 
         var assets = await assetService.GetAllAsync(ct);
         var asset  = assets.FirstOrDefault(a => a.Symbol == symbol)
@@ -143,27 +158,74 @@ public sealed class WhatIfCalculator(
             priceHistory = Array.Empty<PriceHistoryPoint>();
         }
 
+        // ── Enflasyon düzeltmesi ────────────────────────────────────────────
+        decimal?  cumulativeInflationPercent = null;
+        decimal?  realProfitLossPercent      = null;
+        DateOnly? inflationDataAsOf          = null;
+
+        if (request.IncludeInflation)
+        {
+            try
+            {
+                var (buyIdx, buyIdxDate, sellIdx, sellIdxDate) =
+                    await inflationRepository.GetIndexValuesAsync(request.BuyDate, sellDate, ct);
+
+                if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
+                {
+                    // Birikimli enflasyon: (satış_endeksi / alış_endeksi) - 1
+                    cumulativeInflationPercent = Math.Round(
+                        (sellIdx.Value / buyIdx.Value - 1m) * 100, 2, MidpointRounding.AwayFromZero);
+
+                    // Fisher denklemi: reel_getiri = (1 + nominal) / (1 + enflasyon) - 1
+                    var nominalFactor   = 1m + profitLossPercent / 100m;
+                    var inflationFactor = 1m + cumulativeInflationPercent.Value / 100m;
+                    realProfitLossPercent = Math.Round(
+                        (nominalFactor / inflationFactor - 1m) * 100, 2, MidpointRounding.AwayFromZero);
+
+                    // Satış ayının tam verisi yoksa (TÜİK gecikmesi) gerçek tarih bildirilir
+                    var expectedSellMonth = new DateOnly(sellDate.Year, sellDate.Month, 1);
+                    if (sellIdxDate.HasValue && sellIdxDate.Value < expectedSellMonth)
+                        inflationDataAsOf = sellIdxDate;
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Enflasyon endeksi bulunamadı: {BuyDate} / {SellDate}", request.BuyDate, sellDate);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Enflasyon hesabı başarısız, nominal getiri kullanılıyor");
+            }
+        }
+
         var response = new WhatIfResponse(
-            AssetSymbol:       symbol,
-            AssetDisplayName:  asset.DisplayName,
-            BuyDate:           request.BuyDate,
-            SellDate:          sellDate,
-            BuyPrice:          buyPrice,
-            SellPrice:         sellPrice,
-            UnitsAcquired:     unitsAcquired,
-            InitialValueTry:   initialValueTry,
-            FinalValueTry:     finalValueTry,
-            ProfitLossTry:     profitLossTry,
-            ProfitLossPercent: profitLossPercent,
-            IsProfit:          profitLossTry >= 0,
-            PriceHistory:      priceHistory
+            AssetSymbol:                symbol,
+            AssetDisplayName:           asset.DisplayName,
+            BuyDate:                    request.BuyDate,
+            SellDate:                   sellDate,
+            BuyPrice:                   buyPrice,
+            SellPrice:                  sellPrice,
+            UnitsAcquired:              unitsAcquired,
+            InitialValueTry:            initialValueTry,
+            FinalValueTry:              finalValueTry,
+            ProfitLossTry:              profitLossTry,
+            ProfitLossPercent:          profitLossPercent,
+            IsProfit:                   profitLossTry >= 0,
+            PriceHistory:               priceHistory,
+            CumulativeInflationPercent: cumulativeInflationPercent,
+            RealProfitLossPercent:      realProfitLossPercent,
+            InflationDataAsOf:          inflationDataAsOf,
+            ActualBuyDate:              actualBuyDate,
+            ActualSellDate:             actualSellDate
         );
 
         await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
 
         logger.LogInformation(
-            "WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} {AmountType}:{Amount} → %{ProfitLossPercent}",
-            symbol, request.BuyDate, sellDate, amountType, request.Amount, profitLossPercent);
+            "WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} {AmountType}:{Amount} → %{ProfitLossPercent} (reel: %{RealProfitLossPercent})",
+            symbol, request.BuyDate, sellDate, amountType, request.Amount,
+            profitLossPercent, realProfitLossPercent?.ToString() ?? "-");
 
         return response;
     }
@@ -224,8 +286,9 @@ public sealed class WhatIfCalculator(
             var value = await db.StringGetAsync(key);
             var count = value.HasValue ? (long)value : 0;
 
-            if (count >= options.Value.DailyCalculationLimit)
-                throw new DailyLimitExceededException(options.Value.DailyCalculationLimit);
+            var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
+            if (limit > 0 && count >= limit)
+                throw new DailyLimitExceededException(limit);
         }
         catch (Exception ex) when (ex is not DailyLimitExceededException)
         {

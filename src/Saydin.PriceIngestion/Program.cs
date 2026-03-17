@@ -108,6 +108,15 @@ try
         })
         .AddStandardResilienceHandler();
 
+    builder.Services
+        .AddHttpClient("evds", client =>
+        {
+            client.BaseAddress = new Uri("https://evds3.tcmb.gov.tr/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("Saydin/1.0 (+https://saydin.app)");
+        })
+        .AddStandardResilienceHandler();
+
     // ─── EF Core ─────────────────────────────────────────────────────────────
     var pgConnection = builder.Configuration.GetConnectionString("Postgres")
         ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
@@ -119,11 +128,13 @@ try
 
     // ─── Adapters & Repositories ──────────────────────────────────────────────
     builder.Services.AddSingleton<IPriceIngestionRepository, PriceIngestionRepository>();
+    builder.Services.AddSingleton<IInflationIngestionRepository, InflationIngestionRepository>();
     builder.Services.AddSingleton<TcmbAdapter>();
     builder.Services.AddSingleton<CoinGeckoAdapter>();
     // builder.Services.AddSingleton<GoldApiAdapter>();  // Pasif
     builder.Services.AddSingleton<OpenExchangeRatesAdapter>();
     builder.Services.AddSingleton<TwelveDataAdapter>();
+    builder.Services.AddSingleton<EvdsInflationAdapter>();
 
     // ─── Workers ─────────────────────────────────────────────────────────────
     builder.Services.AddSingleton<TcmbWorker>();
@@ -131,6 +142,7 @@ try
     // builder.Services.AddSingleton<GoldApiWorker>();  // Pasif
     builder.Services.AddSingleton<OpenExchangeRatesWorker>();
     builder.Services.AddSingleton<TwelveDataWorker>();
+    builder.Services.AddSingleton<EvdsInflationWorker>();
     builder.Services.AddHostedService<IngestionOrchestrator>();
 
     var host = builder.Build();

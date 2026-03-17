@@ -5,5 +5,6 @@ public record CompareRequest(
     DateOnly     BuyDate,
     DateOnly?    SellDate,
     decimal      Amount,
-    string       AmountType      // "try" | "units" | "grams"
+    string       AmountType,     // "try" | "units" | "grams"
+    bool         IncludeInflation = false
 );

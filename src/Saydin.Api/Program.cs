@@ -159,12 +159,13 @@ try
     builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
 
     // ─── Options ─────────────────────────────────────────────────────────────
-    builder.Services.Configure<FreemiumOptions>(
-        builder.Configuration.GetSection(FreemiumOptions.SectionName));
+    builder.Services.Configure<PlanOptions>(
+        builder.Configuration.GetSection(PlanOptions.SectionName));
 
     // ─── Repositories & Services ─────────────────────────────────────────────
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
+    builder.Services.AddScoped<IInflationRepository, InflationRepository>();
     builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
     builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
@@ -188,6 +189,7 @@ try
     app.MapWhatIfEndpoints();
     app.MapAssetsEndpoints();
     app.MapScenariosEndpoints();
+    app.MapAppConfigEndpoints();
 
     Log.Information("Saydin.Api başlatılıyor — ortam: {Environment}", app.Environment.EnvironmentName);
     await app.RunAsync();

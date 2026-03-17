@@ -10,7 +10,7 @@ namespace Saydin.Api.Services;
 
 public sealed class SavedScenarioService(
     ISavedScenarioRepository repository,
-    IOptions<FreemiumOptions> options,
+    IOptions<PlanOptions> options,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
 
@@ -31,12 +31,12 @@ public sealed class SavedScenarioService(
     {
         var user = await GetOrCreateUserAsync(deviceId, ct);
 
-        if (user.Tier == "free")
+        var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
+        if (scenarioLimit > 0)
         {
-            var limit = options.Value.ScenarioLimit;
             var count = await repository.CountByUserIdAsync(user.Id, ct);
-            if (count >= limit)
-                throw new ScenarioLimitExceededException(limit);
+            if (count >= scenarioLimit)
+                throw new ScenarioLimitExceededException(scenarioLimit);
         }
 
         var asset = await repository.GetActiveAssetBySymbolAsync(request.AssetSymbol, ct)
