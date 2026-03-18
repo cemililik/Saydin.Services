@@ -1,9 +1,11 @@
 using System.Text.Json;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
+
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 using StackExchange.Redis;
@@ -16,6 +18,7 @@ public sealed class WhatIfCalculator(
     IInflationRepository inflationRepository,
     IConnectionMultiplexer redis,
     IOptions<PlanOptions> options,
+    IStringLocalizer<ErrorMessages> localizer,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
     private const string PremiumTier          = "premium";
@@ -46,7 +49,7 @@ public sealed class WhatIfCalculator(
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
         if (request.AssetSymbols.Count is < 2 or > 5)
-            throw new ArgumentException("Karşılaştırma için 2 ile 5 arasında sembol gereklidir.");
+            throw new ArgumentException(localizer["CompareSymbolCount"]);
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         await CheckDailyLimitAsync(user, deviceId);
@@ -96,10 +99,11 @@ public sealed class WhatIfCalculator(
         var amountType = request.AmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
-            throw new ArgumentException("Alış tarihi satış tarihinden sonra olamaz.");
+            throw new ArgumentException(localizer["BuyDateAfterSellDate"]);
 
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
-        var cacheKey = $"whatif:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}{inflationSuffix}";
+        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        var cacheKey = $"whatif:v3:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}{inflationSuffix}:{lang}";
 
         var cached = await TryGetCachedAsync<WhatIfResponse>(cacheKey);
         if (cached is not null)
@@ -137,7 +141,7 @@ public sealed class WhatIfCalculator(
                 break;
             default:
                 throw new ArgumentException(
-                    $"Geçersiz amountType: '{request.AmountType}'. Beklenen: try, units, grams");
+                    string.Format(localizer["InvalidAmountType"], request.AmountType));
         }
 
         var finalValueTry     = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
@@ -201,7 +205,7 @@ public sealed class WhatIfCalculator(
 
         var response = new WhatIfResponse(
             AssetSymbol:                symbol,
-            AssetDisplayName:           asset.DisplayName,
+            AssetDisplayName:           LocalizeAssetName(symbol, asset.DisplayName),
             BuyDate:                    request.BuyDate,
             SellDate:                   sellDate,
             BuyPrice:                   buyPrice,
@@ -228,6 +232,12 @@ public sealed class WhatIfCalculator(
             profitLossPercent, realProfitLossPercent?.ToString() ?? "-");
 
         return response;
+    }
+
+    private string LocalizeAssetName(string symbol, string fallbackDisplayName)
+    {
+        var localized = localizer[$"Asset_{symbol}"];
+        return localized.ResourceNotFound ? fallbackDisplayName : localized.Value;
     }
 
     private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(

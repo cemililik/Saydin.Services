@@ -1,8 +1,10 @@
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
+
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
@@ -11,6 +13,7 @@ namespace Saydin.Api.Services;
 public sealed class SavedScenarioService(
     ISavedScenarioRepository repository,
     IOptions<PlanOptions> options,
+    IStringLocalizer<ErrorMessages> localizer,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
     private static readonly HashSet<string> AllowedTypes = ["what_if", "comparison", "portfolio"];
@@ -42,7 +45,7 @@ public sealed class SavedScenarioService(
 
         if (!AllowedTypes.Contains(request.Type))
             throw new ArgumentException(
-                $"Geçersiz senaryo tipi: '{request.Type}'. İzin verilen değerler: {string.Join(", ", AllowedTypes)}");
+                string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", AllowedTypes)));
 
         // what_if tipinde asset FK kontrolü yap; diğer tipler için atla
         Asset? asset = null;

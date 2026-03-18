@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Localization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
@@ -93,6 +95,9 @@ try
             })
             .AddPrometheusExporter());
 
+    // ─── Localization ──────────────────────────────────────────────────────────
+    builder.Services.AddLocalization();
+
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();
     builder.Services.AddExceptionHandler<PriceNotFoundExceptionHandler>();
@@ -174,6 +179,17 @@ try
     var app = builder.Build();
 
     app.UseResponseCompression();
+
+    // ─── Request Localization ──────────────────────────────────────────────────
+    var supportedCultures = new[] { new CultureInfo("tr"), new CultureInfo("en") };
+    app.UseRequestLocalization(new RequestLocalizationOptions
+    {
+        DefaultRequestCulture = new RequestCulture("tr"),
+        SupportedCultures = supportedCultures,
+        SupportedUICultures = supportedCultures,
+        ApplyCurrentCultureToResponseHeaders = true
+    });
+
     app.UseExceptionHandler();
     app.UseSerilogRequestLogging();
 

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <data name="ServerError"><value>Sunucu hatas&#x131;</value></data>
+  <data name="UnexpectedError"><value>Beklenmeyen bir hata olu&#x15F;tu. L&#x00FC;tfen tekrar deneyin.</value></data>
+  <data name="PriceNotFound"><value>Fiyat bulunamad&#x131;</value></data>
+  <data name="AssetNotFound"><value>Varl&#x131;k bulunamad&#x131;</value></data>
+  <data name="ScenarioNotFound"><value>Senaryo bulunamad&#x131;</value></data>
+  <data name="ScenarioLimitExceeded"><value>Senaryo limiti a&#x15F;&#x131;ld&#x131;</value></data>
+  <data name="DailyLimitExceeded"><value>G&#x00FC;nl&#x00FC;k hesaplama limitine ula&#x15F;&#x131;ld&#x131;</value></data>
+  <data name="DeviceIdRequired"><value>X-Device-ID gerekli</value></data>
+  <data name="DeviceIdRequiredDetail"><value>Bu endpoint'e eri&#x15F;mek i&#x00E7;in X-Device-ID header'&#x131; tek, bo&#x15F; olmayan bir de&#x11F;erle g&#x00F6;nderilmelidir.</value></data>
+  <data name="DeviceIdInvalid"><value>X-Device-ID ge&#x00E7;ersiz</value></data>
+  <data name="DeviceIdInvalidDetail"><value>X-Device-ID en fazla {0} karakter olmal&#x131; ve yaln&#x131;zca harf, rakam, '-', '_' ve '.' i&#x00E7;erebilir.</value></data>
+  <data name="CompareSymbolCount"><value>Kar&#x15F;&#x131;la&#x15F;t&#x131;rma i&#x00E7;in 2 ile 5 aras&#x131;nda sembol gereklidir.</value></data>
+  <data name="BuyDateAfterSellDate"><value>Al&#x131;&#x15F; tarihi sat&#x131;&#x15F; tarihinden sonra olamaz.</value></data>
+  <data name="InvalidAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. Beklenen: try, units, grams</value></data>
+  <data name="InvalidScenarioType"><value>Ge&#x00E7;ersiz senaryo tipi: '{0}'. &#x130;zin verilen de&#x11F;erler: {1}</value></data>
+  <!-- Asset Display Names -->
+  <data name="Asset_USDTRY"><value>Dolar/TL</value></data>
+  <data name="Asset_EURTRY"><value>Euro/TL</value></data>
+  <data name="Asset_GBPTRY"><value>Sterlin/TL</value></data>
+  <data name="Asset_CHFTRY"><value>&#x130;svi&#x00E7;re Frang&#x131;/TL</value></data>
+  <data name="Asset_JPYTRY"><value>Japon Yeni/TL</value></data>
+  <data name="Asset_SARTRY"><value>Suudi Riyali/TL</value></data>
+  <data name="Asset_AEDTRY"><value>BAE Dirhemi/TL</value></data>
+  <data name="Asset_AUDTRY"><value>Avustralya Dolar&#x131;</value></data>
+  <data name="Asset_AZNTRY"><value>Azerbaycan Manat&#x131;</value></data>
+  <data name="Asset_CADTRY"><value>Kanada Dolar&#x131;</value></data>
+  <data name="Asset_CNYTRY"><value>&#x00C7;in Yuan&#x131;</value></data>
+  <data name="Asset_DKKTRY"><value>Danimarka Kronu</value></data>
+  <data name="Asset_KRWTRY"><value>G&#x00FC;ney Kore Wonu</value></data>
+  <data name="Asset_KWDTRY"><value>Kuveyt Dinar&#x131;</value></data>
+  <data name="Asset_KZTTRY"><value>Kazakistan Tengesi</value></data>
+  <data name="Asset_NOKTRY"><value>Norve&#x00E7; Kronu</value></data>
+  <data name="Asset_QARTRY"><value>Katar Riyali</value></data>
+  <data name="Asset_RONTRY"><value>Romanya Leyi</value></data>
+  <data name="Asset_RUBTRY"><value>Rus Rublesi</value></data>
+  <data name="Asset_SEKTRY"><value>&#x130;sve&#x00E7; Kronu</value></data>
+  <data name="Asset_XAU_TRY_GRAM"><value>Alt&#x131;n (Gram/TL)</value></data>
+  <data name="Asset_XAG_TRY_GRAM"><value>G&#x00FC;m&#x00FC;&#x15F; (Gram/TL)</value></data>
+  <data name="Asset_BTC"><value>Bitcoin</value></data>
+  <data name="Asset_ETH"><value>Ethereum</value></data>
+  <data name="Asset_BNB"><value>BNB</value></data>
+  <data name="Asset_XRP"><value>XRP</value></data>
+  <data name="Asset_SOL"><value>Solana</value></data>
+  <data name="Asset_THYAO"><value>T&#x00FC;rk Hava Yollar&#x131;</value></data>
+  <data name="Asset_GARAN"><value>Garanti BBVA</value></data>
+</root>

@@ -1,11 +1,15 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Localization;
+
 using Saydin.Shared.Exceptions;
 
 namespace Saydin.Api.Exceptions;
 
-public sealed class ScenarioLimitExceededExceptionHandler(ILogger<ScenarioLimitExceededExceptionHandler> logger)
+public sealed class ScenarioLimitExceededExceptionHandler(
+    ILogger<ScenarioLimitExceededExceptionHandler> logger,
+    IStringLocalizer<ErrorMessages> localizer)
     : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
@@ -23,7 +27,7 @@ public sealed class ScenarioLimitExceededExceptionHandler(ILogger<ScenarioLimitE
         await context.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type = "https://saydin.app/errors/scenario-limit-exceeded",
-            Title = "Senaryo limiti aşıldı",
+            Title = localizer["ScenarioLimitExceeded"],
             Status = StatusCodes.Status422UnprocessableEntity,
             Detail = ex.Message,
             Extensions =
