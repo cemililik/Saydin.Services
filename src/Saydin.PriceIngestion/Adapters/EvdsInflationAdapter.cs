@@ -44,6 +44,18 @@ public sealed class EvdsInflationAdapter(
         try
         {
             var response = await client.SendAsync(request, ct);
+
+            // 4xx hataları kalıcıdır — sessizce yutmak yerine yukarı fırlat
+            if ((int)response.StatusCode >= 400 && (int)response.StatusCode < 500)
+            {
+                var body = await response.Content.ReadAsStringAsync(ct);
+                logger.LogError(
+                    "EVDS TÜFE kalıcı API hatası {StatusCode}: {Body} ({From}–{To})",
+                    (int)response.StatusCode, body, from, to);
+                throw new HttpRequestException(
+                    $"EVDS API kalıcı hata: {(int)response.StatusCode}", null, response.StatusCode);
+            }
+
             response.EnsureSuccessStatusCode();
 
             var json = await response.Content.ReadAsStringAsync(ct);
@@ -59,9 +71,15 @@ public sealed class EvdsInflationAdapter(
         {
             throw;
         }
+        catch (HttpRequestException)
+        {
+            // 4xx hataları zaten loglandı, yukarı fırlat (caller'a bildir)
+            throw;
+        }
         catch (Exception ex)
         {
-            logger.LogError(ex, "EVDS TÜFE veri çekimi başarısız ({From}–{To})", from, to);
+            // Geçici hatalar (network, deserialization vb.) — boş liste dön
+            logger.LogError(ex, "EVDS TÜFE geçici hata ({From}–{To})", from, to);
             return [];
         }
     }

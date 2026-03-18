@@ -13,6 +13,7 @@ public sealed class SavedScenarioService(
     IOptions<PlanOptions> options,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
+    private static readonly HashSet<string> AllowedTypes = ["what_if", "comparison", "portfolio"];
 
     public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct)
     {
@@ -38,6 +39,10 @@ public sealed class SavedScenarioService(
             if (count >= scenarioLimit)
                 throw new ScenarioLimitExceededException(scenarioLimit);
         }
+
+        if (!AllowedTypes.Contains(request.Type))
+            throw new ArgumentException(
+                $"Geçersiz senaryo tipi: '{request.Type}'. İzin verilen değerler: {string.Join(", ", AllowedTypes)}");
 
         // what_if tipinde asset FK kontrolü yap; diğer tipler için atla
         Asset? asset = null;

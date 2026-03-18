@@ -36,8 +36,8 @@ public sealed class WhatIfCalculator(
 
         var response = await CalculateCoreAsync(request, ct);
 
-        // Yalnızca başarılı hesaplamalar kotadan düşülür
-        await IncrementDailyUsageAsync(user, deviceId);
+        // Atomik check+increment: başarılı hesaplamalar kotadan düşülür
+        await IncrementAndEnforceLimitAsync(user, deviceId);
         return response;
     }
 
@@ -78,8 +78,8 @@ public sealed class WhatIfCalculator(
             .Select((r, i) => new CompareResultItem(Rank: i + 1, Calculation: r))
             .ToList();
 
-        // Karşılaştırma da 1 hak olarak sayılır
-        await IncrementDailyUsageAsync(user, deviceId);
+        // Karşılaştırma da 1 hak olarak sayılır (atomik check+increment)
+        await IncrementAndEnforceLimitAsync(user, deviceId);
 
         logger.LogInformation(
             "Karşılaştırma hesaplandı: {Symbols} {BuyDate}→{SellDate}",
@@ -279,6 +279,9 @@ public sealed class WhatIfCalculator(
     {
         if (user?.Tier == PremiumTier) return;
 
+        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
+        if (limit <= 0) return;
+
         var key = BuildUsageKey(user, deviceId);
         try
         {
@@ -286,8 +289,7 @@ public sealed class WhatIfCalculator(
             var value = await db.StringGetAsync(key);
             var count = value.HasValue ? (long)value : 0;
 
-            var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-            if (limit > 0 && count >= limit)
+            if (count >= limit)
                 throw new DailyLimitExceededException(limit);
         }
         catch (Exception ex) when (ex is not DailyLimitExceededException)
@@ -296,9 +298,16 @@ public sealed class WhatIfCalculator(
         }
     }
 
-    private async Task IncrementDailyUsageAsync(User? user, string deviceId)
+    /// <summary>
+    /// Atomik olarak sayacı artırır ve limiti aşıyorsa -1 döner.
+    /// Check + increment tek Lua script'te yapılarak race condition önlenir.
+    /// </summary>
+    private async Task IncrementAndEnforceLimitAsync(User? user, string deviceId)
     {
         if (user?.Tier == PremiumTier) return;
+
+        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
+        if (limit <= 0) return;
 
         var key   = BuildUsageKey(user, deviceId);
         var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
@@ -309,11 +318,19 @@ public sealed class WhatIfCalculator(
                 if count == 1 then
                   redis.call('PEXPIRE', KEYS[1], ARGV[1])
                 end
+                if tonumber(count) > tonumber(ARGV[2]) then
+                  redis.call('DECR', KEYS[1])
+                  return -1
+                end
                 return count
                 """;
-            await redis.GetDatabase().ScriptEvaluateAsync(script, keys: [key], values: [ttlMs]);
+            var result = (long)await redis.GetDatabase()
+                .ScriptEvaluateAsync(script, keys: [key], values: [ttlMs, limit]);
+
+            if (result == -1)
+                throw new DailyLimitExceededException(limit);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not DailyLimitExceededException)
         {
             logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
         }

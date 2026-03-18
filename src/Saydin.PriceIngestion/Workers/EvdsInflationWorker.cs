@@ -106,16 +106,23 @@ public sealed class EvdsInflationWorker(
 
     private TimeSpan GetDelayUntilNextRun()
     {
-        var now        = DateTime.UtcNow;
-        var runTime    = MonthlyRunUtcTime;
-        var runDay     = MonthlyRunDay;
+        var now     = DateTime.UtcNow;
+        var runTime = MonthlyRunUtcTime;
+        var runDay  = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(now.Year, now.Month));
+
         var thisMonthRun = new DateTime(now.Year, now.Month, runDay,
             runTime.Hour, runTime.Minute, 0, DateTimeKind.Utc);
 
-        var nextRun = now < thisMonthRun
-            ? thisMonthRun
-            : thisMonthRun.AddMonths(1);
+        if (now < thisMonthRun)
+            return thisMonthRun - now;
 
-        return nextRun - now;
+        // Sonraki ay için de clamp uygula
+        var nextMonth    = now.Month == 12 ? 1 : now.Month + 1;
+        var nextYear     = now.Month == 12 ? now.Year + 1 : now.Year;
+        var nextRunDay   = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(nextYear, nextMonth));
+        var nextMonthRun = new DateTime(nextYear, nextMonth, nextRunDay,
+            runTime.Hour, runTime.Minute, 0, DateTimeKind.Utc);
+
+        return nextMonthRun - now;
     }
 }
