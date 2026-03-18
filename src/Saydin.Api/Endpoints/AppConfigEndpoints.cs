@@ -40,6 +40,7 @@ public static class AppConfigEndpoints
                 Comparison:          tierOptions.Features.Comparison,
                 InflationAdjustment: tierOptions.Features.InflationAdjustment,
                 Share:               tierOptions.Features.Share,
+                Dca:                 tierOptions.Features.Dca,
                 PriceHistoryMonths:  tierOptions.Features.PriceHistoryMonths)));
     }
 }

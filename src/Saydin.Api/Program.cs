@@ -172,6 +172,7 @@ try
     builder.Services.AddScoped<IAssetService, AssetService>();
     builder.Services.AddScoped<IInflationRepository, InflationRepository>();
     builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
+    builder.Services.AddScoped<IDcaCalculator, DcaCalculator>();
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
     builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
 
@@ -203,6 +204,7 @@ try
     app.MapHealthChecks("/health");
 
     app.MapWhatIfEndpoints();
+    app.MapDcaEndpoints();
     app.MapAssetsEndpoints();
     app.MapScenariosEndpoints();
     app.MapAppConfigEndpoints();

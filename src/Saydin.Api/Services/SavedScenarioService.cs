@@ -16,7 +16,7 @@ public sealed class SavedScenarioService(
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
-    private static readonly HashSet<string> AllowedTypes = ["what_if", "comparison", "portfolio"];
+    private static readonly HashSet<string> AllowedTypes = ["what_if", "comparison", "portfolio", "dca"];
 
     public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct)
     {
@@ -49,7 +49,7 @@ public sealed class SavedScenarioService(
 
         // what_if tipinde asset FK kontrolü yap; diğer tipler için atla
         Asset? asset = null;
-        if (request.Type is "what_if")
+        if (request.Type is "what_if" or "dca")
         {
             asset = await repository.GetActiveAssetBySymbolAsync(request.AssetSymbol, ct)
                 ?? throw new AssetNotFoundException(request.AssetSymbol);
