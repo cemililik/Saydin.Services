@@ -88,6 +88,24 @@ public sealed class AssetService(
         return price;
     }
 
+    public async Task<PricePoint> GetNearestPriceAsync(string symbol, DateOnly date, CancellationToken ct)
+    {
+        const int MaxDays = 7;
+        var upperSymbol = symbol.ToUpperInvariant();
+
+        // Cache: nearest-price:{symbol}:{date} — 24 saat (işlem günleri değişmez)
+        var cacheKey = $"nearest-price:{upperSymbol}:{date:yyyy-MM-dd}";
+
+        var cached = await TryGetCachedAsync<PricePoint>(cacheKey);
+        if (cached is not null) return cached;
+
+        var price = await repository.GetNearestPriceAsync(upperSymbol, date, MaxDays, ct)
+            ?? throw new PriceNotFoundException(symbol, date);
+
+        await TrySetCacheAsync(cacheKey, price, TimeSpan.FromHours(24));
+        return price;
+    }
+
     public async Task<DateOnly> GetLatestPriceDateAsync(string symbol, CancellationToken ct)
     {
         var cacheKey = $"latest-date:{symbol.ToUpperInvariant()}";

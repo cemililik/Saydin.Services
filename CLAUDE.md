@@ -32,6 +32,27 @@ Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
 
 ---
 
+## Cache Kuralı (KRİTİK)
+
+**Cache ile ilgili herhangi bir işlem yapmadan önce `docs/cache-strategy.md` dosyasını oku.**
+Cache key ekleme, TTL değiştirme, limit mantığı güncelleme veya Redis kullanımı değiştirme
+durumlarında işlem sonrası bu dokümanı güncelle.
+
+---
+
+## Commit Kuralı (KRİTİK)
+
+**Kod değişikliklerini commit etmeden önce mutlaka build ve testleri çalıştır.**
+
+```bash
+docker compose run --rm api dotnet build
+docker compose run --rm api dotnet test
+```
+
+Build veya test başarısız olursa commit atma, önce hatayı düzelt.
+
+---
+
 ## Mimari Kurallar (KESINLIKLE UYULACAK)
 
 ### Teknoloji
@@ -348,6 +369,7 @@ dotnet ef database update \
 
 ### Kurallar
 
+- **Diyagram ve akış şemaları Mermaid ile çizilir** — ASCII art YASAK. Markdown dosyalarında ` ```mermaid ` blokları kullan.
 - **Backend'e özgü** her doküman `src/Saydin.Services/docs/` içine gider — kök `docs/` içine konmaz.
 - Kök `docs/`'a yalnızca birden fazla bileşeni (istemci + servisler) kapsayan belgeler eklenir.
 - Yeni endpoint, adapter veya servis eklendiğinde ilgili `docs/` dosyaları güncellenir.

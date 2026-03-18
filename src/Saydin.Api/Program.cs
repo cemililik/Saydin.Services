@@ -13,6 +13,7 @@ using Serilog.Sinks.OpenTelemetry;
 using Scalar.AspNetCore;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Exceptions;
+using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Data;
@@ -157,9 +158,14 @@ try
     // ─── Response Compression ────────────────────────────────────────────────
     builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
 
+    // ─── Options ─────────────────────────────────────────────────────────────
+    builder.Services.Configure<PlanOptions>(
+        builder.Configuration.GetSection(PlanOptions.SectionName));
+
     // ─── Repositories & Services ─────────────────────────────────────────────
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
+    builder.Services.AddScoped<IInflationRepository, InflationRepository>();
     builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
     builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
@@ -183,6 +189,7 @@ try
     app.MapWhatIfEndpoints();
     app.MapAssetsEndpoints();
     app.MapScenariosEndpoints();
+    app.MapAppConfigEndpoints();
 
     Log.Information("Saydin.Api başlatılıyor — ortam: {Environment}", app.Environment.EnvironmentName);
     await app.RunAsync();

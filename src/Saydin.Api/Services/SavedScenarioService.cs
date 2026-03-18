@@ -1,5 +1,7 @@
+using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -8,9 +10,10 @@ namespace Saydin.Api.Services;
 
 public sealed class SavedScenarioService(
     ISavedScenarioRepository repository,
+    IOptions<PlanOptions> options,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
-    private const int FreeUserScenarioLimit = 5;
+    private static readonly HashSet<string> AllowedTypes = ["what_if", "comparison", "portfolio"];
 
     public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct)
     {
@@ -29,35 +32,48 @@ public sealed class SavedScenarioService(
     {
         var user = await GetOrCreateUserAsync(deviceId, ct);
 
-        if (user.Tier == "free")
+        var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
+        if (scenarioLimit > 0)
         {
             var count = await repository.CountByUserIdAsync(user.Id, ct);
-            if (count >= FreeUserScenarioLimit)
-                throw new ScenarioLimitExceededException(FreeUserScenarioLimit);
+            if (count >= scenarioLimit)
+                throw new ScenarioLimitExceededException(scenarioLimit);
         }
 
-        var asset = await repository.GetActiveAssetBySymbolAsync(request.AssetSymbol, ct)
-            ?? throw new AssetNotFoundException(request.AssetSymbol);
+        if (!AllowedTypes.Contains(request.Type))
+            throw new ArgumentException(
+                $"Geçersiz senaryo tipi: '{request.Type}'. İzin verilen değerler: {string.Join(", ", AllowedTypes)}");
+
+        // what_if tipinde asset FK kontrolü yap; diğer tipler için atla
+        Asset? asset = null;
+        if (request.Type is "what_if")
+        {
+            asset = await repository.GetActiveAssetBySymbolAsync(request.AssetSymbol, ct)
+                ?? throw new AssetNotFoundException(request.AssetSymbol);
+        }
 
         var scenario = new SavedScenario
         {
             Id = Guid.NewGuid(),
             UserId = user.Id,
-            AssetId = asset.Id,
+            AssetId = asset?.Id,
+            AssetSymbol = request.AssetSymbol,
+            AssetDisplayName = request.AssetDisplayName,
+            Type = request.Type,
+            ExtraData = request.ExtraData,
             BuyDate = request.BuyDate,
             SellDate = request.SellDate,
             Quantity = request.Amount,
             QuantityUnit = request.AmountType,
             Label = request.Label,
             CreatedAt = DateTimeOffset.UtcNow,
-            Asset = asset
         };
 
         await repository.CreateAsync(scenario, ct);
 
         logger.LogInformation(
-            "Senaryo kaydedildi: {DeviceId} → {AssetSymbol} {BuyDate}",
-            deviceId, request.AssetSymbol, request.BuyDate);
+            "Senaryo kaydedildi: {DeviceId} → {Type} {AssetSymbol} {BuyDate}",
+            deviceId, request.Type, request.AssetSymbol, request.BuyDate);
 
         return ToResponse(scenario);
     }
@@ -91,13 +107,15 @@ public sealed class SavedScenarioService(
 
     private static ScenarioResponse ToResponse(SavedScenario s) => new(
         s.Id,
-        s.Asset.Symbol,
-        s.Asset.DisplayName,
+        s.AssetSymbol,
+        s.AssetDisplayName,
         s.BuyDate,
         s.SellDate,
         s.Quantity,
         s.QuantityUnit,
         s.Label,
-        s.CreatedAt
+        s.CreatedAt,
+        s.Type,
+        s.ExtraData
     );
 }

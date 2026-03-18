@@ -21,6 +21,28 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
             .Where(pp => pp.Asset.Symbol == symbol && pp.PriceDate == date)
             .FirstOrDefaultAsync(ct);
 
+    public async Task<PricePoint?> GetNearestPriceAsync(
+        string symbol, DateOnly date, int maxDays, CancellationToken ct)
+    {
+        // Önce geriye: date'e eşit veya önceki en yakın gün
+        var backward = await context.PricePoints
+            .Where(pp => pp.Asset.Symbol == symbol
+                      && pp.PriceDate >= date.AddDays(-maxDays)
+                      && pp.PriceDate <= date)
+            .OrderByDescending(pp => pp.PriceDate)
+            .FirstOrDefaultAsync(ct);
+
+        if (backward is not null) return backward;
+
+        // Fallback: sonraki en yakın gün (tatil başında backfill henüz tamamlanmamış olabilir)
+        return await context.PricePoints
+            .Where(pp => pp.Asset.Symbol == symbol
+                      && pp.PriceDate > date
+                      && pp.PriceDate <= date.AddDays(maxDays))
+            .OrderBy(pp => pp.PriceDate)
+            .FirstOrDefaultAsync(ct);
+    }
+
     public async Task<DateOnly?> GetLatestPriceDateAsync(string symbol, CancellationToken ct)
         => await context.PricePoints
             .Where(pp => pp.Asset.Symbol == symbol)
