@@ -1,7 +1,9 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using Saydin.Api.Models.Requests;
+using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Entities;
@@ -15,6 +17,12 @@ public class SavedScenarioServiceTests
     private readonly SavedScenarioService _sut;
 
     private const string DeviceId = "test-device-001";
+
+    private static readonly PlanOptions PlanOptions = new()
+    {
+        Free    = new TierOptions { MaxSavedScenarios = 5 },
+        Premium = new TierOptions { MaxSavedScenarios = 0 }
+    };
 
     private static readonly Asset BtcAsset = new()
     {
@@ -44,7 +52,8 @@ public class SavedScenarioServiceTests
 
     public SavedScenarioServiceTests()
     {
-        _sut = new SavedScenarioService(_repository, NullLogger<SavedScenarioService>.Instance);
+        var options = Microsoft.Extensions.Options.Options.Create(PlanOptions);
+        _sut = new SavedScenarioService(_repository, options, NullLogger<SavedScenarioService>.Instance);
     }
 
     // ── GetScenariosAsync ────────────────────────────────────────────────────
@@ -57,16 +66,18 @@ public class SavedScenarioServiceTests
         {
             new()
             {
-                Id           = scenarioId,
-                UserId       = FreeUser.Id,
-                AssetId      = BtcAsset.Id,
-                Asset        = BtcAsset,
-                BuyDate      = new DateOnly(2020, 1, 1),
-                SellDate     = new DateOnly(2021, 1, 1),
-                Quantity     = 10000m,
-                QuantityUnit = "try",
-                Label        = "Test senaryosu",
-                CreatedAt    = DateTimeOffset.UtcNow
+                Id               = scenarioId,
+                UserId           = FreeUser.Id,
+                AssetId          = BtcAsset.Id,
+                AssetSymbol      = "BTC",
+                AssetDisplayName = "Bitcoin",
+                Type             = "what_if",
+                BuyDate          = new DateOnly(2020, 1, 1),
+                SellDate         = new DateOnly(2021, 1, 1),
+                Quantity         = 10000m,
+                QuantityUnit     = "try",
+                Label            = "Test senaryosu",
+                CreatedAt        = DateTimeOffset.UtcNow
             }
         };
 
@@ -82,6 +93,7 @@ public class SavedScenarioServiceTests
         result[0].Amount.Should().Be(10000m);
         result[0].AmountType.Should().Be("try");
         result[0].Label.Should().Be("Test senaryosu");
+        result[0].Type.Should().Be("what_if");
     }
 
     [Fact]
@@ -113,10 +125,10 @@ public class SavedScenarioServiceTests
     // ── SaveScenarioAsync ────────────────────────────────────────────────────
 
     [Fact]
-    public async Task SaveScenarioAsync_ValidRequest_ReturnsCreatedScenario()
+    public async Task SaveScenarioAsync_WhatIfValidRequest_ReturnsCreatedScenario()
     {
-        var request = new SaveScenarioRequest("BTC", new DateOnly(2020, 1, 1), new DateOnly(2021, 1, 1),
-            10000m, "try", "Bitcoin yatırımım");
+        var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
+            new DateOnly(2021, 1, 1), 10000m, "try", "Bitcoin yatırımım");
 
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
@@ -133,12 +145,14 @@ public class SavedScenarioServiceTests
         result.Amount.Should().Be(10000m);
         result.AmountType.Should().Be("try");
         result.Label.Should().Be("Bitcoin yatırımım");
+        result.Type.Should().Be("what_if");
     }
 
     [Fact]
-    public async Task SaveScenarioAsync_WithNullSellDate_SavesSuccessfully()
+    public async Task SaveScenarioAsync_WhatIfWithNullSellDate_SavesSuccessfully()
     {
-        var request = new SaveScenarioRequest("BTC", new DateOnly(2020, 1, 1), null, 10000m, "try", null);
+        var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
+            null, 10000m, "try", null);
 
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
@@ -153,9 +167,10 @@ public class SavedScenarioServiceTests
     }
 
     [Fact]
-    public async Task SaveScenarioAsync_AssetNotFound_ThrowsAssetNotFoundException()
+    public async Task SaveScenarioAsync_WhatIfAssetNotFound_ThrowsAssetNotFoundException()
     {
-        var request = new SaveScenarioRequest("YOKASSET", new DateOnly(2020, 1, 1), null, 100m, "try", null);
+        var request = new SaveScenarioRequest("YOKASSET", "Bilinmeyen", new DateOnly(2020, 1, 1),
+            null, 100m, "try", null);
 
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
@@ -169,9 +184,58 @@ public class SavedScenarioServiceTests
     }
 
     [Fact]
+    public async Task SaveScenarioAsync_ComparisonType_SkipsAssetLookupAndSaves()
+    {
+        var request = new SaveScenarioRequest("BTC,ETH", "Bitcoin, Ethereum",
+            new DateOnly(2020, 1, 1), new DateOnly(2021, 1, 1),
+            10000m, "try", "Kripto karşılaştırması",
+            Type: "comparison");
+
+        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
+        _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
+                   .Returns(callInfo => callInfo.Arg<SavedScenario>());
+
+        var result = await _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+
+        result.Type.Should().Be("comparison");
+        result.AssetSymbol.Should().Be("BTC,ETH");
+        result.AssetDisplayName.Should().Be("Bitcoin, Ethereum");
+
+        // Asset FK araması yapılmamalı
+        await _repository.DidNotReceive()
+                         .GetActiveAssetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SaveScenarioAsync_PortfolioType_SkipsAssetLookupAndSaves()
+    {
+        var request = new SaveScenarioRequest("PORTFOLIO", "Portföyüm",
+            new DateOnly(2020, 1, 1), null,
+            50000m, "try", "Karışık portföy",
+            Type: "portfolio");
+
+        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
+        _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
+                   .Returns(callInfo => callInfo.Arg<SavedScenario>());
+
+        var result = await _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+
+        result.Type.Should().Be("portfolio");
+        result.AssetSymbol.Should().Be("PORTFOLIO");
+        result.AssetDisplayName.Should().Be("Portföyüm");
+
+        // Asset FK araması yapılmamalı
+        await _repository.DidNotReceive()
+                         .GetActiveAssetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task SaveScenarioAsync_FreeUserAtLimit_ThrowsScenarioLimitExceededException()
     {
-        var request = new SaveScenarioRequest("BTC", new DateOnly(2020, 1, 1), null, 100m, "try", null);
+        var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
+            null, 100m, "try", null);
 
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(5);
@@ -185,7 +249,8 @@ public class SavedScenarioServiceTests
     [Fact]
     public async Task SaveScenarioAsync_FreeUserUnderLimit_SavesSuccessfully()
     {
-        var request = new SaveScenarioRequest("BTC", new DateOnly(2020, 1, 1), null, 100m, "try", null);
+        var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
+            null, 100m, "try", null);
 
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(4);
@@ -201,7 +266,8 @@ public class SavedScenarioServiceTests
     [Fact]
     public async Task SaveScenarioAsync_PremiumUser_DoesNotCheckLimit()
     {
-        var request = new SaveScenarioRequest("BTC", new DateOnly(2020, 1, 1), null, 100m, "try", null);
+        var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
+            null, 100m, "try", null);
 
         _repository.GetUserByDeviceIdAsync("premium-device", Arg.Any<CancellationToken>()).Returns(PremiumUser);
         _repository.GetActiveAssetBySymbolAsync("BTC", Arg.Any<CancellationToken>()).Returns(BtcAsset);
@@ -217,7 +283,8 @@ public class SavedScenarioServiceTests
     [Fact]
     public async Task SaveScenarioAsync_NewDevice_CreatesUserBeforeSaving()
     {
-        var request = new SaveScenarioRequest("BTC", new DateOnly(2020, 1, 1), null, 100m, "try", null);
+        var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
+            null, 100m, "try", null);
         var newUser = new User { Id = Guid.NewGuid(), DeviceId = "new-device", Tier = "free" };
 
         _repository.GetUserByDeviceIdAsync("new-device", Arg.Any<CancellationToken>()).Returns((User?)null);
@@ -240,7 +307,8 @@ public class SavedScenarioServiceTests
         var scenarioId = Guid.NewGuid();
         var scenario = new SavedScenario
         {
-            Id = scenarioId, UserId = FreeUser.Id, AssetId = BtcAsset.Id, Asset = BtcAsset,
+            Id = scenarioId, UserId = FreeUser.Id, AssetId = BtcAsset.Id,
+            AssetSymbol = "BTC", AssetDisplayName = "Bitcoin",
             BuyDate = new DateOnly(2020, 1, 1), Quantity = 100m, QuantityUnit = "try",
             CreatedAt = DateTimeOffset.UtcNow
         };

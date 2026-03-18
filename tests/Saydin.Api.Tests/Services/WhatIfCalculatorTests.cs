@@ -88,7 +88,7 @@ public class WhatIfCalculatorTests
             .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
             .Returns((null, (DateOnly?)null, null, (DateOnly?)null));
 
-        var options = Options.Create(new PlanOptions());
+        var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions());
         _sut = new WhatIfCalculator(
             _assetService,
             _scenarioRepository,
@@ -639,7 +639,7 @@ public class WhatIfCalculatorTests
         var laggedMonth  = new DateOnly(2020, 11, 1);   // Kasım 2020 (2 ay eski)
         var expectedSell = new DateOnly(SellDate.Year, SellDate.Month, 1); // Ocak 2021
 
-        laggedMonth.Should().BeLessThan(expectedSell); // LKV geçerliliğini doğrula
+        (laggedMonth < expectedSell).Should().BeTrue("LKV tarihi satış ayından önce olmalı"); // LKV geçerliliğini doğrula
 
         _inflationRepository
             .GetIndexValuesAsync(BuyDate, SellDate, Arg.Any<CancellationToken>())
