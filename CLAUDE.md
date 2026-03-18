@@ -369,6 +369,7 @@ dotnet ef database update \
 
 ### Kurallar
 
+- **Diyagram ve akış şemaları Mermaid ile çizilir** — ASCII art YASAK. Markdown dosyalarında ` ```mermaid ` blokları kullan.
 - **Backend'e özgü** her doküman `src/Saydin.Services/docs/` içine gider — kök `docs/` içine konmaz.
 - Kök `docs/`'a yalnızca birden fazla bileşeni (istemci + servisler) kapsayan belgeler eklenir.
 - Yeni endpoint, adapter veya servis eklendiğinde ilgili `docs/` dosyaları güncellenir.
