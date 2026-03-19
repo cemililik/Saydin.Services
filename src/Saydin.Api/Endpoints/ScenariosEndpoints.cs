@@ -39,7 +39,7 @@ public static class ScenariosEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("scenario_list");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("scenario_list");
 
         var scenarios = await service.GetScenariosAsync(GetDeviceId(httpContext), ct);
 
@@ -56,7 +56,7 @@ public static class ScenariosEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("scenario_save");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("scenario_save");
 
         var scenario = await service.SaveScenarioAsync(GetDeviceId(httpContext), request, ct);
 
@@ -78,7 +78,7 @@ public static class ScenariosEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("scenario_delete");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("scenario_delete");
 
         await service.DeleteScenarioAsync(GetDeviceId(httpContext), id, ct);
 

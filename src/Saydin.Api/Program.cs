@@ -180,6 +180,9 @@ try
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
     builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
 
+    // ─── GeoIP (IP → ülke/şehir çözümleme) ────────────────────────────────────
+    builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();
+
     // ─── Activity Logging (Channel pattern) ───────────────────────────────────
     var activityChannel = Channel.CreateBounded<ActivityLog>(
         new BoundedChannelOptions(10_000)

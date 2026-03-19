@@ -13,8 +13,12 @@ CREATE TABLE activity_logs (
     -- Ne?
     action          VARCHAR(30)     NOT NULL,
 
-    -- Cihaz bilgisi
+    -- Coğrafi konum (MaxMind GeoLite2 ile IP'den çözümlenir, IP maskelenmeden önce)
     ip_address      INET,
+    country         CHAR(2),
+    city            VARCHAR(100),
+
+    -- Cihaz bilgisi
     device_os       VARCHAR(30),
     os_version      VARCHAR(100),
     app_version     VARCHAR(50),
@@ -43,6 +47,10 @@ CREATE INDEX idx_activity_logs_user
 
 CREATE INDEX idx_activity_logs_action
     ON activity_logs (action, created_at DESC);
+
+-- Coğrafi dağılım raporu için
+CREATE INDEX idx_activity_logs_country
+    ON activity_logs (country, created_at DESC);
 
 -- JSONB üzerinde asset bazlı sorgular için
 CREATE INDEX idx_activity_logs_asset_symbol

@@ -26,7 +26,7 @@ public static class DcaEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("what_if_dca");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("what_if_dca");
         var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
             ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
 

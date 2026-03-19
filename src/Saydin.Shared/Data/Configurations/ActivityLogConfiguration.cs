@@ -14,6 +14,8 @@ public sealed class ActivityLogConfiguration : IEntityTypeConfiguration<Activity
         builder.Property(a => a.DeviceId).HasMaxLength(200).IsRequired();
         builder.Property(a => a.Action).HasMaxLength(30).IsRequired();
         builder.Property(a => a.IpAddress).HasColumnType("inet");
+        builder.Property(a => a.Country).HasMaxLength(2);
+        builder.Property(a => a.City).HasMaxLength(100);
         builder.Property(a => a.DeviceOs).HasMaxLength(30);
         builder.Property(a => a.OsVersion).HasMaxLength(100);
         builder.Property(a => a.AppVersion).HasMaxLength(50);
@@ -33,6 +35,10 @@ public sealed class ActivityLogConfiguration : IEntityTypeConfiguration<Activity
 
         builder.HasIndex(a => new { a.Action, a.CreatedAt })
             .HasDatabaseName("idx_activity_logs_action")
+            .IsDescending(false, true);
+
+        builder.HasIndex(a => new { a.Country, a.CreatedAt })
+            .HasDatabaseName("idx_activity_logs_country")
             .IsDescending(false, true);
 
         builder.HasIndex(a => a.Data)

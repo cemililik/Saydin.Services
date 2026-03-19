@@ -10,6 +10,8 @@ public sealed class ActivityLog
     public string DeviceId { get; init; } = default!;
     public string Action { get; init; } = default!;
     public IPAddress? IpAddress { get; init; }
+    public string? Country { get; init; }
+    public string? City { get; init; }
     public string? DeviceOs { get; init; }
     public string? OsVersion { get; init; }
     public string? AppVersion { get; init; }

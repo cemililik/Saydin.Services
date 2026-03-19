@@ -28,7 +28,7 @@ public static class AppConfigEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("config_fetch");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("config_fetch");
         var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
             ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
 

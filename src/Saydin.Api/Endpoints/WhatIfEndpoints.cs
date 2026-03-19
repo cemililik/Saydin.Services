@@ -36,7 +36,7 @@ public static class WhatIfEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("what_if_calculate");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("what_if_calculate");
         var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
             ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
 
@@ -71,7 +71,7 @@ public static class WhatIfEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("what_if_compare");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("what_if_compare");
         var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
             ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
 
@@ -107,7 +107,7 @@ public static class WhatIfEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("what_if_reverse");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("what_if_reverse");
         var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
             ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
 

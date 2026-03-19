@@ -14,6 +14,7 @@ public sealed class ActivityLogBuilder
 {
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private readonly HttpContext _httpContext;
+    private readonly IGeoIpResolver? _geoIpResolver;
 
     private Guid? _userId;
     private string _action = default!;
@@ -21,9 +22,10 @@ public sealed class ActivityLogBuilder
     private short _statusCode = 200;
     private string? _errorCode;
 
-    public ActivityLogBuilder(HttpContext httpContext)
+    public ActivityLogBuilder(HttpContext httpContext, IGeoIpResolver? geoIpResolver = null)
     {
         _httpContext = httpContext;
+        _geoIpResolver = geoIpResolver;
     }
 
     public ActivityLogBuilder WithAction(string action)
@@ -65,12 +67,18 @@ public sealed class ActivityLogBuilder
                        ?? _httpContext.Request.Headers["X-Device-ID"].FirstOrDefault()
                        ?? "unknown";
 
+        // Önce orijinal IP'den lokasyon çöz, sonra IP'yi maskele
+        var rawIp = _httpContext.Connection.RemoteIpAddress;
+        var (country, city) = _geoIpResolver?.Resolve(rawIp) ?? (null, null);
+
         return new ActivityLog
         {
             UserId = _userId,
             DeviceId = deviceId,
             Action = _action,
-            IpAddress = IpMasker.Mask(_httpContext.Connection.RemoteIpAddress),
+            IpAddress = IpMasker.Mask(rawIp),
+            Country = country,
+            City = city,
             DeviceOs = _httpContext.Request.Headers["X-Device-OS"].FirstOrDefault(),
             OsVersion = _httpContext.Request.Headers["X-Device-OS-Version"].FirstOrDefault(),
             AppVersion = _httpContext.Request.Headers["X-App-Version"].FirstOrDefault(),

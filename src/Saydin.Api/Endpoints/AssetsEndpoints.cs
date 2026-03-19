@@ -31,7 +31,7 @@ public static class AssetsEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("assets_list");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("assets_list");
 
         var assets = await assetService.GetAllAssetInfoAsync(ct);
 
@@ -49,7 +49,7 @@ public static class AssetsEndpoints
         IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("asset_price");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("asset_price");
 
         var price = await assetService.GetPriceAsync(symbol, date, ct);
 
@@ -72,7 +72,7 @@ public static class AssetsEndpoints
         CancellationToken ct,
         string interval = "daily")
     {
-        var log = new ActivityLogBuilder(httpContext).WithAction("asset_price_range");
+        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("asset_price_range");
 
         var points = await assetService.GetPriceRangeAsync(symbol, from, to, interval, ct);
 
