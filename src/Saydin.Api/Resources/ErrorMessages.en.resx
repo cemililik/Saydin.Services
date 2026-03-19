@@ -30,6 +30,8 @@
   <data name="CompareSymbolCount"><value>Between 2 and 5 symbols are required for comparison.</value></data>
   <data name="BuyDateAfterSellDate"><value>Buy date cannot be after sell date.</value></data>
   <data name="InvalidAmountType"><value>Invalid amountType: '{0}'. Expected: try, units, grams</value></data>
+  <data name="InvalidPeriod"><value>Invalid period: '{0}'. Expected: weekly, monthly</value></data>
+  <data name="InvalidDcaAmountType"><value>Invalid amountType: '{0}'. DCA calculation only supports 'try'.</value></data>
   <data name="InvalidScenarioType"><value>Invalid scenario type: '{0}'. Allowed values: {1}</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dollar/TRY</value></data>

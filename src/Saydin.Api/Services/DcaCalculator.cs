@@ -20,7 +20,7 @@ public sealed class DcaCalculator(
     ILogger<DcaCalculator> logger) : IDcaCalculator
 {
     private const string PremiumTier         = "premium";
-    private const string DcaUsageKeyPrefix   = "usage:whatif:";
+    private const string DcaUsageKeyPrefix   = "usage:dca:";
     private const int    MaxChartPoints      = 60;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -54,11 +54,11 @@ public sealed class DcaCalculator(
 
         if (period is not ("weekly" or "monthly"))
             throw new ArgumentException(
-                string.Format(localizer["InvalidAmountType"], request.Period));
+                string.Format(localizer["InvalidPeriod"], request.Period));
 
         if (amountType is not "try")
             throw new ArgumentException(
-                string.Format(localizer["InvalidAmountType"], request.AmountType));
+                string.Format(localizer["InvalidDcaAmountType"], request.AmountType));
 
         // ── Cache kontrolü ──────────────────────────────────────────────────
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
@@ -76,9 +76,6 @@ public sealed class DcaCalculator(
 
         // ── Alım tarihlerini oluştur ────────────────────────────────────────
         var purchaseDates = GeneratePurchaseDates(request.StartDate, endDate, period);
-
-        if (purchaseDates.Count == 0)
-            throw new ArgumentException(localizer["BuyDateAfterSellDate"]);
 
         // ── Her alım tarihi için hesaplama ──────────────────────────────────
         var purchases      = new List<DcaPurchase>(purchaseDates.Count);

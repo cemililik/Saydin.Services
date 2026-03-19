@@ -96,7 +96,7 @@ try
             .AddPrometheusExporter());
 
     // ─── Localization ──────────────────────────────────────────────────────────
-    builder.Services.AddLocalization();
+    builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
 
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();

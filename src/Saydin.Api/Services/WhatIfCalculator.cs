@@ -142,14 +142,15 @@ public sealed class WhatIfCalculator(
         decimal unitsAcquired;
         decimal requiredInvestmentTry;
 
+        if (sellPrice == 0)
+            throw new PriceNotFoundException(symbol, sellDate);
+
         switch (targetAmountType)
         {
             case "try":
                 // Hedef TL değeri → kaç birim lazım → kaç TL yatırmalıydın
                 targetValueTry      = request.TargetAmount;
-                unitsAcquired       = sellPrice == 0
-                    ? 0m
-                    : Math.Round(request.TargetAmount / sellPrice, 6, MidpointRounding.AwayFromZero);
+                unitsAcquired       = Math.Round(request.TargetAmount / sellPrice, 6, MidpointRounding.AwayFromZero);
                 requiredInvestmentTry = Math.Round(unitsAcquired * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
             case "units":

@@ -30,6 +30,8 @@
   <data name="CompareSymbolCount"><value>Kar&#x15F;&#x131;la&#x15F;t&#x131;rma i&#x00E7;in 2 ile 5 aras&#x131;nda sembol gereklidir.</value></data>
   <data name="BuyDateAfterSellDate"><value>Al&#x131;&#x15F; tarihi sat&#x131;&#x15F; tarihinden sonra olamaz.</value></data>
   <data name="InvalidAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. Beklenen: try, units, grams</value></data>
+  <data name="InvalidPeriod"><value>Ge&#x00E7;ersiz periyod: '{0}'. Beklenen: weekly, monthly</value></data>
+  <data name="InvalidDcaAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. DCA hesaplamas&#x131; yaln&#x131;zca 'try' destekler.</value></data>
   <data name="InvalidScenarioType"><value>Ge&#x00E7;ersiz senaryo tipi: '{0}'. &#x130;zin verilen de&#x11F;erler: {1}</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dolar/TL</value></data>
