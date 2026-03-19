@@ -160,7 +160,7 @@ public class DcaCalculatorTests
         result.TotalInvestedTry.Should().Be(6000m);
         result.IsProfit.Should().BeTrue();
         result.ProfitLossTry.Should().BePositive();
-        result.CurrentUnitPrice.Should().Be(20m); // son fiyat
+        result.CurrentUnitPrice.Should().Be(22m); // son fiyat (7. çağrı: 10 + 2*6)
     }
 
     [Fact]

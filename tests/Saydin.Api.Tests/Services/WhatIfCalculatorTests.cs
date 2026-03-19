@@ -229,7 +229,7 @@ public class WhatIfCalculatorTests
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ArgumentException>()
-                 .WithMessage("*Alış tarihi satış tarihinden sonra olamaz*");
+                 .WithMessage("*BuyDateAfterSellDate*");
     }
 
     [Fact]
@@ -242,7 +242,7 @@ public class WhatIfCalculatorTests
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ArgumentException>()
-                 .WithMessage("*Geçersiz amountType*");
+                 .WithMessage("*InvalidAmountType*");
     }
 
     [Fact]
@@ -301,19 +301,18 @@ public class WhatIfCalculatorTests
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
-        _db.ScriptEvaluateAsync(
-                Arg.Any<string>(),
-                Arg.Any<RedisKey[]>(),
-                Arg.Any<RedisValue[]>(),
-                Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create(11L)); // 11 > 10 → limit aşıldı
+        // CheckDailyLimitAsync artık StringGetAsync ile kontrol ediyor
+        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var usageKey = $"usage:whatif:{FreeUser.Id}:{dateKey}";
+        _db.StringGetAsync(Arg.Is<RedisKey>(k => k.ToString() == usageKey), Arg.Any<CommandFlags>())
+           .Returns(new RedisValue("20")); // 20 >= 20 → limit aşıldı
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<DailyLimitExceededException>()
-                 .Where(ex => ex.Limit == 10);
+                 .Where(ex => ex.Limit == 20);
     }
 
     [Fact]

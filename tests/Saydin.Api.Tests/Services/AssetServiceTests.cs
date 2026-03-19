@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Saydin.Api.Models.Responses;
@@ -15,6 +16,7 @@ public class AssetServiceTests
     private readonly IPriceRepository _repository = Substitute.For<IPriceRepository>();
     private readonly IConnectionMultiplexer _redis = Substitute.For<IConnectionMultiplexer>();
     private readonly IDatabase _db = Substitute.For<IDatabase>();
+    private readonly IStringLocalizer<ErrorMessages> _localizer = Substitute.For<IStringLocalizer<ErrorMessages>>();
     private readonly AssetService _sut;
 
     public AssetServiceTests()
@@ -24,7 +26,12 @@ public class AssetServiceTests
         _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
            .Returns(RedisValue.Null);
 
-        _sut = new AssetService(_repository, _redis, NullLogger<AssetService>.Instance);
+        _localizer[Arg.Any<string>()]
+            .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
+        _localizer[Arg.Any<string>(), Arg.Any<object[]>()]
+            .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
+
+        _sut = new AssetService(_repository, _redis, _localizer, NullLogger<AssetService>.Instance);
     }
 
     // ── GetPriceAsync ────────────────────────────────────────────────────────
@@ -183,9 +190,10 @@ public class AssetServiceTests
                 Arg.Any<CommandFlags>())
            .Returns(new RedisValue("\"1\""));
 
-        // info cached
+        // info cached — key artık dil kodu içeriyor: assets:info:{sig}:{lang}
+        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         _db.StringGetAsync(
-                Arg.Is<RedisKey>(k => k.ToString() == "assets:info:1"),
+                Arg.Is<RedisKey>(k => k.ToString() == $"assets:info:1:{lang}"),
                 Arg.Any<CommandFlags>())
            .Returns(new RedisValue(json));
 
