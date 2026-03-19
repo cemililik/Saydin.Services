@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -14,6 +15,7 @@ namespace Saydin.Api.Tests.Services;
 public class SavedScenarioServiceTests
 {
     private readonly ISavedScenarioRepository _repository = Substitute.For<ISavedScenarioRepository>();
+    private readonly IStringLocalizer<ErrorMessages> _localizer = Substitute.For<IStringLocalizer<ErrorMessages>>();
     private readonly SavedScenarioService _sut;
 
     private const string DeviceId = "test-device-001";
@@ -53,7 +55,13 @@ public class SavedScenarioServiceTests
     public SavedScenarioServiceTests()
     {
         var options = Microsoft.Extensions.Options.Options.Create(PlanOptions);
-        _sut = new SavedScenarioService(_repository, options, NullLogger<SavedScenarioService>.Instance);
+
+        _localizer[Arg.Any<string>()]
+            .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
+        _localizer[Arg.Any<string>(), Arg.Any<object[]>()]
+            .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
+
+        _sut = new SavedScenarioService(_repository, options, _localizer, NullLogger<SavedScenarioService>.Instance);
     }
 
     // ── GetScenariosAsync ────────────────────────────────────────────────────
