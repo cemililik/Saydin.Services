@@ -13,14 +13,25 @@ public sealed class DailyLimitGuard(
 {
     private const string PremiumTier = "premium";
 
-    public async Task CheckAsync(User? user, string deviceId, string usageKeyPrefix)
+    private (bool HasLimit, int Limit, string Key) GetLimitAndKey(
+        User? user, string deviceId, string usageKeyPrefix)
     {
-        if (user?.Tier == PremiumTier) return;
+        if (user?.Tier == PremiumTier)
+            return (false, 0, string.Empty);
 
         var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
+        if (limit <= 0)
+            return (false, 0, string.Empty);
 
         var key = BuildUsageKey(user, deviceId, usageKeyPrefix);
+        return (true, limit, key);
+    }
+
+    public async Task CheckAsync(User? user, string deviceId, string usageKeyPrefix)
+    {
+        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix);
+        if (!hasLimit) return;
+
         try
         {
             var db    = redis.GetDatabase();
@@ -38,12 +49,9 @@ public sealed class DailyLimitGuard(
 
     public async Task IncrementAsync(User? user, string deviceId, string usageKeyPrefix)
     {
-        if (user?.Tier == PremiumTier) return;
+        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix);
+        if (!hasLimit) return;
 
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key   = BuildUsageKey(user, deviceId, usageKeyPrefix);
         var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
         try
         {

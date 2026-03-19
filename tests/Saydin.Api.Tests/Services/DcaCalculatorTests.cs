@@ -445,6 +445,50 @@ public class DcaCalculatorTests
             .GetNearestPriceAsync(Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
     }
 
+    // ── Feature Flags ───────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CalculateAsync_DcaFeatureDisabled_ThrowsInvalidOperationException()
+    {
+        var planOptions = new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { Dca = false } }
+        };
+        var sut = new DcaCalculator(
+            _assetService, _scenarioRepository, _inflationRepository,
+            _dailyLimitGuard, _redis,
+            Microsoft.Extensions.Options.Options.Create(planOptions),
+            _localizer, NullLogger<DcaCalculator>.Instance);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
+
+        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+                 .WithMessage("*FeatureDisabled*");
+    }
+
+    [Fact]
+    public async Task CalculateAsync_InflationRequestedButFeatureDisabled_ThrowsInvalidOperationException()
+    {
+        var planOptions = new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { InflationAdjustment = false } }
+        };
+        var sut = new DcaCalculator(
+            _assetService, _scenarioRepository, _inflationRepository,
+            _dailyLimitGuard, _redis,
+            Microsoft.Extensions.Options.Options.Create(planOptions),
+            _localizer, NullLogger<DcaCalculator>.Instance);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly", includeInflation: true);
+
+        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+                 .WithMessage("*FeatureDisabled*");
+    }
+
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────
 
     private void SetupConstantPrice(decimal price)

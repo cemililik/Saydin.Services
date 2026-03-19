@@ -858,7 +858,108 @@ public class WhatIfCalculatorTests
         result.AssetSymbol.Should().Be("USDTRY");
     }
 
+    // ── Feature Flags ───────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CalculateAsync_InflationRequestedButFeatureDisabled_ThrowsInvalidOperationException()
+    {
+        var planOptions = new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { InflationAdjustment = false } }
+        };
+        var sut = CreateSutWithOptions(planOptions);
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try", includeInflation: true);
+
+        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+                 .WithMessage("*FeatureDisabled*");
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_InflationRequestedButFeatureDisabled_ThrowsInvalidOperationException()
+    {
+        var planOptions = new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { InflationAdjustment = false } }
+        };
+        var sut = CreateSutWithOptions(planOptions);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try", includeInflation: true);
+
+        var act = () => sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+                 .WithMessage("*FeatureDisabled*");
+    }
+
+    [Fact]
+    public async Task CompareAsync_ComparisonFeatureDisabled_ThrowsInvalidOperationException()
+    {
+        var planOptions = new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { Comparison = false } }
+        };
+        var sut = CreateSutWithOptions(planOptions);
+
+        var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try");
+
+        var act = () => sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+                 .WithMessage("*FeatureDisabled*");
+    }
+
+    // ── CompareAsync Distinct Validation ───────────────────────────────────
+
+    [Fact]
+    public async Task CompareAsync_LessThanTwoUniqueSymbols_ThrowsArgumentException()
+    {
+        var request = new CompareRequest(["USDTRY", "USDTRY"], BuyDate, SellDate, 1000m, "try");
+
+        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>()
+                 .WithMessage("*CompareSymbolCount*");
+    }
+
+    [Fact]
+    public async Task CompareAsync_MoreThanFiveUniqueSymbols_ThrowsArgumentException()
+    {
+        var request = new CompareRequest(
+            ["USDTRY", "EURTRY", "BTC", "ETH", "XAU_TRY_GRAM", "THYAO"],
+            BuyDate, SellDate, 1000m, "try");
+
+        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>()
+                 .WithMessage("*CompareSymbolCount*");
+    }
+
+    [Fact]
+    public async Task CompareAsync_DuplicateSymbolsWithDifferentCase_TreatedAsSingleSymbol()
+    {
+        // "usdtry", "USDTRY", "Usdtry" → 1 unique symbol → < 2 → exception
+        var request = new CompareRequest(
+            ["usdtry", "USDTRY", "Usdtry"], BuyDate, SellDate, 1000m, "try");
+
+        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>()
+                 .WithMessage("*CompareSymbolCount*");
+    }
+
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────
+
+    private WhatIfCalculator CreateSutWithOptions(PlanOptions planOptions)
+    {
+        return new WhatIfCalculator(
+            _assetService, _scenarioRepository, _inflationRepository,
+            _dailyLimitGuard, _redis,
+            Microsoft.Extensions.Options.Options.Create(planOptions),
+            _localizer, NullLogger<WhatIfCalculator>.Instance);
+    }
 
     private static WhatIfRequest MakeRequest(
         string symbol, DateOnly buyDate, DateOnly? sellDate,
