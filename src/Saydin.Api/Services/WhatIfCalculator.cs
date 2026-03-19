@@ -16,12 +16,12 @@ public sealed class WhatIfCalculator(
     IAssetService assetService,
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
+    IDailyLimitGuard dailyLimitGuard,
     IConnectionMultiplexer redis,
     IOptions<PlanOptions> options,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
-    private const string PremiumTier          = "premium";
     private const string WhatIfUsageKeyPrefix = "usage:whatif:";
     private const int    MaxPriceHistoryPoints = 60;
 
@@ -35,12 +35,16 @@ public sealed class WhatIfCalculator(
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
+
+        if (request.IncludeInflation && !features.InflationAdjustment)
+            throw new InvalidOperationException(localizer["FeatureDisabled"]);
+
+        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix);
 
         var response = await CalculateCoreAsync(request, ct);
 
-        // Atomik check+increment: başarılı hesaplamalar kotadan düşülür
-        await IncrementAndEnforceLimitAsync(user, deviceId);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix);
         return response;
     }
 
@@ -48,17 +52,21 @@ public sealed class WhatIfCalculator(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
-        if (request.AssetSymbols.Count is < 2 or > 5)
-            throw new ArgumentException(localizer["CompareSymbolCount"]);
-
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
 
-        // DbContext scoped olduğu için paralel çalıştırılamaz; sıralı çalıştırılır.
-        // Redis cache'i sayesinde tekrar eden semboller hızla yanıtlanır.
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
+        if (!features.Comparison)
+            throw new InvalidOperationException(localizer["FeatureDisabled"]);
+
+        // Tekrarlanan semboller kaldırıldıktan sonra 2-5 arasında unique sembol gerekli
         var symbols = request.AssetSymbols
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+        if (symbols.Count is < 2 or > 5)
+            throw new ArgumentException(localizer["CompareSymbolCount"]);
+
+        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix);
 
         var resultList = new List<WhatIfResponse>(symbols.Count);
         foreach (var symbol in symbols)
@@ -81,8 +89,7 @@ public sealed class WhatIfCalculator(
             .Select((r, i) => new CompareResultItem(Rank: i + 1, Calculation: r))
             .ToList();
 
-        // Karşılaştırma da 1 hak olarak sayılır (atomik check+increment)
-        await IncrementAndEnforceLimitAsync(user, deviceId);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix);
 
         logger.LogInformation(
             "Karşılaştırma hesaplandı: {Symbols} {BuyDate}→{SellDate}",
@@ -97,11 +104,16 @@ public sealed class WhatIfCalculator(
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
+
+        if (request.IncludeInflation && !features.InflationAdjustment)
+            throw new InvalidOperationException(localizer["FeatureDisabled"]);
+
+        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix);
 
         var response = await CalculateReverseCoreAsync(request, ct);
 
-        await IncrementAndEnforceLimitAsync(user, deviceId);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix);
         return response;
     }
 
@@ -445,71 +457,4 @@ public sealed class WhatIfCalculator(
         }
     }
 
-    private async Task CheckDailyLimitAsync(User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key = BuildUsageKey(user, deviceId);
-        try
-        {
-            var db    = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            var count = value.HasValue ? (long)value : 0;
-
-            if (count >= limit)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
-        }
-    }
-
-    /// <summary>
-    /// Atomik olarak sayacı artırır ve limiti aşıyorsa -1 döner.
-    /// Check + increment tek Lua script'te yapılarak race condition önlenir.
-    /// </summary>
-    private async Task IncrementAndEnforceLimitAsync(User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key   = BuildUsageKey(user, deviceId);
-        var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
-        try
-        {
-            const string script = """
-                local count = redis.call('INCR', KEYS[1])
-                if count == 1 then
-                  redis.call('PEXPIRE', KEYS[1], ARGV[1])
-                end
-                if tonumber(count) > tonumber(ARGV[2]) then
-                  redis.call('DECR', KEYS[1])
-                  return -1
-                end
-                return count
-                """;
-            var result = (long)await redis.GetDatabase()
-                .ScriptEvaluateAsync(script, keys: [key], values: [ttlMs, limit]);
-
-            if (result == -1)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
-        }
-    }
-
-    private static string BuildUsageKey(User? user, string deviceId)
-    {
-        var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        return $"{WhatIfUsageKeyPrefix}{userId}:{dateKey}";
-    }
 }

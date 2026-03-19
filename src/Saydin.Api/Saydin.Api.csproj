@@ -21,6 +21,7 @@
     <PackageReference Include="Serilog.Enrichers.Environment" Version="*" />
     <PackageReference Include="Serilog.Sinks.Console" Version="*" />
     <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="*" />
+    <PackageReference Include="MaxMind.GeoIP2" Version="*" />
     <PackageReference Include="StackExchange.Redis" Version="*" />
   </ItemGroup>
 
@@ -29,5 +30,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Saydin.Api.Tests" />
+  </ItemGroup>
 
 </Project>

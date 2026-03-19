@@ -14,12 +14,12 @@ public sealed class DcaCalculator(
     IAssetService assetService,
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
+    IDailyLimitGuard dailyLimitGuard,
     IConnectionMultiplexer redis,
     IOptions<PlanOptions> options,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<DcaCalculator> logger) : IDcaCalculator
 {
-    private const string PremiumTier         = "premium";
     private const string DcaUsageKeyPrefix   = "usage:dca:";
     private const int    MaxChartPoints      = 60;
 
@@ -33,11 +33,19 @@ public sealed class DcaCalculator(
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
+
+        if (!features.Dca)
+            throw new InvalidOperationException(localizer["FeatureDisabled"]);
+
+        if (request.IncludeInflation && !features.InflationAdjustment)
+            throw new InvalidOperationException(localizer["FeatureDisabled"]);
+
+        await dailyLimitGuard.CheckAsync(user, deviceId, DcaUsageKeyPrefix);
 
         var response = await CalculateCoreAsync(request, ct);
 
-        await IncrementAndEnforceLimitAsync(user, deviceId);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, DcaUsageKeyPrefix);
         return response;
     }
 
@@ -268,69 +276,4 @@ public sealed class DcaCalculator(
         }
     }
 
-    // ── Günlük limit yönetimi (WhatIfCalculator ile aynı pattern) ─────────
-
-    private async Task CheckDailyLimitAsync(Saydin.Shared.Entities.User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key = BuildUsageKey(user, deviceId);
-        try
-        {
-            var db    = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            var count = value.HasValue ? (long)value : 0;
-
-            if (count >= limit)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
-        }
-    }
-
-    private async Task IncrementAndEnforceLimitAsync(Saydin.Shared.Entities.User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key   = BuildUsageKey(user, deviceId);
-        var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
-        try
-        {
-            const string script = """
-                local count = redis.call('INCR', KEYS[1])
-                if count == 1 then
-                  redis.call('PEXPIRE', KEYS[1], ARGV[1])
-                end
-                if tonumber(count) > tonumber(ARGV[2]) then
-                  redis.call('DECR', KEYS[1])
-                  return -1
-                end
-                return count
-                """;
-            var result = (long)await redis.GetDatabase()
-                .ScriptEvaluateAsync(script, keys: [key], values: [ttlMs, limit]);
-
-            if (result == -1)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
-        }
-    }
-
-    private static string BuildUsageKey(Saydin.Shared.Entities.User? user, string deviceId)
-    {
-        var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        return $"{DcaUsageKeyPrefix}{userId}:{dateKey}";
-    }
 }
