@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
 
@@ -10,14 +11,16 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class TcmbWorker(
     TcmbAdapter adapter,
     IPriceIngestionRepository repository,
+    IConfiguration configuration,
     ILogger<TcmbWorker> logger)
-    : BaseAssetWorker(adapter, repository, logger)
+    : BaseAssetWorker(adapter, repository, configuration, logger)
 {
-    // MVP: son 2 yıl yeterli
+    // Son 20 yıl (TCMB arşivi çok daha eskilere gidiyor)
     protected override DateOnly BackfillStartDate =>
-        DateOnly.FromDateTime(DateTime.UtcNow.AddYears(-2));
+        DateOnly.FromDateTime(DateTime.UtcNow.AddYears(-20));
     protected override int ChunkDays => 90;
+    protected override string WorkerConfigKey => "Tcmb";
 
     // 16:30 Türkiye = 13:30 UTC (Türkiye UTC+3, DST kullanmıyor — 2016'dan beri)
-    protected override TimeOnly DailyRunUtcTime => new(13, 30, 0);
+    protected override TimeOnly DefaultDailyRunUtcTime => new(13, 30, 0);
 }

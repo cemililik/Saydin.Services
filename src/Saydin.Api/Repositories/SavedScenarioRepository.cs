@@ -37,7 +37,6 @@ public sealed class SavedScenarioRepository(SaydinDbContext context) : ISavedSce
 
     public async Task<IReadOnlyList<SavedScenario>> GetByUserIdAsync(Guid userId, CancellationToken ct)
         => await context.SavedScenarios
-            .Include(s => s.Asset)
             .Where(s => s.UserId == userId)
             .OrderByDescending(s => s.CreatedAt)
             .ToListAsync(ct);

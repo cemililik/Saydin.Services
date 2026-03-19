@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Localization;
+
 namespace Saydin.Api.Endpoints;
 
 internal static class EndpointExtensions
@@ -10,13 +12,16 @@ internal static class EndpointExtensions
     internal static RouteHandlerBuilder RequireDeviceId(this RouteHandlerBuilder builder)
         => builder.AddEndpointFilter(async (ctx, next) =>
         {
+            var localizer = ctx.HttpContext.RequestServices
+                .GetRequiredService<IStringLocalizer<ErrorMessages>>();
+
             var headerValues = ctx.HttpContext.Request.Headers[DeviceIdHeader];
 
             if (headerValues.Count != 1 || string.IsNullOrWhiteSpace(headerValues[0]))
             {
                 return Results.Problem(
-                    title: "X-Device-ID gerekli",
-                    detail: "Bu endpoint'e erişmek için X-Device-ID header'ı tek, boş olmayan bir değerle gönderilmelidir.",
+                    title: localizer["DeviceIdRequired"],
+                    detail: localizer["DeviceIdRequiredDetail"],
                     statusCode: StatusCodes.Status400BadRequest,
                     type: "https://saydin.app/errors/missing-device-id");
             }
@@ -27,8 +32,8 @@ internal static class EndpointExtensions
                 !deviceId.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.'))
             {
                 return Results.Problem(
-                    title: "X-Device-ID geçersiz",
-                    detail: $"X-Device-ID en fazla {MaxDeviceIdLength} karakter olmalı ve yalnızca harf, rakam, '-', '_' ve '.' içerebilir.",
+                    title: localizer["DeviceIdInvalid"],
+                    detail: string.Format(localizer["DeviceIdInvalidDetail"], MaxDeviceIdLength),
                     statusCode: StatusCodes.Status400BadRequest,
                     type: "https://saydin.app/errors/invalid-device-id");
             }

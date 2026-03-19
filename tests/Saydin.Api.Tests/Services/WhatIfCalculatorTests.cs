@@ -1,9 +1,12 @@
 using FluentAssertions;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Entities;
@@ -14,11 +17,13 @@ namespace Saydin.Api.Tests.Services;
 
 public class WhatIfCalculatorTests
 {
-    private readonly IAssetService            _assetService       = Substitute.For<IAssetService>();
-    private readonly ISavedScenarioRepository _scenarioRepository = Substitute.For<ISavedScenarioRepository>();
-    private readonly IConnectionMultiplexer   _redis              = Substitute.For<IConnectionMultiplexer>();
-    private readonly IDatabase                _db                 = Substitute.For<IDatabase>();
-    private readonly WhatIfCalculator         _sut;
+    private readonly IAssetService                _assetService       = Substitute.For<IAssetService>();
+    private readonly ISavedScenarioRepository     _scenarioRepository = Substitute.For<ISavedScenarioRepository>();
+    private readonly IInflationRepository         _inflationRepository = Substitute.For<IInflationRepository>();
+    private readonly IConnectionMultiplexer       _redis              = Substitute.For<IConnectionMultiplexer>();
+    private readonly IDatabase                    _db                 = Substitute.For<IDatabase>();
+    private readonly IStringLocalizer<ErrorMessages> _localizer       = Substitute.For<IStringLocalizer<ErrorMessages>>();
+    private readonly WhatIfCalculator             _sut;
 
     private const string DeviceId  = "test-device-001";
     private const string FreeDeviceId  = "free-device";
@@ -80,10 +85,25 @@ public class WhatIfCalculatorTests
         _assetService.GetAllAsync(Arg.Any<CancellationToken>())
                      .Returns(new List<Asset> { UsdTry }.AsReadOnly());
 
+        // Varsayılan: enflasyon verisi yok (IncludeInflation = false testleri etkilenmez)
+        _inflationRepository
+            .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns((null, (DateOnly?)null, null, (DateOnly?)null));
+
+        // Varsayılan: localizer — key'i olduğu gibi döndür
+        _localizer[Arg.Any<string>()]
+            .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
+        _localizer[Arg.Any<string>(), Arg.Any<object[]>()]
+            .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
+
+        var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions());
         _sut = new WhatIfCalculator(
             _assetService,
             _scenarioRepository,
+            _inflationRepository,
             _redis,
+            options,
+            _localizer,
             NullLogger<WhatIfCalculator>.Instance);
     }
 
@@ -209,7 +229,7 @@ public class WhatIfCalculatorTests
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ArgumentException>()
-                 .WithMessage("*Alış tarihi satış tarihinden sonra olamaz*");
+                 .WithMessage("*BuyDateAfterSellDate*");
     }
 
     [Fact]
@@ -222,7 +242,7 @@ public class WhatIfCalculatorTests
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ArgumentException>()
-                 .WithMessage("*Geçersiz amountType*");
+                 .WithMessage("*InvalidAmountType*");
     }
 
     [Fact]
@@ -281,19 +301,18 @@ public class WhatIfCalculatorTests
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
-        _db.ScriptEvaluateAsync(
-                Arg.Any<string>(),
-                Arg.Any<RedisKey[]>(),
-                Arg.Any<RedisValue[]>(),
-                Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create(11L)); // 11 > 10 → limit aşıldı
+        // CheckDailyLimitAsync artık StringGetAsync ile kontrol ediyor
+        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var usageKey = $"usage:whatif:{FreeUser.Id}:{dateKey}";
+        _db.StringGetAsync(Arg.Is<RedisKey>(k => k.ToString() == usageKey), Arg.Any<CommandFlags>())
+           .Returns(new RedisValue("20")); // 20 >= 20 → limit aşıldı
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<DailyLimitExceededException>()
-                 .Where(ex => ex.Limit == 10);
+                 .Where(ex => ex.Limit == 20);
     }
 
     [Fact]
@@ -344,7 +363,9 @@ public class WhatIfCalculatorTests
             BuyPrice: 5.95m, SellPrice: 8.50m,
             UnitsAcquired: 1m, InitialValueTry: 5.95m, FinalValueTry: 8.50m,
             ProfitLossTry: 2.55m, ProfitLossPercent: 42.86m, IsProfit: true,
-            PriceHistory: Array.Empty<PriceHistoryPoint>());
+            PriceHistory: Array.Empty<PriceHistoryPoint>(),
+            CumulativeInflationPercent: null, RealProfitLossPercent: null,
+            InflationDataAsOf: null, ActualBuyDate: null, ActualSellDate: null);
 
         var json = System.Text.Json.JsonSerializer.Serialize(
             cached,
@@ -375,7 +396,7 @@ public class WhatIfCalculatorTests
         var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         result.AssetSymbol.Should().Be("USDTRY");
-        await _assetService.Received().GetPriceAsync("USDTRY", Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
+        await _assetService.Received().GetNearestPriceAsync("USDTRY", Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
     }
 
     // ── SamplePriceHistory (CalculateAsync üzerinden) ─────────────────────────
@@ -504,34 +525,372 @@ public class WhatIfCalculatorTests
                      .Returns(points.AsReadOnly());
     }
 
+    /// <summary>
+    /// Fiyat mock'larını GetNearestPriceAsync üzerinden kurar.
+    /// actualBuyDate / actualSellDate verilirse dönen PricePoint.PriceDate onlar olur (tarih kaydırma simülasyonu).
+    /// </summary>
     private void SetupPrices(
         decimal buyPrice, decimal sellPrice,
-        DateOnly? buyDate = null, DateOnly? sellDate = null)
+        DateOnly? buyDate = null, DateOnly? sellDate = null,
+        DateOnly? actualBuyDate = null, DateOnly? actualSellDate = null)
     {
         var effectiveBuy  = buyDate  ?? BuyDate;
         var effectiveSell = sellDate ?? SellDate;
 
-        _assetService.GetPriceAsync(Arg.Any<string>(), effectiveBuy, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint { AssetId = AssetId, PriceDate = effectiveBuy, Close = buyPrice });
+        _assetService.GetNearestPriceAsync(Arg.Any<string>(), effectiveBuy, Arg.Any<CancellationToken>())
+                     .Returns(new PricePoint
+                     {
+                         AssetId   = AssetId,
+                         PriceDate = actualBuyDate ?? effectiveBuy,
+                         Close     = buyPrice
+                     });
 
-        _assetService.GetPriceAsync(Arg.Any<string>(), effectiveSell, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint { AssetId = AssetId, PriceDate = effectiveSell, Close = sellPrice });
+        _assetService.GetNearestPriceAsync(Arg.Any<string>(), effectiveSell, Arg.Any<CancellationToken>())
+                     .Returns(new PricePoint
+                     {
+                         AssetId   = AssetId,
+                         PriceDate = actualSellDate ?? effectiveSell,
+                         Close     = sellPrice
+                     });
+
+        // SellDate null olduğunda GetLatestPriceDateAsync çağrılır — effectiveSell döndür
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(effectiveSell);
 
         // Bugün için de ihtiyaç olabilir (SellDate null durumu)
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
         if (today != effectiveSell)
         {
-            _assetService.GetPriceAsync(Arg.Any<string>(), today, Arg.Any<CancellationToken>())
+            _assetService.GetNearestPriceAsync(Arg.Any<string>(), today, Arg.Any<CancellationToken>())
                          .Returns(new PricePoint { AssetId = AssetId, PriceDate = today, Close = sellPrice });
         }
-
-        // SellDate null olduğunda GetLatestPriceDateAsync çağrılır — effectiveSell döndür
-        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-                     .Returns(effectiveSell);
     }
+
+    // ── Haftasonu / Tarih Düzeltmesi ────────────────────────────────────────
+
+    [Fact]
+    public async Task CalculateAsync_BuyDateAdjusted_PopulatesActualBuyDate()
+    {
+        // Kullanıcı Cumartesi seçti; nearest price → Cuma fiyatını döndürür
+        var saturday = new DateOnly(2020, 1, 4); // Cumartesi
+        var friday   = new DateOnly(2020, 1, 3); // Cuma
+
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m,
+            buyDate: saturday, actualBuyDate: friday);
+
+        var request = MakeRequest("USDTRY", saturday, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.ActualBuyDate.Should().Be(friday);
+        result.ActualSellDate.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_SellDateAdjusted_PopulatesActualSellDate()
+    {
+        var sunday   = new DateOnly(2021, 1, 3); // Pazar
+        var friday   = new DateOnly(2021, 1, 1); // Cuma
+
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m,
+            sellDate: sunday, actualSellDate: friday);
+
+        var request = MakeRequest("USDTRY", BuyDate, sunday, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.ActualSellDate.Should().Be(friday);
+        result.ActualBuyDate.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_DatesExactlyMatch_ActualDatesNull()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.ActualBuyDate.Should().BeNull();
+        result.ActualSellDate.Should().BeNull();
+    }
+
+    // ── Enflasyon Düzeltmesi ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CalculateAsync_IncludeInflation_ComputesRealReturn()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        // Alış endeksi: 100, Satış endeksi: 150 → birikimli enflasyon %50
+        var buyMonth  = new DateOnly(BuyDate.Year,  BuyDate.Month,  1);
+        var sellMonth = new DateOnly(SellDate.Year, SellDate.Month, 1);
+        _inflationRepository
+            .GetIndexValuesAsync(BuyDate, SellDate, Arg.Any<CancellationToken>())
+            .Returns((100m, buyMonth, 150m, sellMonth));
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.CumulativeInflationPercent.Should().BeApproximately(50m, 0.01m);
+        // nominal ~%42.86, enflasyon %50 → reel negatif
+        result.RealProfitLossPercent.Should().NotBeNull();
+        result.RealProfitLossPercent.Should().BeLessThan(0);
+        result.InflationDataAsOf.Should().BeNull(); // tam ay eşleşmesi
+    }
+
+    [Fact]
+    public async Task CalculateAsync_InflationSellMonthLagged_PopulatesInflationDataAsOf()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        // Satış ayı Ocak 2021, mevcut veri Kasım 2020
+        var buyMonth     = new DateOnly(BuyDate.Year,  BuyDate.Month,  1);
+        var laggedMonth  = new DateOnly(2020, 11, 1);   // Kasım 2020 (2 ay eski)
+        var expectedSell = new DateOnly(SellDate.Year, SellDate.Month, 1); // Ocak 2021
+
+        (laggedMonth < expectedSell).Should().BeTrue("LKV tarihi satış ayından önce olmalı"); // LKV geçerliliğini doğrula
+
+        _inflationRepository
+            .GetIndexValuesAsync(BuyDate, SellDate, Arg.Any<CancellationToken>())
+            .Returns((100m, buyMonth, 140m, laggedMonth));
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.InflationDataAsOf.Should().Be(laggedMonth);
+        result.RealProfitLossPercent.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_InflationDataUnavailable_NullRealReturn()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        // Repository zaten null döndürüyor (constructor default)
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.RealProfitLossPercent.Should().BeNull();
+        result.CumulativeInflationPercent.Should().BeNull();
+        result.InflationDataAsOf.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_InflationNotRequested_DoesNotCallRepository()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: false);
+        await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await _inflationRepository.DidNotReceive()
+            .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ── CalculateReverseAsync Testleri ───────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task CalculateReverseAsync_TargetTypeTry_ComputesCorrectResult()
+    {
+        // Hedef: 100.000 TL, alış fiyatı 5.95, satış fiyatı 8.50
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 100_000m, "try");
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.AssetSymbol.Should().Be("USDTRY");
+        result.BuyPrice.Should().Be(5.95m);
+        result.SellPrice.Should().Be(8.50m);
+        result.TargetValueTry.Should().Be(100_000m);
+
+        // unitsAcquired = round(100000 / 8.50, 6)
+        var expectedUnits = Math.Round(100_000m / 8.50m, 6, MidpointRounding.AwayFromZero);
+        result.UnitsAcquired.Should().Be(expectedUnits);
+
+        // requiredInvestment = round(units * 5.95, 2)
+        var expectedInvestment = Math.Round(expectedUnits * 5.95m, 2, MidpointRounding.AwayFromZero);
+        result.RequiredInvestmentTry.Should().Be(expectedInvestment);
+
+        result.ProfitLossTry.Should().Be(100_000m - expectedInvestment);
+        result.IsProfit.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_TargetTypeUnits_ComputesCorrectResult()
+    {
+        // Hedef: 1000 birim, alış fiyatı 5.95, satış fiyatı 8.50
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "units");
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.UnitsAcquired.Should().Be(1000m);
+        result.TargetValueTry.Should().Be(Math.Round(1000m * 8.50m, 2, MidpointRounding.AwayFromZero));
+        result.RequiredInvestmentTry.Should().Be(Math.Round(1000m * 5.95m, 2, MidpointRounding.AwayFromZero));
+        result.IsProfit.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_TargetTypeGrams_ComputesCorrectResult()
+    {
+        SetupPrices(buyPrice: 1000m, sellPrice: 1500m);
+
+        _assetService.GetAllAsync(Arg.Any<CancellationToken>())
+                     .Returns(new List<Asset>
+                     {
+                         new() { Id = Guid.NewGuid(), Symbol = "XAUTRY", DisplayName = "Altın/TL",
+                                 Category = AssetCategory.PreciousMetal, Source = "goldapi", IsActive = true }
+                     }.AsReadOnly());
+
+        var request = MakeReverseRequest("XAUTRY", BuyDate, SellDate, 50m, "grams");
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.UnitsAcquired.Should().Be(50m);
+        result.TargetValueTry.Should().Be(Math.Round(50m * 1500m, 2, MidpointRounding.AwayFromZero));
+        result.RequiredInvestmentTry.Should().Be(Math.Round(50m * 1000m, 2, MidpointRounding.AwayFromZero));
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_LossScenario_IsProfitFalse()
+    {
+        // Fiyat düşmüş: 10 → 5
+        SetupPrices(buyPrice: 10m, sellPrice: 5m);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 50_000m, "try");
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.IsProfit.Should().BeFalse();
+        result.ProfitLossTry.Should().BeNegative();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_BuyDateAfterSellDate_ThrowsArgumentException()
+    {
+        var request = MakeReverseRequest("USDTRY", SellDate, BuyDate, 1000m, "try");
+
+        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_InvalidTargetAmountType_ThrowsArgumentException()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "eur");
+
+        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_SellPriceZero_ThrowsPriceNotFoundException()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 0m);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+
+        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<PriceNotFoundException>();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_EmptyDeviceId_ThrowsArgumentException()
+    {
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+
+        var act = () => _sut.CalculateReverseAsync("", request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_PremiumUser_SkipsDailyLimitCheck()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+        await _sut.CalculateReverseAsync(PremiumDeviceId, request, CancellationToken.None);
+
+        await _db.DidNotReceive()
+                 .ScriptEvaluateAsync(
+                     Arg.Any<string>(),
+                     Arg.Any<RedisKey[]>(),
+                     Arg.Any<RedisValue[]>(),
+                     Arg.Any<CommandFlags>());
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_NoSellDate_UsesLatestDate()
+    {
+        var latestDate = new DateOnly(2024, 6, 15);
+        SetupPrices(buyPrice: 5.95m, sellPrice: 30m, sellDate: latestDate);
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(latestDate);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, null, 100_000m, "try");
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.SellDate.Should().Be(latestDate);
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_IncludeInflation_ComputesRealReturn()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var buyMonth  = new DateOnly(BuyDate.Year,  BuyDate.Month,  1);
+        var sellMonth = new DateOnly(SellDate.Year, SellDate.Month, 1);
+        _inflationRepository
+            .GetIndexValuesAsync(BuyDate, SellDate, Arg.Any<CancellationToken>())
+            .Returns((100m, buyMonth, 150m, sellMonth));
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 100_000m, "try", includeInflation: true);
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.CumulativeInflationPercent.Should().BeApproximately(50m, 0.01m);
+        result.RealProfitLossPercent.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_DateAdjusted_PopulatesActualDates()
+    {
+        var saturday = new DateOnly(2020, 1, 4);
+        var friday   = new DateOnly(2020, 1, 3);
+
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m,
+            buyDate: saturday, actualBuyDate: friday);
+
+        var request = MakeReverseRequest("USDTRY", saturday, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.ActualBuyDate.Should().Be(friday);
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_LowercaseSymbol_NormalizesToUpperCase()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+
+        var request = MakeReverseRequest("usdtry", BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.AssetSymbol.Should().Be("USDTRY");
+    }
+
+    // ── Yardımcı Metodlar ────────────────────────────────────────────────────
 
     private static WhatIfRequest MakeRequest(
         string symbol, DateOnly buyDate, DateOnly? sellDate,
-        decimal amount, string amountType)
-        => new(symbol, buyDate, sellDate, amount, amountType);
+        decimal amount, string amountType, bool includeInflation = false)
+        => new(symbol, buyDate, sellDate, amount, amountType, includeInflation);
+
+    private static ReverseWhatIfRequest MakeReverseRequest(
+        string symbol, DateOnly buyDate, DateOnly? sellDate,
+        decimal targetAmount, string targetAmountType, bool includeInflation = false)
+        => new(symbol, buyDate, sellDate, targetAmount, targetAmountType, includeInflation);
 }

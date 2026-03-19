@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <data name="ServerError"><value>Server error</value></data>
+  <data name="UnexpectedError"><value>An unexpected error occurred. Please try again.</value></data>
+  <data name="PriceNotFound"><value>Price not found</value></data>
+  <data name="AssetNotFound"><value>Asset not found</value></data>
+  <data name="ScenarioNotFound"><value>Scenario not found</value></data>
+  <data name="ScenarioLimitExceeded"><value>Scenario limit exceeded</value></data>
+  <data name="DailyLimitExceeded"><value>Daily calculation limit reached</value></data>
+  <data name="DeviceIdRequired"><value>X-Device-ID required</value></data>
+  <data name="DeviceIdRequiredDetail"><value>X-Device-ID header must be sent with a single, non-empty value to access this endpoint.</value></data>
+  <data name="DeviceIdInvalid"><value>X-Device-ID invalid</value></data>
+  <data name="DeviceIdInvalidDetail"><value>X-Device-ID must be at most {0} characters and may only contain letters, digits, '-', '_' and '.'.</value></data>
+  <data name="CompareSymbolCount"><value>Between 2 and 5 symbols are required for comparison.</value></data>
+  <data name="BuyDateAfterSellDate"><value>Buy date cannot be after sell date.</value></data>
+  <data name="InvalidAmountType"><value>Invalid amountType: '{0}'. Expected: try, units, grams</value></data>
+  <data name="InvalidPeriod"><value>Invalid period: '{0}'. Expected: weekly, monthly</value></data>
+  <data name="InvalidDcaAmountType"><value>Invalid amountType: '{0}'. DCA calculation only supports 'try'.</value></data>
+  <data name="InvalidScenarioType"><value>Invalid scenario type: '{0}'. Allowed values: {1}</value></data>
+  <!-- Asset Display Names -->
+  <data name="Asset_USDTRY"><value>Dollar/TRY</value></data>
+  <data name="Asset_EURTRY"><value>Euro/TRY</value></data>
+  <data name="Asset_GBPTRY"><value>Sterling/TRY</value></data>
+  <data name="Asset_CHFTRY"><value>Swiss Franc/TRY</value></data>
+  <data name="Asset_JPYTRY"><value>Japanese Yen/TRY</value></data>
+  <data name="Asset_SARTRY"><value>Saudi Riyal/TRY</value></data>
+  <data name="Asset_AEDTRY"><value>UAE Dirham/TRY</value></data>
+  <data name="Asset_AUDTRY"><value>Australian Dollar</value></data>
+  <data name="Asset_AZNTRY"><value>Azerbaijani Manat</value></data>
+  <data name="Asset_CADTRY"><value>Canadian Dollar</value></data>
+  <data name="Asset_CNYTRY"><value>Chinese Yuan</value></data>
+  <data name="Asset_DKKTRY"><value>Danish Krone</value></data>
+  <data name="Asset_KRWTRY"><value>South Korean Won</value></data>
+  <data name="Asset_KWDTRY"><value>Kuwaiti Dinar</value></data>
+  <data name="Asset_KZTTRY"><value>Kazakhstani Tenge</value></data>
+  <data name="Asset_NOKTRY"><value>Norwegian Krone</value></data>
+  <data name="Asset_QARTRY"><value>Qatari Riyal</value></data>
+  <data name="Asset_RONTRY"><value>Romanian Leu</value></data>
+  <data name="Asset_RUBTRY"><value>Russian Ruble</value></data>
+  <data name="Asset_SEKTRY"><value>Swedish Krona</value></data>
+  <data name="Asset_XAU_TRY_GRAM"><value>Gold (Gram/TRY)</value></data>
+  <data name="Asset_XAG_TRY_GRAM"><value>Silver (Gram/TRY)</value></data>
+  <data name="Asset_BTC"><value>Bitcoin</value></data>
+  <data name="Asset_ETH"><value>Ethereum</value></data>
+  <data name="Asset_BNB"><value>BNB</value></data>
+  <data name="Asset_XRP"><value>XRP</value></data>
+  <data name="Asset_SOL"><value>Solana</value></data>
+  <data name="Asset_THYAO"><value>Turkish Airlines</value></data>
+  <data name="Asset_GARAN"><value>Garanti BBVA</value></data>
+</root>

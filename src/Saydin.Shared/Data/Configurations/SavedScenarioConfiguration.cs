@@ -15,6 +15,11 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
         builder.Property(s => s.QuantityUnit).HasMaxLength(20).IsRequired();
         builder.Property(s => s.Label).HasMaxLength(200);
 
+        builder.Property(s => s.AssetSymbol).HasMaxLength(100).IsRequired();
+        builder.Property(s => s.AssetDisplayName).HasMaxLength(200).IsRequired();
+        builder.Property(s => s.Type).HasMaxLength(20).IsRequired().HasDefaultValue("what_if");
+        builder.Property(s => s.ExtraData).HasColumnType("jsonb");
+
         builder.HasOne(s => s.User)
             .WithMany(u => u.SavedScenarios)
             .HasForeignKey(s => s.UserId)
@@ -23,6 +28,7 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
         builder.HasOne(s => s.Asset)
             .WithMany()
             .HasForeignKey(s => s.AssetId)
+            .IsRequired(false)
             .OnDelete(DeleteBehavior.Restrict);
 
         builder.HasIndex(s => new { s.UserId, s.CreatedAt })

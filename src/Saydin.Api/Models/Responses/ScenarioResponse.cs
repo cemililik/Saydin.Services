@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Saydin.Api.Models.Responses;
 
 public record ScenarioResponse(
@@ -9,5 +11,7 @@ public record ScenarioResponse(
     decimal Amount,
     string AmountType,
     string? Label,
-    DateTimeOffset CreatedAt
+    DateTimeOffset CreatedAt,
+    string Type = "what_if",
+    JsonElement? ExtraData = null
 );

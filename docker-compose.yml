@@ -19,6 +19,9 @@ services:
       - ./infrastructure/postgres/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
       - ./infrastructure/postgres/migrations/002_add_assets.sql:/docker-entrypoint-initdb.d/002_add_assets.sql:ro
       - ./infrastructure/postgres/migrations/003_switch_precious_metals_to_oxr.sql:/docker-entrypoint-initdb.d/003_switch_precious_metals_to_oxr.sql:ro
+      - ./infrastructure/postgres/migrations/004_add_inflation_rates.sql:/docker-entrypoint-initdb.d/004_add_inflation_rates.sql:ro
+      - ./infrastructure/postgres/migrations/005_add_tcmb_currencies.sql:/docker-entrypoint-initdb.d/005_add_tcmb_currencies.sql:ro
+      - ./infrastructure/postgres/migrations/006_scenario_type.sql:/docker-entrypoint-initdb.d/006_scenario_type.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U saydin -d saydin"]
       interval: 10s
@@ -144,6 +147,14 @@ services:
       ExternalApis__OpenExchangeRates__AppId: ${OPENEXCHANGERATES_APP_ID:-}
       # ExternalApis__GoldApi__ApiKey: ${GOLDAPI_API_KEY:-}  # Pasif
       ExternalApis__TwelveData__ApiKey: ${TWELVEDATA_API_KEY:-}
+      ExternalApis__Evds__ApiKey: ${EVDS_API_KEY:-}
+      # ── Seçici Worker Kontrolü ──────────────────────────────────────────────
+      # Varsayılan: tüm worker'lar aktif. Kapatmak için "false" yap.
+      IngestionWorkers__Tcmb__Enabled: "true"
+      IngestionWorkers__CoinGecko__Enabled: "false"
+      IngestionWorkers__OpenExchangeRates__Enabled: "false"
+      IngestionWorkers__TwelveData__Enabled: "false"
+      IngestionWorkers__EvdsInflation__Enabled: "true"
     depends_on:
       postgres:
         condition: service_healthy

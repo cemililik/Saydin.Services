@@ -1,11 +1,15 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Localization;
+
 using Saydin.Shared.Exceptions;
 
 namespace Saydin.Api.Exceptions;
 
-public sealed class PriceNotFoundExceptionHandler(ILogger<PriceNotFoundExceptionHandler> logger)
+public sealed class PriceNotFoundExceptionHandler(
+    ILogger<PriceNotFoundExceptionHandler> logger,
+    IStringLocalizer<ErrorMessages> localizer)
     : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
@@ -26,7 +30,7 @@ public sealed class PriceNotFoundExceptionHandler(ILogger<PriceNotFoundException
         await context.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type = "https://saydin.app/errors/price-not-found",
-            Title = "Fiyat bulunamadı",
+            Title = localizer["PriceNotFound"],
             Status = StatusCodes.Status404NotFound,
             Detail = ex.Message,
             Extensions =

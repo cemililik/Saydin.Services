@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
 
@@ -6,15 +7,37 @@ namespace Saydin.PriceIngestion.Workers;
 /// <summary>
 /// Tüm asset worker'larının ortak backfill + zamanlama mantığı.
 /// Her worker BackfillStartDate, ChunkDays ve DailyRunUtcTime'ı override eder.
+/// appsettings.json → IngestionWorkers:{WorkerConfigKey}:DailyRunUtcHour/Minute ile saatler override edilebilir.
 /// </summary>
 public abstract class BaseAssetWorker(
     IExternalPriceAdapter adapter,
     IPriceIngestionRepository repository,
+    IConfiguration configuration,
     ILogger logger)
 {
     protected abstract DateOnly BackfillStartDate { get; }
     protected abstract int ChunkDays { get; }
-    protected abstract TimeOnly DailyRunUtcTime { get; }
+
+    /// <summary>Config section adı: "Tcmb", "CoinGecko", "OpenExchangeRates", "TwelveData"</summary>
+    protected abstract string WorkerConfigKey { get; }
+
+    /// <summary>
+    /// Varsayılan günlük çalışma saati. appsettings ile override edilebilir.
+    /// </summary>
+    protected abstract TimeOnly DefaultDailyRunUtcTime { get; }
+
+    private TimeOnly DailyRunUtcTime
+    {
+        get
+        {
+            var section = configuration.GetSection($"IngestionWorkers:{WorkerConfigKey}");
+            var hour    = section.GetValue<int?>("DailyRunUtcHour");
+            var minute  = section.GetValue<int?>("DailyRunUtcMinute");
+            return (hour.HasValue || minute.HasValue)
+                ? new TimeOnly(hour ?? DefaultDailyRunUtcTime.Hour, minute ?? DefaultDailyRunUtcTime.Minute)
+                : DefaultDailyRunUtcTime;
+        }
+    }
 
     /// <summary>
     /// Chunk'lar arası bekleme süresi. Rate-limit'i olan API'ler override eder.
