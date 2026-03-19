@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Localization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
@@ -93,6 +95,9 @@ try
             })
             .AddPrometheusExporter());
 
+    // ─── Localization ──────────────────────────────────────────────────────────
+    builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
+
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();
     builder.Services.AddExceptionHandler<PriceNotFoundExceptionHandler>();
@@ -167,6 +172,7 @@ try
     builder.Services.AddScoped<IAssetService, AssetService>();
     builder.Services.AddScoped<IInflationRepository, InflationRepository>();
     builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
+    builder.Services.AddScoped<IDcaCalculator, DcaCalculator>();
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
     builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
 
@@ -174,6 +180,17 @@ try
     var app = builder.Build();
 
     app.UseResponseCompression();
+
+    // ─── Request Localization ──────────────────────────────────────────────────
+    var supportedCultures = new[] { new CultureInfo("tr"), new CultureInfo("en") };
+    app.UseRequestLocalization(new RequestLocalizationOptions
+    {
+        DefaultRequestCulture = new RequestCulture("tr"),
+        SupportedCultures = supportedCultures,
+        SupportedUICultures = supportedCultures,
+        ApplyCurrentCultureToResponseHeaders = true
+    });
+
     app.UseExceptionHandler();
     app.UseSerilogRequestLogging();
 
@@ -187,6 +204,7 @@ try
     app.MapHealthChecks("/health");
 
     app.MapWhatIfEndpoints();
+    app.MapDcaEndpoints();
     app.MapAssetsEndpoints();
     app.MapScenariosEndpoints();
     app.MapAppConfigEndpoints();

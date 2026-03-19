@@ -28,6 +28,7 @@ public sealed class FeatureOptions
     public bool Comparison          { get; init; } = true;
     public bool InflationAdjustment { get; init; } = true;
     public bool Share               { get; init; } = true;
+    public bool Dca                 { get; init; } = true;
 
     /// <summary>Erişilebilir fiyat geçmişi (ay). 0 = tüm geçmiş.</summary>
     public int PriceHistoryMonths { get; init; } = 12;

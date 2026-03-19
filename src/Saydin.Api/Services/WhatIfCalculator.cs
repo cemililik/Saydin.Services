@@ -1,9 +1,11 @@
 using System.Text.Json;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
+
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 using StackExchange.Redis;
@@ -16,6 +18,7 @@ public sealed class WhatIfCalculator(
     IInflationRepository inflationRepository,
     IConnectionMultiplexer redis,
     IOptions<PlanOptions> options,
+    IStringLocalizer<ErrorMessages> localizer,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
     private const string PremiumTier          = "premium";
@@ -46,7 +49,7 @@ public sealed class WhatIfCalculator(
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
         if (request.AssetSymbols.Count is < 2 or > 5)
-            throw new ArgumentException("Karşılaştırma için 2 ile 5 arasında sembol gereklidir.");
+            throw new ArgumentException(localizer["CompareSymbolCount"]);
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         await CheckDailyLimitAsync(user, deviceId);
@@ -88,6 +91,166 @@ public sealed class WhatIfCalculator(
         return new CompareResponse(ranked);
     }
 
+    public async Task<ReverseWhatIfResponse> CalculateReverseAsync(
+        string deviceId, ReverseWhatIfRequest request, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+
+        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
+        await CheckDailyLimitAsync(user, deviceId);
+
+        var response = await CalculateReverseCoreAsync(request, ct);
+
+        await IncrementAndEnforceLimitAsync(user, deviceId);
+        return response;
+    }
+
+    private async Task<ReverseWhatIfResponse> CalculateReverseCoreAsync(
+        ReverseWhatIfRequest request, CancellationToken ct)
+    {
+        var symbol           = request.AssetSymbol.ToUpperInvariant();
+        var sellDate         = request.SellDate
+            ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
+        var targetAmountType = request.TargetAmountType.ToLowerInvariant();
+
+        if (request.BuyDate > sellDate)
+            throw new ArgumentException(localizer["BuyDateAfterSellDate"]);
+
+        var inflationSuffix = request.IncludeInflation ? ":inf" : "";
+        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        var cacheKey = $"whatif:reverse:v1:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.TargetAmount}:{targetAmountType}{inflationSuffix}:{lang}";
+
+        var cached = await TryGetCachedAsync<ReverseWhatIfResponse>(cacheKey);
+        if (cached is not null)
+            return cached;
+
+        var buyPricePoint  = await assetService.GetNearestPriceAsync(symbol, request.BuyDate, ct);
+        var sellPricePoint = await assetService.GetNearestPriceAsync(symbol, sellDate, ct);
+
+        var actualBuyDate  = buyPricePoint.PriceDate  != request.BuyDate ? buyPricePoint.PriceDate  : (DateOnly?)null;
+        var actualSellDate = sellPricePoint.PriceDate != sellDate         ? sellPricePoint.PriceDate : (DateOnly?)null;
+
+        var assets = await assetService.GetAllAsync(ct);
+        var asset  = assets.FirstOrDefault(a => a.Symbol == symbol)
+            ?? throw new PriceNotFoundException(symbol, request.BuyDate);
+
+        var buyPrice  = buyPricePoint.Close;
+        var sellPrice = sellPricePoint.Close;
+
+        // Ters hesaplama: hedef son değerden gereken başlangıç yatırımını bul
+        decimal targetValueTry;
+        decimal unitsAcquired;
+        decimal requiredInvestmentTry;
+
+        if (sellPrice == 0)
+            throw new PriceNotFoundException(symbol, sellDate);
+
+        switch (targetAmountType)
+        {
+            case "try":
+                // Hedef TL değeri → kaç birim lazım → kaç TL yatırmalıydın
+                targetValueTry      = request.TargetAmount;
+                unitsAcquired       = Math.Round(request.TargetAmount / sellPrice, 6, MidpointRounding.AwayFromZero);
+                requiredInvestmentTry = Math.Round(unitsAcquired * buyPrice, 2, MidpointRounding.AwayFromZero);
+                break;
+            case "units":
+            case "grams":
+                // Hedef birim/gram sayısı → son değer TL → gereken TL
+                unitsAcquired       = request.TargetAmount;
+                targetValueTry      = Math.Round(request.TargetAmount * sellPrice, 2, MidpointRounding.AwayFromZero);
+                requiredInvestmentTry = Math.Round(request.TargetAmount * buyPrice, 2, MidpointRounding.AwayFromZero);
+                break;
+            default:
+                throw new ArgumentException(
+                    string.Format(localizer["InvalidAmountType"], request.TargetAmountType));
+        }
+
+        var profitLossTry     = targetValueTry - requiredInvestmentTry;
+        var profitLossPercent = requiredInvestmentTry == 0
+            ? 0m
+            : Math.Round(profitLossTry / requiredInvestmentTry * 100, 2, MidpointRounding.AwayFromZero);
+
+        IReadOnlyList<PriceHistoryPoint> priceHistory;
+        try
+        {
+            var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, "daily", ct);
+            priceHistory = SamplePriceHistory(range);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Fiyat geçmişi alınamadı: {Symbol}", symbol);
+            priceHistory = Array.Empty<PriceHistoryPoint>();
+        }
+
+        // ── Enflasyon düzeltmesi ────────────────────────────────────────────
+        decimal?  cumulativeInflationPercent = null;
+        decimal?  realProfitLossPercent      = null;
+        DateOnly? inflationDataAsOf          = null;
+
+        if (request.IncludeInflation)
+        {
+            try
+            {
+                var (buyIdx, buyIdxDate, sellIdx, sellIdxDate) =
+                    await inflationRepository.GetIndexValuesAsync(request.BuyDate, sellDate, ct);
+
+                if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
+                {
+                    cumulativeInflationPercent = Math.Round(
+                        (sellIdx.Value / buyIdx.Value - 1m) * 100, 2, MidpointRounding.AwayFromZero);
+
+                    var nominalFactor   = 1m + profitLossPercent / 100m;
+                    var inflationFactor = 1m + cumulativeInflationPercent.Value / 100m;
+                    realProfitLossPercent = Math.Round(
+                        (nominalFactor / inflationFactor - 1m) * 100, 2, MidpointRounding.AwayFromZero);
+
+                    var expectedSellMonth = new DateOnly(sellDate.Year, sellDate.Month, 1);
+                    if (sellIdxDate.HasValue && sellIdxDate.Value < expectedSellMonth)
+                        inflationDataAsOf = sellIdxDate;
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Enflasyon endeksi bulunamadı: {BuyDate} / {SellDate}", request.BuyDate, sellDate);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Enflasyon hesabı başarısız, nominal getiri kullanılıyor");
+            }
+        }
+
+        var response = new ReverseWhatIfResponse(
+            AssetSymbol:                symbol,
+            AssetDisplayName:           LocalizeAssetName(symbol, asset.DisplayName),
+            BuyDate:                    request.BuyDate,
+            SellDate:                   sellDate,
+            BuyPrice:                   buyPrice,
+            SellPrice:                  sellPrice,
+            RequiredInvestmentTry:      requiredInvestmentTry,
+            UnitsAcquired:              unitsAcquired,
+            TargetValueTry:             targetValueTry,
+            ProfitLossTry:              profitLossTry,
+            ProfitLossPercent:          profitLossPercent,
+            IsProfit:                   profitLossTry >= 0,
+            PriceHistory:               priceHistory,
+            CumulativeInflationPercent: cumulativeInflationPercent,
+            RealProfitLossPercent:      realProfitLossPercent,
+            InflationDataAsOf:          inflationDataAsOf,
+            ActualBuyDate:              actualBuyDate,
+            ActualSellDate:             actualSellDate
+        );
+
+        await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
+
+        logger.LogInformation(
+            "Reverse WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} hedef:{TargetAmountType}:{TargetAmount} → gereken: ₺{RequiredInvestment} %{ProfitLossPercent}",
+            symbol, request.BuyDate, sellDate, targetAmountType, request.TargetAmount,
+            requiredInvestmentTry, profitLossPercent);
+
+        return response;
+    }
+
     private async Task<WhatIfResponse> CalculateCoreAsync(WhatIfRequest request, CancellationToken ct)
     {
         var symbol     = request.AssetSymbol.ToUpperInvariant();
@@ -96,10 +259,11 @@ public sealed class WhatIfCalculator(
         var amountType = request.AmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
-            throw new ArgumentException("Alış tarihi satış tarihinden sonra olamaz.");
+            throw new ArgumentException(localizer["BuyDateAfterSellDate"]);
 
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
-        var cacheKey = $"whatif:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}{inflationSuffix}";
+        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        var cacheKey = $"whatif:v3:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}{inflationSuffix}:{lang}";
 
         var cached = await TryGetCachedAsync<WhatIfResponse>(cacheKey);
         if (cached is not null)
@@ -137,7 +301,7 @@ public sealed class WhatIfCalculator(
                 break;
             default:
                 throw new ArgumentException(
-                    $"Geçersiz amountType: '{request.AmountType}'. Beklenen: try, units, grams");
+                    string.Format(localizer["InvalidAmountType"], request.AmountType));
         }
 
         var finalValueTry     = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
@@ -201,7 +365,7 @@ public sealed class WhatIfCalculator(
 
         var response = new WhatIfResponse(
             AssetSymbol:                symbol,
-            AssetDisplayName:           asset.DisplayName,
+            AssetDisplayName:           LocalizeAssetName(symbol, asset.DisplayName),
             BuyDate:                    request.BuyDate,
             SellDate:                   sellDate,
             BuyPrice:                   buyPrice,
@@ -228,6 +392,12 @@ public sealed class WhatIfCalculator(
             profitLossPercent, realProfitLossPercent?.ToString() ?? "-");
 
         return response;
+    }
+
+    private string LocalizeAssetName(string symbol, string fallbackDisplayName)
+    {
+        var localized = localizer[$"Asset_{symbol}"];
+        return localized.ResourceNotFound ? fallbackDisplayName : localized.Value;
     }
 
     private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(

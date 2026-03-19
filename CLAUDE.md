@@ -18,15 +18,14 @@ Bu repo iki .NET 10 servisini ve ortak kütüphaneyi içerir:
 Tüm build, test ve çalıştırma işlemleri **Docker Compose** üzerinden yapılır:
 
 ```bash
-# Servisleri başlat
-docker compose up -d
+# Kod değişikliğinden sonra image'ı yeniden oluştur ve servisleri başlat
+docker compose build && docker compose up -d
 
-# Build & test
+# Test
 docker compose run --rm api dotnet test
-
-# Sadece build
-docker compose run --rm api dotnet build
 ```
+
+**`docker compose run --rm api dotnet build` KULLANMA** — build ve deploy için her zaman `docker compose build && docker compose up -d` kullan.
 
 Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
 
@@ -142,7 +141,7 @@ var result = await service.CalculateAsync(ct);
 
 - Tüm dış API çağrıları try/catch ile sarılır
 - Exception sessizce yutulmaz — minimum `ILogger` ile loglanır
-- Kullanıcıya dönecek hata mesajları Türkçe olur
+- Kullanıcıya dönecek hata mesajları `IStringLocalizer<ErrorMessages>` ile lokalize edilir (`Accept-Language` header'a göre)
 - `ProblemDetails` formatı kullanılır (RFC 7807)
 
 ### Güvenlik
@@ -327,13 +326,15 @@ dotnet ef database update \
 
 ### Yeni Asset Eklemek
 `.claude/commands/add-asset.md` dosyasındaki 8 adımlı checklist'i uygula.
+Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` dosyalarına `Asset_{SYMBOL}` key'i ile Türkçe/İngilizce display name ekle.
 
 ### Yeni Endpoint Eklemek
 1. `Endpoints/` klasöründe ilgili extension method'a ekle
 2. Request/Response record type'larını `Models/` altına ekle
 3. Service interface'i ve implementasyonunu yaz
-4. Unit test yaz
-5. `docs/architecture/api-contract.md`'ı güncelle
+4. Kullanıcıya dönecek string'ler için `IStringLocalizer<ErrorMessages>` kullan, hardcoded Türkçe string YASAK
+5. Unit test yaz
+6. `docs/architecture/api-contract.md`'ı güncelle
 
 ---
 
@@ -353,6 +354,7 @@ dotnet ef database update \
 - Log mesajında string interpolation — YASAK (kullan: parametreli mesaj)
 - `Console.WriteLine` veya `Debug.WriteLine` — YASAK (kullan: `ILogger<T>`)
 - Exception handler olmadan endpoint yazmak — YASAK (GlobalExceptionHandler her zaman var)
+- Kullanıcıya dönecek string'lerde hardcoded Türkçe/İngilizce — YASAK (kullan: `IStringLocalizer<ErrorMessages>`)
 
 ---
 

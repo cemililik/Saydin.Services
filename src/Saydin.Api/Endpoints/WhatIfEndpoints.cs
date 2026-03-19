@@ -20,6 +20,11 @@ public static class WhatIfEndpoints
             .WithSummary("Birden fazla varlık arasında ya-alsaydım karşılaştırması yapar (2-5 sembol)")
             .RequireDeviceId();
 
+        group.MapPost("/reverse", ReverseCalculateAsync)
+            .WithName("ReverseCalculateWhatIf")
+            .WithSummary("Ters hesaplama: hedef tutardan gereken yatırımı hesaplar")
+            .RequireDeviceId();
+
         return app;
     }
 
@@ -44,6 +49,18 @@ public static class WhatIfEndpoints
         var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
             ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
         var result = await calculator.CompareAsync(deviceId, request, ct);
+        return Results.Ok(result);
+    }
+
+    private static async Task<IResult> ReverseCalculateAsync(
+        HttpContext httpContext,
+        ReverseWhatIfRequest request,
+        IWhatIfCalculator calculator,
+        CancellationToken ct)
+    {
+        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
+            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var result = await calculator.CalculateReverseAsync(deviceId, request, ct);
         return Results.Ok(result);
     }
 }

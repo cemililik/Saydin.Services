@@ -10,4 +10,5 @@ public record AppFeatureFlags(
     bool Comparison,
     bool InflationAdjustment,
     bool Share,
+    bool Dca,
     int  PriceHistoryMonths);

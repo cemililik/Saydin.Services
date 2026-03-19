@@ -1,6 +1,9 @@
+using System.Globalization;
 using System.Text.Json;
+using Microsoft.Extensions.Localization;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
+
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 using StackExchange.Redis;
@@ -10,6 +13,7 @@ namespace Saydin.Api.Services;
 public sealed class AssetService(
     IPriceRepository repository,
     IConnectionMultiplexer redis,
+    IStringLocalizer<ErrorMessages> localizer,
     ILogger<AssetService> logger) : IAssetService
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -53,7 +57,8 @@ public sealed class AssetService(
             await TrySetCacheAsync(sigKey, sig, TimeSpan.FromMinutes(5));
         }
 
-        var listKey = $"assets:info:{sig}";
+        var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        var listKey = $"assets:info:{sig}:{lang}";
         var cached = await TryGetCachedAsync<List<AssetResponse>>(listKey);
         if (cached is not null) return cached;
 
@@ -61,7 +66,7 @@ public sealed class AssetService(
         var result = rows
             .Select(r => new AssetResponse(
                 r.Asset.Symbol,
-                r.Asset.DisplayName,
+                LocalizeDisplayName(r.Asset.Symbol, r.Asset.DisplayName),
                 r.Asset.Category,
                 r.FirstDate,
                 r.LastDate))
@@ -135,6 +140,16 @@ public sealed class AssetService(
         await TrySetCacheAsync(cacheKey, points, TimeSpan.FromHours(1));
 
         return points;
+    }
+
+    /// <summary>
+    /// Asset sembolüne göre lokalize edilmiş display name döner.
+    /// .resx'te key bulunamazsa DB'deki orijinal display name'i kullanır.
+    /// </summary>
+    private string LocalizeDisplayName(string symbol, string fallbackDisplayName)
+    {
+        var localized = localizer[$"Asset_{symbol}"];
+        return localized.ResourceNotFound ? fallbackDisplayName : localized.Value;
     }
 
     // ── Redis yardımcıları ────────────────────────────────────────────────────
