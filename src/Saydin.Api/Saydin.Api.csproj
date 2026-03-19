@@ -30,4 +30,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Saydin.Api.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -141,6 +141,49 @@ API, `Accept-Language` header'ına göre yanıt dilini belirler. `.resx` kaynak 
 
 **Yeni asset eklendiğinde:** Her iki `.resx` dosyasına `Asset_{SYMBOL}` key'i ile çeviri eklenir. Key bulunamazsa DB'deki `display_name` fallback olarak kullanılır.
 
+## DailyLimitGuard (Günlük Kullanım Limiti)
+
+Günlük kullanım kotası kontrolü `DailyLimitGuard` servisi tarafından merkezi olarak yönetilir. Her hesaplama servisi (WhatIfCalculator, DcaCalculator) kendi `usageKeyPrefix` değeriyle bu guard'ı çağırır:
+
+```
+usage:whatif:{userId}:{yyyy-MM-dd}   → WhatIfCalculator
+usage:dca:{userId}:{yyyy-MM-dd}      → DcaCalculator
+```
+
+`GetLimitAndKey` helper metodu ortak kontrol mantığını çıkarır:
+- Premium kullanıcılar → bypass (ne check ne increment)
+- Limit = 0 → unlimited tier, bypass
+- Diğerleri → Redis key oluştur, limit kontrol et
+
+**Fail-open prensibi:** Redis erişilemezse kullanıcı engellemez — hata loglanır, istek devam eder.
+
+## Feature Flags (Özellik Bayrakları)
+
+Her plan tier'ı (`free`/`premium`) `FeatureOptions` ile hangi özelliklerin aktif olduğunu belirler:
+
+| Bayrak | Varsayılan | Etkisi |
+|---|---|---|
+| `Comparison` | `true` | Compare endpoint erişimi |
+| `InflationAdjustment` | `true` | Enflasyon düzeltmeli hesaplama |
+| `Share` | `true` | Paylaşım özelliği |
+| `Dca` | `true` | DCA hesaplama erişimi |
+| `PriceHistoryMonths` | `12` | Fiyat geçmişi ay sınırı |
+
+Devre dışı özellik çağrılırsa `InvalidOperationException("FeatureDisabled")` fırlatılır ve `IStringLocalizer` ile lokalize edilir.
+
+Feature flag'lar `/v1/config` endpoint'inden istemciye döner — UI dinamik olarak kısıtlama uygular.
+
+## Senaryo Tipi Normalizasyonu
+
+`SavedScenarioService` senaryo kaydetme sırasında `Type` alanını `ToLowerInvariant()` ile normalize eder. İzin verilen tipler:
+
+```
+what_if | comparison | portfolio | dca
+```
+
+- `what_if` ve `dca` tipleri geçerli bir asset sembolü gerektirir (FK kontrolü)
+- `comparison` ve `portfolio` tipleri asset doğrulamasını atlar
+
 ## Exception Handling Zinciri
 
 ```
