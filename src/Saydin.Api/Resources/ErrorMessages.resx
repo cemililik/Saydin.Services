@@ -33,6 +33,7 @@
   <data name="InvalidPeriod"><value>Ge&#x00E7;ersiz periyod: '{0}'. Beklenen: weekly, monthly</value></data>
   <data name="InvalidDcaAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. DCA hesaplamas&#x131; yaln&#x131;zca 'try' destekler.</value></data>
   <data name="InvalidScenarioType"><value>Ge&#x00E7;ersiz senaryo tipi: '{0}'. &#x130;zin verilen de&#x11F;erler: {1}</value></data>
+  <data name="FeatureDisabled"><value>Bu &#x00F6;zellik mevcut plan&#x131;n&#x131;zda kullan&#x131;lam&#x131;yor.</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dolar/TL</value></data>
   <data name="Asset_EURTRY"><value>Euro/TL</value></data>

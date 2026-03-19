@@ -20,6 +20,7 @@ public class DcaCalculatorTests
     private readonly IAssetService                   _assetService        = Substitute.For<IAssetService>();
     private readonly ISavedScenarioRepository        _scenarioRepository  = Substitute.For<ISavedScenarioRepository>();
     private readonly IInflationRepository            _inflationRepository = Substitute.For<IInflationRepository>();
+    private readonly IDailyLimitGuard                _dailyLimitGuard     = Substitute.For<IDailyLimitGuard>();
     private readonly IConnectionMultiplexer          _redis               = Substitute.For<IConnectionMultiplexer>();
     private readonly IDatabase                       _db                  = Substitute.For<IDatabase>();
     private readonly IStringLocalizer<ErrorMessages> _localizer           = Substitute.For<IStringLocalizer<ErrorMessages>>();
@@ -65,12 +66,6 @@ public class DcaCalculatorTests
         // Varsayılan: cache miss
         _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
            .Returns(RedisValue.Null);
-        _db.ScriptEvaluateAsync(
-                Arg.Any<string>(),
-                Arg.Any<RedisKey[]>(),
-                Arg.Any<RedisValue[]>(),
-                Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create(1L));
 
         // Kullanıcılar
         _scenarioRepository.GetUserByDeviceIdAsync(FreeDeviceId, Arg.Any<CancellationToken>())
@@ -98,6 +93,7 @@ public class DcaCalculatorTests
             _assetService,
             _scenarioRepository,
             _inflationRepository,
+            _dailyLimitGuard,
             _redis,
             options,
             _localizer,
@@ -284,13 +280,10 @@ public class DcaCalculatorTests
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
         await _sut.CalculateAsync(PremiumDeviceId, request, CancellationToken.None);
 
-        // Premium: Redis'e limit sorulmaz, Lua script çalışmaz
-        await _db.DidNotReceive()
-                 .ScriptEvaluateAsync(
-                     Arg.Any<string>(),
-                     Arg.Any<RedisKey[]>(),
-                     Arg.Any<RedisValue[]>(),
-                     Arg.Any<CommandFlags>());
+        await _dailyLimitGuard.Received(1)
+            .CheckAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>());
+        await _dailyLimitGuard.Received(1)
+            .IncrementAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>());
     }
 
     [Fact]
@@ -298,9 +291,8 @@ public class DcaCalculatorTests
     {
         SetupConstantPrice(10m);
 
-        // Check aşamasında limit aşılmış
-        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
-           .Returns(new RedisValue("20")); // limit = 20
+        _dailyLimitGuard.CheckAsync(FreeUser, FreeDeviceId, Arg.Any<string>())
+            .ThrowsAsync(new DailyLimitExceededException(20));
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
@@ -314,8 +306,7 @@ public class DcaCalculatorTests
     {
         SetupConstantPrice(10m);
 
-        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
-           .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.UnableToConnect, "test"));
+        // DailyLimitGuard Redis hatalarını kendi içinde yutar (fail-open)
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
@@ -403,6 +394,55 @@ public class DcaCalculatorTests
 
         // Son alım — kümülatif maliyet toplam yatırıma eşit olmalı
         result.Purchases[^1].CumulativeCostTry.Should().Be(result.TotalInvestedTry);
+    }
+
+    // ── Cache ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CalculateAsync_CacheHit_ReturnsCachedAndSkipsExpensiveCalls()
+    {
+        var cached = new DcaResponse(
+            AssetSymbol:                "USDTRY",
+            AssetDisplayName:           "Dolar/TL",
+            StartDate:                  StartDate,
+            EndDate:                    EndDate,
+            Period:                     "monthly",
+            PeriodicAmount:             1000m,
+            TotalPurchases:             6,
+            TotalInvestedTry:           6000m,
+            CurrentValueTry:            7200m,
+            ProfitLossTry:              1200m,
+            ProfitLossPercent:          20m,
+            IsProfit:                   true,
+            AverageCostPerUnit:         10m,
+            TotalUnitsAcquired:         600m,
+            CurrentUnitPrice:           12m,
+            CumulativeInflationPercent: null,
+            RealProfitLossPercent:      null,
+            InflationDataAsOf:          null,
+            Purchases:                  [],
+            ChartData:                  []);
+
+        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        var cacheKey = $"dca:v1:USDTRY:{StartDate:yyyy-MM-dd}:{EndDate:yyyy-MM-dd}:1000:monthly:try:{lang}";
+        var json = System.Text.Json.JsonSerializer.Serialize(cached,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString() == cacheKey),
+                Arg.Any<CommandFlags>())
+           .Returns(new RedisValue(json));
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.TotalPurchases.Should().Be(6);
+        result.ProfitLossPercent.Should().Be(20m);
+        result.CurrentUnitPrice.Should().Be(12m);
+
+        // Cache hit — fiyat servisi çağrılmamalı
+        await _assetService.DidNotReceive()
+            .GetNearestPriceAsync(Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
     }
 
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────

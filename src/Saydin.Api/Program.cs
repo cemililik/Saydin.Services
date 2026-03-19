@@ -171,6 +171,7 @@ try
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
     builder.Services.AddScoped<IInflationRepository, InflationRepository>();
+    builder.Services.AddScoped<IDailyLimitGuard, DailyLimitGuard>();
     builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
     builder.Services.AddScoped<IDcaCalculator, DcaCalculator>();
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();

@@ -20,6 +20,7 @@ public class WhatIfCalculatorTests
     private readonly IAssetService                _assetService       = Substitute.For<IAssetService>();
     private readonly ISavedScenarioRepository     _scenarioRepository = Substitute.For<ISavedScenarioRepository>();
     private readonly IInflationRepository         _inflationRepository = Substitute.For<IInflationRepository>();
+    private readonly IDailyLimitGuard             _dailyLimitGuard    = Substitute.For<IDailyLimitGuard>();
     private readonly IConnectionMultiplexer       _redis              = Substitute.For<IConnectionMultiplexer>();
     private readonly IDatabase                    _db                 = Substitute.For<IDatabase>();
     private readonly IStringLocalizer<ErrorMessages> _localizer       = Substitute.For<IStringLocalizer<ErrorMessages>>();
@@ -63,15 +64,9 @@ public class WhatIfCalculatorTests
     {
         _redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(_db);
 
-        // Varsayılan: cache miss, Lua script 1 döner (ilk kullanım)
+        // Varsayılan: cache miss
         _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
            .Returns(RedisValue.Null);
-        _db.ScriptEvaluateAsync(
-                Arg.Any<string>(),
-                Arg.Any<RedisKey[]>(),
-                Arg.Any<RedisValue[]>(),
-                Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create(1L));
 
         // Varsayılan: free kullanıcı
         _scenarioRepository.GetUserByDeviceIdAsync(FreeDeviceId, Arg.Any<CancellationToken>())
@@ -101,6 +96,7 @@ public class WhatIfCalculatorTests
             _assetService,
             _scenarioRepository,
             _inflationRepository,
+            _dailyLimitGuard,
             _redis,
             options,
             _localizer,
@@ -269,13 +265,11 @@ public class WhatIfCalculatorTests
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
         await _sut.CalculateAsync(PremiumDeviceId, request, CancellationToken.None);
 
-        // Premium kullanıcı için Redis Lua script çağrılmamalı
-        await _db.DidNotReceive()
-                 .ScriptEvaluateAsync(
-                     Arg.Any<string>(),
-                     Arg.Any<RedisKey[]>(),
-                     Arg.Any<RedisValue[]>(),
-                     Arg.Any<CommandFlags>());
+        // DailyLimitGuard her iki çağrıda da PremiumUser ile çağrılmalı
+        await _dailyLimitGuard.Received(1)
+            .CheckAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>());
+        await _dailyLimitGuard.Received(1)
+            .IncrementAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>());
     }
 
     [Fact]
@@ -283,12 +277,7 @@ public class WhatIfCalculatorTests
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
-        _db.ScriptEvaluateAsync(
-                Arg.Any<string>(),
-                Arg.Any<RedisKey[]>(),
-                Arg.Any<RedisValue[]>(),
-                Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create(5L)); // limit = 10, count = 5 → izin ver
+        // DailyLimitGuard varsayılan: exception fırlatmaz (limit altında)
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
         var act     = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
@@ -301,11 +290,8 @@ public class WhatIfCalculatorTests
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
-        // CheckDailyLimitAsync artık StringGetAsync ile kontrol ediyor
-        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        var usageKey = $"usage:whatif:{FreeUser.Id}:{dateKey}";
-        _db.StringGetAsync(Arg.Is<RedisKey>(k => k.ToString() == usageKey), Arg.Any<CommandFlags>())
-           .Returns(new RedisValue("20")); // 20 >= 20 → limit aşıldı
+        _dailyLimitGuard.CheckAsync(FreeUser, FreeDeviceId, Arg.Any<string>())
+            .ThrowsAsync(new DailyLimitExceededException(20));
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
@@ -316,20 +302,18 @@ public class WhatIfCalculatorTests
     }
 
     [Fact]
-    public async Task CalculateAsync_UnknownDevice_UsesDeviceIdAsKey()
+    public async Task CalculateAsync_UnknownDevice_PassesNullUserToGuard()
     {
-        // Bilinmeyen cihaz: repository null döner, deviceId itself key olarak kullanılır
+        // Bilinmeyen cihaz: repository null döner, deviceId DailyLimitGuard'a geçer
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
         await _sut.CalculateAsync(DeviceId, request, CancellationToken.None);
 
-        // Redis key'in deviceId'yi içermesi beklenir
-        await _db.Received().ScriptEvaluateAsync(
-            Arg.Any<string>(),
-            Arg.Is<RedisKey[]>(keys => keys[0].ToString().Contains(DeviceId)),
-            Arg.Any<RedisValue[]>(),
-            Arg.Any<CommandFlags>());
+        await _dailyLimitGuard.Received(1)
+            .CheckAsync(null, DeviceId, Arg.Any<string>());
+        await _dailyLimitGuard.Received(1)
+            .IncrementAsync(null, DeviceId, Arg.Any<string>());
     }
 
     [Fact]
@@ -337,16 +321,10 @@ public class WhatIfCalculatorTests
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
-        _db.ScriptEvaluateAsync(
-                Arg.Any<string>(),
-                Arg.Any<RedisKey[]>(),
-                Arg.Any<RedisValue[]>(),
-                Arg.Any<CommandFlags>())
-           .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.UnableToConnect, "test"));
+        // DailyLimitGuard Redis hatalarını kendi içinde yutar (fail-open)
+        // Varsayılan mock davranışı: exception fırlatmaz
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-
-        // Redis hata → hesaplama yine de çalışmalı
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
@@ -816,12 +794,10 @@ public class WhatIfCalculatorTests
         var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
         await _sut.CalculateReverseAsync(PremiumDeviceId, request, CancellationToken.None);
 
-        await _db.DidNotReceive()
-                 .ScriptEvaluateAsync(
-                     Arg.Any<string>(),
-                     Arg.Any<RedisKey[]>(),
-                     Arg.Any<RedisValue[]>(),
-                     Arg.Any<CommandFlags>());
+        await _dailyLimitGuard.Received(1)
+            .CheckAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>());
+        await _dailyLimitGuard.Received(1)
+            .IncrementAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>());
     }
 
     [Fact]

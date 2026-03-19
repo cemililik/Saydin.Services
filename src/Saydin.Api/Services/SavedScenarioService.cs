@@ -43,13 +43,15 @@ public sealed class SavedScenarioService(
                 throw new ScenarioLimitExceededException(scenarioLimit);
         }
 
-        if (!AllowedTypes.Contains(request.Type))
+        var normalizedType = request.Type.ToLowerInvariant();
+
+        if (!AllowedTypes.Contains(normalizedType))
             throw new ArgumentException(
                 string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", AllowedTypes)));
 
         // what_if tipinde asset FK kontrolü yap; diğer tipler için atla
         Asset? asset = null;
-        if (request.Type is "what_if" or "dca")
+        if (normalizedType is "what_if" or "dca")
         {
             asset = await repository.GetActiveAssetBySymbolAsync(request.AssetSymbol, ct)
                 ?? throw new AssetNotFoundException(request.AssetSymbol);
@@ -62,7 +64,7 @@ public sealed class SavedScenarioService(
             AssetId = asset?.Id,
             AssetSymbol = request.AssetSymbol,
             AssetDisplayName = request.AssetDisplayName,
-            Type = request.Type,
+            Type = normalizedType,
             ExtraData = request.ExtraData,
             BuyDate = request.BuyDate,
             SellDate = request.SellDate,
