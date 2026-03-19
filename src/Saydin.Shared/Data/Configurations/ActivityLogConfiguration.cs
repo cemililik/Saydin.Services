@@ -14,9 +14,9 @@ public sealed class ActivityLogConfiguration : IEntityTypeConfiguration<Activity
         builder.Property(a => a.DeviceId).HasMaxLength(200).IsRequired();
         builder.Property(a => a.Action).HasMaxLength(30).IsRequired();
         builder.Property(a => a.IpAddress).HasColumnType("inet");
-        builder.Property(a => a.DeviceOs).HasMaxLength(20);
-        builder.Property(a => a.OsVersion).HasMaxLength(20);
-        builder.Property(a => a.AppVersion).HasMaxLength(30);
+        builder.Property(a => a.DeviceOs).HasMaxLength(30);
+        builder.Property(a => a.OsVersion).HasMaxLength(100);
+        builder.Property(a => a.AppVersion).HasMaxLength(50);
         builder.Property(a => a.Data).HasColumnType("jsonb");
         builder.Property(a => a.StatusCode).IsRequired();
         builder.Property(a => a.ErrorCode).HasMaxLength(50);

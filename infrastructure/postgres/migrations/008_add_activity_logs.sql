@@ -15,9 +15,9 @@ CREATE TABLE activity_logs (
 
     -- Cihaz bilgisi
     ip_address      INET,
-    device_os       VARCHAR(20),
-    os_version      VARCHAR(20),
-    app_version     VARCHAR(30),
+    device_os       VARCHAR(30),
+    os_version      VARCHAR(100),
+    app_version     VARCHAR(50),
 
     -- İşlem verisi (türe göre değişen)
     data            JSONB,
