@@ -364,15 +364,15 @@ Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` d
 
 | Kapsam | Konum |
 |--------|-------|
-| Servis mimarisi (katmanlar, sınırlar, resilience, cache, DB erişim) | `src/Saydin.Services/docs/architecture.md` |
-| .NET geliştirme iş akışı (komutlar, Docker, migration, test, sorun giderme) | `src/Saydin.Services/docs/development-guide.md` |
+| Servis mimarisi (katmanlar, sınırlar, resilience, cache, DB erişim) | `docs/architecture.md` |
+| .NET geliştirme iş akışı (komutlar, Docker, migration, test, sorun giderme) | `docs/development-guide.md` |
 | Proje geneli mimari (istemci + servisler arası ilişki, API sözleşmesi, DB şeması) | Kök `docs/` dizini |
 | Mimari kararlar (ADR) | Kök `docs/decisions/` dizini |
 
 ### Kurallar
 
 - **Diyagram ve akış şemaları Mermaid ile çizilir** — ASCII art YASAK. Markdown dosyalarında ` ```mermaid ` blokları kullan.
-- **Backend'e özgü** her doküman `src/Saydin.Services/docs/` içine gider — kök `docs/` içine konmaz.
+- **Backend'e özgü** her doküman `docs/` içine gider — Saydın meta repo'sundaki kök `docs/` içine konmaz.
 - Kök `docs/`'a yalnızca birden fazla bileşeni (istemci + servisler) kapsayan belgeler eklenir.
 - Yeni endpoint, adapter veya servis eklendiğinde ilgili `docs/` dosyaları güncellenir.
 - Yeni API endpoint eklendiğinde kök `docs/architecture/api-contract.md` de güncellenir.

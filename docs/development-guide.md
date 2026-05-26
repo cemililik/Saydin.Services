@@ -87,7 +87,7 @@ dotnet ef migrations list \
 cd src/Saydin.Services
 docker build -f src/Saydin.Api/Dockerfile -t saydin-api .
 docker run -p 5080:8080 \
-  -e ConnectionStrings__Postgres="Host=host.docker.internal;Database=saydin;Username=saydin;Password=saydin_pass" \
+  -e ConnectionStrings__Postgres="Host=host.docker.internal;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   -e ConnectionStrings__Redis="host.docker.internal:6379" \
   -e Otlp__Endpoint="http://host.docker.internal:4317" \
   saydin-api
@@ -101,7 +101,7 @@ cd src/Saydin.Services
 # User secrets kurulumu (ilk seferinde)
 dotnet user-secrets init --project src/Saydin.Api
 dotnet user-secrets set "ConnectionStrings:Postgres" \
-  "Host=localhost;Database=saydin;Username=saydin;Password=saydin_pass" \
+  "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   --project src/Saydin.Api
 dotnet user-secrets set "ConnectionStrings:Redis" "localhost:6379" \
   --project src/Saydin.Api
@@ -117,7 +117,7 @@ dotnet run --project src/Saydin.Api
 # .NET ile
 dotnet user-secrets init --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ConnectionStrings:Postgres" \
-  "Host=localhost;Database=saydin;Username=saydin;Password=saydin_pass" \
+  "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ExternalApis:CoinGecko:ApiKey" "<your-key>" \
   --project src/Saydin.PriceIngestion
