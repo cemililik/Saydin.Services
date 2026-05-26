@@ -178,22 +178,26 @@ public class TcmbMapperTests
         result.Open.Should().Be(5.9416m);
     }
 
-    [Fact]
-    public void Map_ZeroOrNegativeUnit_FallsBackToOne()
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("-100")]
+    public void Map_ZeroOrNegativeUnit_FallsBackToOne(string unitValue)
     {
-        const string xmlWithZeroUnit = """
+        var xml = $"""
             <?xml version="1.0" encoding="UTF-8"?>
             <Tarih_Date>
               <Currency CurrencyCode="USD">
-                <Unit>0</Unit>
+                <Unit>{unitValue}</Unit>
                 <ForexSelling>5.9518</ForexSelling>
               </Currency>
             </Tarih_Date>
             """;
 
-        var result = TcmbMapper.Map(xmlWithZeroUnit, AssetId, "USD", SampleDate);
+        var result = TcmbMapper.Map(xml, AssetId, "USD", SampleDate);
 
         result.Should().NotBeNull();
+        // Unit fallback 1m → değer normalize edilmeden saklanır
         result!.Close.Should().Be(5.9518m);
     }
 }

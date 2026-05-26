@@ -135,7 +135,7 @@ try
     // builder.Services.AddSingleton<GoldApiAdapter>();  // Pasif
     builder.Services.AddSingleton<OpenExchangeRatesAdapter>();
     builder.Services.AddSingleton<TwelveDataAdapter>();
-    builder.Services.AddSingleton<EvdsInflationAdapter>();
+    builder.Services.AddSingleton<IInflationAdapter, EvdsInflationAdapter>();
 
     // ─── Workers ─────────────────────────────────────────────────────────────
     builder.Services.AddSingleton<TcmbWorker>();

@@ -49,23 +49,13 @@ public static class AssetsEndpoints
         IOptions<PlanOptions> plans,
         CancellationToken ct)
     {
-        var deviceId = GetDeviceId(httpContext);
-
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>())
-            .WithAction("assets_list");
-
-        // Asset endpoint'leri tier-bağımsız ortak limit kullanır (anonim DoS koruması).
-        // user=null geçilince guard deviceId üzerinden sayaç tutar ve premium muafiyeti uygulamaz.
-        var assetLimit = plans.Value.Free.DailyAssetQueryLimit;
-        await limitGuard.CheckAsync(null, deviceId, AssetUsageKeyPrefix, assetLimit, ct);
+        var quota = await AcquireAssetQuotaAsync(httpContext, limitGuard, plans, ct);
+        var log = NewLog(httpContext, "assets_list");
 
         var assets = await assetService.GetAllAssetInfoAsync(ct);
+        await quota.IncrementAsync(limitGuard, ct);
 
-        await limitGuard.IncrementAsync(null, deviceId, AssetUsageKeyPrefix, assetLimit, ct);
-
-        log.WithData(new { assetCount = assets.Count })
-           .Send(activityLogger);
-
+        log.WithData(new { assetCount = assets.Count }).Send(activityLogger);
         return Results.Ok(new { assets });
     }
 
@@ -79,24 +69,17 @@ public static class AssetsEndpoints
         IOptions<PlanOptions> plans,
         CancellationToken ct)
     {
-        var deviceId = GetDeviceId(httpContext);
-
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>())
-            .WithAction("asset_price");
-
-        var assetLimit = plans.Value.Free.DailyAssetQueryLimit;
-        await limitGuard.CheckAsync(null, deviceId, AssetUsageKeyPrefix, assetLimit, ct);
+        var quota = await AcquireAssetQuotaAsync(httpContext, limitGuard, plans, ct);
+        var log = NewLog(httpContext, "asset_price");
 
         var price = await assetService.GetPriceAsync(symbol, date, ct);
-
-        await limitGuard.IncrementAsync(null, deviceId, AssetUsageKeyPrefix, assetLimit, ct);
+        await quota.IncrementAsync(limitGuard, ct);
 
         log.WithData(new
         {
             assetSymbol = symbol,
             date = date.ToString("yyyy-MM-dd")
         }).Send(activityLogger);
-
         return Results.Ok(price);
     }
 
@@ -113,8 +96,6 @@ public static class AssetsEndpoints
         CancellationToken ct,
         string interval = "daily")
     {
-        var deviceId = GetDeviceId(httpContext);
-
         // Tarih aralığı sınırı: keyfi geniş aralıkla DB/Redis cache'i şişirme riskini önler.
         if (from > to)
         {
@@ -132,15 +113,11 @@ public static class AssetsEndpoints
                 type: "https://saydin.app/errors/price-range-too-wide");
         }
 
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>())
-            .WithAction("asset_price_range");
-
-        var assetLimit = plans.Value.Free.DailyAssetQueryLimit;
-        await limitGuard.CheckAsync(null, deviceId, AssetUsageKeyPrefix, assetLimit, ct);
+        var quota = await AcquireAssetQuotaAsync(httpContext, limitGuard, plans, ct);
+        var log = NewLog(httpContext, "asset_price_range");
 
         var points = await assetService.GetPriceRangeAsync(symbol, from, to, interval, ct);
-
-        await limitGuard.IncrementAsync(null, deviceId, AssetUsageKeyPrefix, assetLimit, ct);
+        await quota.IncrementAsync(limitGuard, ct);
 
         log.WithData(new
         {
@@ -150,7 +127,6 @@ public static class AssetsEndpoints
             interval,
             pointCount = points.Count
         }).Send(activityLogger);
-
         return Results.Ok(new { symbol, interval, pricePoints = points });
     }
 
@@ -158,4 +134,36 @@ public static class AssetsEndpoints
         httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
         ?? throw new InvalidOperationException(
             "DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+
+    private static ActivityLogBuilder NewLog(HttpContext httpContext, string action) =>
+        new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>())
+            .WithAction(action);
+
+    /// <summary>
+    /// Asset endpoint kotasını al — Check yapılır, başarılıysa Increment için scope döner.
+    /// Tier-bağımsız: user=null geçildiği için premium muafiyeti devre dışıdır
+    /// (anonim DoS koruması için Free.DailyAssetQueryLimit uygulanır).
+    /// </summary>
+    private static async Task<AssetQuotaScope> AcquireAssetQuotaAsync(
+        HttpContext httpContext,
+        IDailyLimitGuard limitGuard,
+        IOptions<PlanOptions> plans,
+        CancellationToken ct)
+    {
+        var deviceId = GetDeviceId(httpContext);
+        var limit = plans.Value.Free.DailyAssetQueryLimit;
+        await limitGuard.CheckAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
+        return new AssetQuotaScope(deviceId, limit);
+    }
+
+    /// <summary>
+    /// İşlem başarıyla tamamlandığında <see cref="IncrementAsync"/> çağrılarak
+    /// günlük sayaç artırılır. Exception path'te bilinçli olarak çağrılmaz —
+    /// başarısız sorgular kotaya tabi tutulmaz.
+    /// </summary>
+    private readonly record struct AssetQuotaScope(string DeviceId, int Limit)
+    {
+        public Task IncrementAsync(IDailyLimitGuard limitGuard, CancellationToken ct) =>
+            limitGuard.IncrementAsync(null, DeviceId, AssetUsageKeyPrefix, Limit, ct);
+    }
 }

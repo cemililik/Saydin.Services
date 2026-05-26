@@ -15,7 +15,7 @@ namespace Saydin.PriceIngestion.Workers;
 /// Faz 1'de "inflation_jobs" benzeri ayrı bir tablo değerlendirilmelidir.
 /// </summary>
 public sealed class EvdsInflationWorker(
-    EvdsInflationAdapter adapter,
+    IInflationAdapter adapter,
     IInflationIngestionRepository repository,
     IConfiguration configuration,
     ILogger<EvdsInflationWorker> logger)

@@ -210,6 +210,83 @@ public class DailyLimitGuardTests
                 Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>());
     }
 
+    // ── limitOverride (asset endpoint kotası, tier-bağımsız) ──────────────
+
+    [Fact]
+    public async Task CheckAsync_LimitOverride_BypassesPremiumExemption()
+    {
+        // limitOverride verildiğinde premium muafiyeti devre dışı kalır —
+        // /v1/assets/* asset query kotası bu mekanizmaya dayanır.
+        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
+           .Returns((RedisValue)10);
+
+        await _sut.CheckAsync(PremiumUser, PremiumUser.DeviceId!, UsagePrefix,
+            limitOverride: 500);
+
+        await _db.Received(1).StringGetAsync(
+            Arg.Any<RedisKey>(), Arg.Any<CommandFlags>());
+    }
+
+    [Fact]
+    public async Task CheckAsync_LimitOverride_OverridesTierLimit_NotThrownBelowOverride()
+    {
+        // FreeUser tier limit=20 olmasına rağmen, override=500 ile 30'dan throw olmamalı.
+        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
+           .Returns((RedisValue)30);
+
+        var act = () => _sut.CheckAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix,
+            limitOverride: 500);
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task CheckAsync_LimitOverride_AtOverrideLimit_Throws()
+    {
+        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
+           .Returns((RedisValue)500);
+
+        var act = () => _sut.CheckAsync(null, DeviceId, UsagePrefix,
+            limitOverride: 500);
+
+        await act.Should().ThrowAsync<DailyLimitExceededException>()
+                 .Where(ex => ex.Limit == 500);
+    }
+
+    [Fact]
+    public async Task IncrementAsync_LimitOverride_PassesOverrideToLuaScript()
+    {
+        _db.ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+                Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
+           .Returns(RedisResult.Create((RedisValue)1));
+
+        await _sut.IncrementAsync(null, DeviceId, UsagePrefix, limitOverride: 500);
+
+        // Lua script'in ARGV[1]=ttlMs, ARGV[2]=limit. Override 500 olarak geçirilmiş olmalı.
+        await _db.Received(1).ScriptEvaluateAsync(
+            Arg.Any<string>(),
+            Arg.Any<RedisKey[]?>(),
+            Arg.Is<RedisValue[]?>(v => v != null && (long)v[1] == 500L),
+            Arg.Any<CommandFlags>());
+    }
+
+    [Fact]
+    public async Task IncrementAsync_LimitOverride_BypassesPremiumExemption()
+    {
+        _db.ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+                Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
+           .Returns(RedisResult.Create((RedisValue)1));
+
+        await _sut.IncrementAsync(PremiumUser, PremiumUser.DeviceId!, UsagePrefix,
+            limitOverride: 500);
+
+        await _db.Received(1).ScriptEvaluateAsync(
+            Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+            Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>());
+    }
+
     // ── BuildUsageKey ─────────────────────────────────────────────────────
 
     [Fact]

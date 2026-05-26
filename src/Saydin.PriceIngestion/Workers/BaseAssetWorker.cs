@@ -119,27 +119,18 @@ public abstract class BaseAssetWorker(
     private async Task FetchAndUpsertAsync(
         Asset asset, DateOnly from, DateOnly to, string jobType, CancellationToken ct)
     {
-        // job kaydını aç — ingestion sırasında uygulama crash olursa "running" durumda kalır;
-        // bu da operasyon ekibine "yarım kalmış işlem" sinyali verir.
-        var job = await jobs.StartAsync(asset.Id, jobType, from, to, ct);
-
+        // ingestion_jobs.StartAsync DB hatası fırlatırsa caller (RunAsync) içinde
+        // OperationCanceledException dışındaki exception'ları yakalamadığı için
+        // tüm worker düşerdi. Bu yüzden StartAsync de try kapsamında; başarısız olursa
+        // log + skip ile asset döngüsü devam eder.
+        IngestionJob? job = null;
         try
         {
-            var points = await adapter.FetchRangeAsync(
-                asset.Id, asset.Symbol, asset.SourceId ?? string.Empty, from, to, ct);
+            job = await TryStartJobAsync(asset, jobType, from, to, ct);
+            if (job is null) return;
 
-            if (points.Count == 0)
-            {
-                logger.LogInformation("{Symbol}: {From}–{To} arasında alınacak veri yok", asset.Symbol, from, to);
-                await jobs.MarkSuccessAsync(job.Id, recordsUpserted: 0, ct);
-                return;
-            }
-
-            await repository.UpsertPricePointsAsync(points, ct);
-            await jobs.MarkSuccessAsync(job.Id, points.Count, ct);
-
-            logger.LogInformation("{Symbol}: {Count} fiyat noktası kaydedildi ({From}–{To})",
-                asset.Symbol, points.Count, from, to);
+            var points = await FetchPointsAsync(asset, from, to, ct);
+            await CompleteJobAsync(asset, job.Id, points, from, to, ct);
         }
         catch (OperationCanceledException)
         {
@@ -150,16 +141,66 @@ public abstract class BaseAssetWorker(
         catch (Exception ex)
         {
             logger.LogError(ex, "{Symbol} veri çekimi başarısız ({From}–{To})", asset.Symbol, from, to);
-            // job tamamlama best-effort — DB de erişilemez ise ek noise yok
-            try
-            {
-                await jobs.MarkFailedAsync(job.Id, ex.Message, ct);
-            }
-            catch (Exception jobEx)
-            {
-                logger.LogError(jobEx, "{Symbol} job failed-status yazılamadı (jobId={JobId})",
-                    asset.Symbol, job.Id);
-            }
+            if (job is not null)
+                await MarkFailedSafelyAsync(asset, job.Id, ex, ct);
+        }
+    }
+
+    private async Task<IngestionJob?> TryStartJobAsync(
+        Asset asset, string jobType, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        // job kaydı açılamazsa (DB flap, network) ingestion'ı atla — bir sonraki
+        // cycle'da tekrar denenir. Loglanır, ama worker'ın tamamen düşmesini engeller.
+        try
+        {
+            return await jobs.StartAsync(asset.Id, jobType, from, to, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "{Symbol} ingestion_jobs.StartAsync başarısız ({From}–{To}) — ingestion atlandı",
+                asset.Symbol, from, to);
+            return null;
+        }
+    }
+
+    private async Task<IReadOnlyList<PricePoint>> FetchPointsAsync(
+        Asset asset, DateOnly from, DateOnly to, CancellationToken ct) =>
+        await adapter.FetchRangeAsync(
+            asset.Id, asset.Symbol, asset.SourceId ?? string.Empty, from, to, ct);
+
+    private async Task CompleteJobAsync(
+        Asset asset, Guid jobId, IReadOnlyList<PricePoint> points, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        if (points.Count == 0)
+        {
+            logger.LogInformation("{Symbol}: {From}–{To} arasında alınacak veri yok", asset.Symbol, from, to);
+            await jobs.MarkSuccessAsync(jobId, recordsUpserted: 0, ct);
+            return;
+        }
+
+        await repository.UpsertPricePointsAsync(points, ct);
+        await jobs.MarkSuccessAsync(jobId, points.Count, ct);
+
+        logger.LogInformation("{Symbol}: {Count} fiyat noktası kaydedildi ({From}–{To})",
+            asset.Symbol, points.Count, from, to);
+    }
+
+    private async Task MarkFailedSafelyAsync(Asset asset, Guid jobId, Exception cause, CancellationToken ct)
+    {
+        // job tamamlama best-effort — DB de erişilemez ise ek noise yok
+        try
+        {
+            await jobs.MarkFailedAsync(jobId, cause.Message, ct);
+        }
+        catch (Exception jobEx)
+        {
+            logger.LogError(jobEx, "{Symbol} job failed-status yazılamadı (jobId={JobId})",
+                asset.Symbol, jobId);
         }
     }
 
