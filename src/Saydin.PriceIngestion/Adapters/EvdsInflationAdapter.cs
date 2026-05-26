@@ -14,9 +14,11 @@ namespace Saydin.PriceIngestion.Adapters;
 public sealed class EvdsInflationAdapter(
     IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
-    ILogger<EvdsInflationAdapter> logger)
+    ILogger<EvdsInflationAdapter> logger) : IInflationAdapter
 {
     private const string SeriesCode = "TP.FG.J0";
+
+    public string Source => "evds";
 
     public async Task<IReadOnlyList<InflationRate>> FetchRangeAsync(
         DateOnly from,

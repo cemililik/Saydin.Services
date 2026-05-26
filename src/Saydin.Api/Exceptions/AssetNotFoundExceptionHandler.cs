@@ -29,7 +29,7 @@ public sealed class AssetNotFoundExceptionHandler(
             Type = "https://saydin.app/errors/asset-not-found",
             Title = localizer["AssetNotFound"],
             Status = StatusCodes.Status404NotFound,
-            Detail = ex.Message,
+            Detail = string.Format(localizer["AssetNotFoundDetail"], ex.Symbol),
             Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() }
         }, ct);
 

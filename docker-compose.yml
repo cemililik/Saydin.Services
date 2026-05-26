@@ -8,20 +8,16 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: saydin-postgres
     environment:
-      POSTGRES_DB: saydin
-      POSTGRES_USER: saydin
-      POSTGRES_PASSWORD: saydin_dev
+      POSTGRES_DB: ${POSTGRES_DB:-saydin}
+      POSTGRES_USER: ${POSTGRES_USER:-saydin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # initdb.d: yalnızca ilk başlatmada çalışır (volume boşsa)
-      - ./infrastructure/postgres/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
-      - ./infrastructure/postgres/migrations/002_add_assets.sql:/docker-entrypoint-initdb.d/002_add_assets.sql:ro
-      - ./infrastructure/postgres/migrations/003_switch_precious_metals_to_oxr.sql:/docker-entrypoint-initdb.d/003_switch_precious_metals_to_oxr.sql:ro
-      - ./infrastructure/postgres/migrations/004_add_inflation_rates.sql:/docker-entrypoint-initdb.d/004_add_inflation_rates.sql:ro
-      - ./infrastructure/postgres/migrations/005_add_tcmb_currencies.sql:/docker-entrypoint-initdb.d/005_add_tcmb_currencies.sql:ro
-      - ./infrastructure/postgres/migrations/006_scenario_type.sql:/docker-entrypoint-initdb.d/006_scenario_type.sql:ro
+      # initdb.d: yalnızca ilk başlatmada (volume boşken) klasör tamamı alfabetik
+      # sırayla yürütülür. Yeni migration eklendiğinde ek mount gerekmez.
+      - ./infrastructure/postgres/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U saydin -d saydin"]
       interval: 10s
@@ -33,8 +29,8 @@ services:
     image: dpage/pgadmin4:latest
     container_name: saydin-pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@saydin.dev
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@saydin.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
     ports:
@@ -123,7 +119,7 @@ services:
     container_name: saydin-api
     environment:
       ASPNETCORE_ENVIRONMENT: Development
-      ConnectionStrings__Postgres: "Host=postgres;Database=saydin;Username=saydin;Password=saydin_dev"
+      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:-changeme}"
       ConnectionStrings__Redis: "redis:6379"
       Otlp__Endpoint: "http://aspire-dashboard:18889"
       GeoIp__DatabasePath: "/app/geoip/GeoLite2-City.mmdb"
@@ -144,7 +140,7 @@ services:
       dockerfile: src/Saydin.PriceIngestion/Dockerfile
     container_name: saydin-price-ingestion
     environment:
-      ConnectionStrings__Postgres: "Host=postgres;Database=saydin;Username=saydin;Password=saydin_dev"
+      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:-changeme}"
       Otlp__Endpoint: "http://aspire-dashboard:18889"
       ExternalApis__CoinGecko__ApiKey: ${COINGECKO_API_KEY:-}
       ExternalApis__OpenExchangeRates__AppId: ${OPENEXCHANGERATES_APP_ID:-}

@@ -29,7 +29,7 @@ public sealed class ScenarioNotFoundExceptionHandler(
             Type = "https://saydin.app/errors/scenario-not-found",
             Title = localizer["ScenarioNotFound"],
             Status = StatusCodes.Status404NotFound,
-            Detail = ex.Message,
+            Detail = string.Format(localizer["ScenarioNotFoundDetail"], ex.ScenarioId),
             Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() }
         }, ct);
 

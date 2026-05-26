@@ -41,11 +41,11 @@ public sealed class DcaCalculator(
         if (request.IncludeInflation && !features.InflationAdjustment)
             throw new InvalidOperationException(localizer["FeatureDisabled"]);
 
-        await dailyLimitGuard.CheckAsync(user, deviceId, DcaUsageKeyPrefix);
+        await dailyLimitGuard.CheckAsync(user, deviceId, DcaUsageKeyPrefix, ct: ct);
 
         var response = await CalculateCoreAsync(request, ct);
 
-        await dailyLimitGuard.IncrementAsync(user, deviceId, DcaUsageKeyPrefix);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, DcaUsageKeyPrefix, ct: ct);
         return response;
     }
 

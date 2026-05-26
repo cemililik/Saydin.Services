@@ -14,12 +14,15 @@ public sealed class DailyLimitGuard(
     private const string PremiumTier = "premium";
 
     private (bool HasLimit, int Limit, string Key) GetLimitAndKey(
-        User? user, string deviceId, string usageKeyPrefix)
+        User? user, string deviceId, string usageKeyPrefix, int? limitOverride)
     {
-        if (user?.Tier == PremiumTier)
+        // Premium kullanıcı override almıyorsa (yani caller bilinçli limit dayatmadıysa) sınırsız
+        if (user?.Tier == PremiumTier && limitOverride is null)
             return (false, 0, string.Empty);
 
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
+        var limit = limitOverride
+            ?? options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
+
         if (limit <= 0)
             return (false, 0, string.Empty);
 
@@ -27,13 +30,19 @@ public sealed class DailyLimitGuard(
         return (true, limit, key);
     }
 
-    public async Task CheckAsync(User? user, string deviceId, string usageKeyPrefix)
+    public async Task CheckAsync(
+        User? user,
+        string deviceId,
+        string usageKeyPrefix,
+        int? limitOverride = null,
+        CancellationToken ct = default)
     {
-        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix);
+        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride);
         if (!hasLimit) return;
 
         try
         {
+            ct.ThrowIfCancellationRequested();
             var db    = redis.GetDatabase();
             var value = await db.StringGetAsync(key);
             var count = value.HasValue ? (long)value : 0;
@@ -41,20 +50,31 @@ public sealed class DailyLimitGuard(
             if (count >= limit)
                 throw new DailyLimitExceededException(limit);
         }
+        catch (OperationCanceledException)
+        {
+            // HTTP cancel — caller'a iletilir, fail-open uygulanmaz
+            throw;
+        }
         catch (Exception ex) when (ex is not DailyLimitExceededException)
         {
             logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
         }
     }
 
-    public async Task IncrementAsync(User? user, string deviceId, string usageKeyPrefix)
+    public async Task IncrementAsync(
+        User? user,
+        string deviceId,
+        string usageKeyPrefix,
+        int? limitOverride = null,
+        CancellationToken ct = default)
     {
-        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix);
+        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride);
         if (!hasLimit) return;
 
         var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
         try
         {
+            ct.ThrowIfCancellationRequested();
             const string script = """
                 local count = redis.call('INCR', KEYS[1])
                 if count == 1 then
@@ -71,6 +91,10 @@ public sealed class DailyLimitGuard(
 
             if (result == -1)
                 throw new DailyLimitExceededException(limit);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex) when (ex is not DailyLimitExceededException)
         {

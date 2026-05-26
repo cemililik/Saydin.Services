@@ -1,7 +1,11 @@
 namespace Saydin.Shared.Exceptions;
 
+/// <summary>
+/// Günlük hesaplama limitine ulaşıldığında fırlatılır.
+/// `Message` teknik kullanım içindir (log/stack trace).
+/// </summary>
 public sealed class DailyLimitExceededException(int limit)
-    : Exception($"Günlük {limit} hesaplama limitine ulaştınız. Yarın tekrar deneyin.")
+    : Exception($"Daily limit reached: {limit} calculations per day.")
 {
     public int Limit { get; } = limit;
 }

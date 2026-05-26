@@ -26,18 +26,23 @@ public sealed class PriceIngestionRepository(IDbContextFactory<SaydinDbContext> 
 
         await using var context = await contextFactory.CreateDbContextAsync(ct);
 
-        // ON CONFLICT ile idempotent UPSERT — EF Core raw SQL (parameterized, injection-safe)
+        // ON CONFLICT ile idempotent UPSERT — EF Core raw SQL (parameterized, injection-safe).
+        // Mevcut kayıt varsa tüm OHLCV alanları + ingested_at NOW() ile tazelenir.
+        // ingested_at = "verinin DB'ye yazıldığı son zaman"; replay/backfill durumunda
+        // refresh izlenebilir. Batch UNNEST optimizasyonu Faz 1 kapsamında planlandı.
         foreach (var point in pricePoints)
         {
             await context.Database.ExecuteSqlInterpolatedAsync(
                 $"""
-                INSERT INTO price_points (asset_id, price_date, close, open, high, low, volume)
-                VALUES ({point.AssetId}, {point.PriceDate}, {point.Close}, {point.Open}, {point.High}, {point.Low}, {point.Volume})
+                INSERT INTO price_points (asset_id, price_date, close, open, high, low, volume, ingested_at)
+                VALUES ({point.AssetId}, {point.PriceDate}, {point.Close}, {point.Open}, {point.High}, {point.Low}, {point.Volume}, NOW())
                 ON CONFLICT (asset_id, price_date) DO UPDATE
-                    SET close = EXCLUDED.close,
-                        open  = EXCLUDED.open,
-                        high  = EXCLUDED.high,
-                        low   = EXCLUDED.low
+                    SET close       = EXCLUDED.close,
+                        open        = EXCLUDED.open,
+                        high        = EXCLUDED.high,
+                        low         = EXCLUDED.low,
+                        volume      = EXCLUDED.volume,
+                        ingested_at = EXCLUDED.ingested_at
                 """,
                 ct);
         }

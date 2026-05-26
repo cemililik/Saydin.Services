@@ -40,11 +40,11 @@ public sealed class WhatIfCalculator(
         if (request.IncludeInflation && !features.InflationAdjustment)
             throw new InvalidOperationException(localizer["FeatureDisabled"]);
 
-        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix);
+        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
 
         var response = await CalculateCoreAsync(request, ct);
 
-        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
         return response;
     }
 
@@ -66,7 +66,7 @@ public sealed class WhatIfCalculator(
         if (symbols.Count is < 2 or > 5)
             throw new ArgumentException(localizer["CompareSymbolCount"]);
 
-        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix);
+        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
 
         var resultList = new List<WhatIfResponse>(symbols.Count);
         foreach (var symbol in symbols)
@@ -89,7 +89,7 @@ public sealed class WhatIfCalculator(
             .Select((r, i) => new CompareResultItem(Rank: i + 1, Calculation: r))
             .ToList();
 
-        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
 
         logger.LogInformation(
             "Karşılaştırma hesaplandı: {Symbols} {BuyDate}→{SellDate}",
@@ -109,11 +109,11 @@ public sealed class WhatIfCalculator(
         if (request.IncludeInflation && !features.InflationAdjustment)
             throw new InvalidOperationException(localizer["FeatureDisabled"]);
 
-        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix);
+        await dailyLimitGuard.CheckAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
 
         var response = await CalculateReverseCoreAsync(request, ct);
 
-        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix);
+        await dailyLimitGuard.IncrementAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
         return response;
     }
 

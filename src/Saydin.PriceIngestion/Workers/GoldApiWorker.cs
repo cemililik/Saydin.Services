@@ -7,9 +7,10 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class GoldApiWorker(
     GoldApiAdapter adapter,
     IPriceIngestionRepository repository,
+    IIngestionJobRepository jobs,
     IConfiguration configuration,
     ILogger<GoldApiWorker> logger)
-    : BaseAssetWorker(adapter, repository, configuration, logger)
+    : BaseAssetWorker(adapter, repository, jobs, configuration, logger)
 {
     // Free plan: 100 istek/ay, 2018+ tarihi veri. Son 1 yıl backfill yeterli.
     // Her gün 2 istek (XAU + XAG) → ayda ~60 istek, limit altında.

@@ -31,7 +31,7 @@ public sealed class DailyLimitExceededExceptionHandler(
             Type    = "https://saydin.app/errors/daily-limit-exceeded",
             Title   = localizer["DailyLimitExceeded"],
             Status  = StatusCodes.Status429TooManyRequests,
-            Detail  = ex.Message,
+            Detail  = string.Format(localizer["DailyLimitExceededDetail"], ex.Limit),
             Extensions =
             {
                 ["traceId"] = Activity.Current?.TraceId.ToString(),

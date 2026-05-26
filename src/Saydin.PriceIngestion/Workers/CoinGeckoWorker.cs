@@ -7,9 +7,10 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class CoinGeckoWorker(
     CoinGeckoAdapter adapter,
     IPriceIngestionRepository repository,
+    IIngestionJobRepository jobs,
     IConfiguration configuration,
     ILogger<CoinGeckoWorker> logger)
-    : BaseAssetWorker(adapter, repository, configuration, logger)
+    : BaseAssetWorker(adapter, repository, jobs, configuration, logger)
 {
     // MVP: son 2 yıl. Demo key yalnızca ~365 güne erişim sağlıyor.
     protected override DateOnly BackfillStartDate =>

@@ -126,4 +126,74 @@ public class TcmbMapperTests
         result!.AssetId.Should().Be(customId);
         result.PriceDate.Should().Be(customDate);
     }
+
+    // ── Unit normalizasyonu ─────────────────────────────────────────────────
+    // TCMB JPY/KRW/IDR gibi düşük-değerli para birimlerini 100 birim üzerinden
+    // kote eder; mapper bunu Unit'e bölerek "1 birim X kaç TL" formatına çevirmeli.
+
+    private const string XmlWithJpyUnit100 = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Tarih_Date Tarih="01.01.2020" Date="01/01/2020">
+          <Currency CrossOrder="5" Kod="JPY" CurrencyCode="JPY">
+            <Unit>100</Unit>
+            <Isim>JAPON YENİ</Isim>
+            <CurrencyName>JAPENESE YEN</CurrencyName>
+            <ForexBuying>5.4730</ForexBuying>
+            <ForexSelling>5.5121</ForexSelling>
+            <BanknoteBuying>5.4368</BanknoteBuying>
+            <BanknoteSelling>5.5524</BanknoteSelling>
+          </Currency>
+        </Tarih_Date>
+        """;
+
+    [Fact]
+    public void Map_JpyWithUnit100_NormalizesPricePerUnit()
+    {
+        var result = TcmbMapper.Map(XmlWithJpyUnit100, AssetId, "JPY", SampleDate);
+
+        result.Should().NotBeNull();
+        // ForexSelling 5.5121 / 100 = 0.055121 (1 JPY ≈ 0.055 TL)
+        result!.Close.Should().Be(0.055121m);
+        // ForexBuying  5.4730 / 100 = 0.054730
+        result.Open.Should().Be(0.054730m);
+    }
+
+    [Fact]
+    public void Map_MissingUnit_DefaultsToOne()
+    {
+        const string xmlWithoutUnit = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Tarih_Date>
+              <Currency CurrencyCode="USD">
+                <ForexBuying>5.9416</ForexBuying>
+                <ForexSelling>5.9518</ForexSelling>
+              </Currency>
+            </Tarih_Date>
+            """;
+
+        var result = TcmbMapper.Map(xmlWithoutUnit, AssetId, "USD", SampleDate);
+
+        result.Should().NotBeNull();
+        result!.Close.Should().Be(5.9518m);
+        result.Open.Should().Be(5.9416m);
+    }
+
+    [Fact]
+    public void Map_ZeroOrNegativeUnit_FallsBackToOne()
+    {
+        const string xmlWithZeroUnit = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Tarih_Date>
+              <Currency CurrencyCode="USD">
+                <Unit>0</Unit>
+                <ForexSelling>5.9518</ForexSelling>
+              </Currency>
+            </Tarih_Date>
+            """;
+
+        var result = TcmbMapper.Map(xmlWithZeroUnit, AssetId, "USD", SampleDate);
+
+        result.Should().NotBeNull();
+        result!.Close.Should().Be(5.9518m);
+    }
 }

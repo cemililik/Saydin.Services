@@ -1,7 +1,11 @@
 namespace Saydin.Shared.Exceptions;
 
+/// <summary>
+/// Senaryo bulunamadığında veya geçerli olmadığında fırlatılır.
+/// `Message` teknik kullanım içindir (log/stack trace).
+/// </summary>
 public sealed class ScenarioNotFoundException(Guid scenarioId)
-    : Exception($"'{scenarioId}' id'li senaryo bulunamadı veya bu kullanıcıya ait değil.")
+    : Exception($"Scenario '{scenarioId}' not found or does not belong to this user.")
 {
     public Guid ScenarioId { get; } = scenarioId;
 }

@@ -129,6 +129,7 @@ try
     // ─── Adapters & Repositories ──────────────────────────────────────────────
     builder.Services.AddSingleton<IPriceIngestionRepository, PriceIngestionRepository>();
     builder.Services.AddSingleton<IInflationIngestionRepository, InflationIngestionRepository>();
+    builder.Services.AddSingleton<IIngestionJobRepository, IngestionJobRepository>();
     builder.Services.AddSingleton<TcmbAdapter>();
     builder.Services.AddSingleton<CoinGeckoAdapter>();
     // builder.Services.AddSingleton<GoldApiAdapter>();  // Pasif

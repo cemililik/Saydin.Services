@@ -11,6 +11,7 @@ public sealed class SaydinDbContext(DbContextOptions<SaydinDbContext> options) :
     public DbSet<SavedScenario> SavedScenarios => Set<SavedScenario>();
     public DbSet<InflationRate> InflationRates => Set<InflationRate>();
     public DbSet<ActivityLog> ActivityLogs => Set<ActivityLog>();
+    public DbSet<IngestionJob> IngestionJobs => Set<IngestionJob>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

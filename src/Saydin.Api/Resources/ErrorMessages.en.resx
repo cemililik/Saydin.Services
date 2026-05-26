@@ -19,10 +19,15 @@
   <data name="ServerError"><value>Server error</value></data>
   <data name="UnexpectedError"><value>An unexpected error occurred. Please try again.</value></data>
   <data name="PriceNotFound"><value>Price not found</value></data>
+  <data name="PriceNotFoundDetail"><value>No price available for {1} on {0}.</value></data>
   <data name="AssetNotFound"><value>Asset not found</value></data>
+  <data name="AssetNotFoundDetail"><value>No active asset found with symbol '{0}'.</value></data>
   <data name="ScenarioNotFound"><value>Scenario not found</value></data>
+  <data name="ScenarioNotFoundDetail"><value>Scenario '{0}' not found or does not belong to this user.</value></data>
   <data name="ScenarioLimitExceeded"><value>Scenario limit exceeded</value></data>
+  <data name="ScenarioLimitExceededDetail"><value>Free users can save at most {0} scenarios.</value></data>
   <data name="DailyLimitExceeded"><value>Daily calculation limit reached</value></data>
+  <data name="DailyLimitExceededDetail"><value>You have reached the daily limit of {0} calculations. Please try again tomorrow.</value></data>
   <data name="DeviceIdRequired"><value>X-Device-ID required</value></data>
   <data name="DeviceIdRequiredDetail"><value>X-Device-ID header must be sent with a single, non-empty value to access this endpoint.</value></data>
   <data name="DeviceIdInvalid"><value>X-Device-ID invalid</value></data>
@@ -34,6 +39,8 @@
   <data name="InvalidDcaAmountType"><value>Invalid amountType: '{0}'. DCA calculation only supports 'try'.</value></data>
   <data name="InvalidScenarioType"><value>Invalid scenario type: '{0}'. Allowed values: {1}</value></data>
   <data name="FeatureDisabled"><value>This feature is not available on your current plan.</value></data>
+  <data name="PriceRangeTooWide"><value>Price range too wide</value></data>
+  <data name="PriceRangeTooWideDetail"><value>At most {0} days of price history can be queried in a single request.</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dollar/TRY</value></data>
   <data name="Asset_EURTRY"><value>Euro/TRY</value></data>
