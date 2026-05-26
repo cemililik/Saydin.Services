@@ -25,8 +25,34 @@ jobs:
       - name: Build
         run: dotnet build --no-restore --configuration Release
 
-      - name: Testleri çalıştır
-        run: dotnet test --no-build --configuration Release --verbosity normal
+      - name: Testleri çalıştır (coverage ile)
+        run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Coverage özeti
+        if: always()
+        run: |
+          # Cobertura XML dosyasını bul
+          COV_FILE=$(find . -name "coverage.cobertura.xml" -path "*/TestResults/*" | head -1)
+          if [ -z "$COV_FILE" ]; then
+            echo "⚠️ Coverage dosyası bulunamadı" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # XML'den line-rate ve branch-rate parse et
+          LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
+          BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
+
+          LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf "%.1f")
+          BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf "%.1f")
+
+          echo "## 🧪 Saydin.Services — Test Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Coverage |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Line   | ${LINE_PCT}% |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${BRANCH_PCT}% |" >> $GITHUB_STEP_SUMMARY
+
+          echo "✅ Line: ${LINE_PCT}% | Branch: ${BRANCH_PCT}%"
 
   docker-build:
     runs-on: ubuntu-latest

@@ -258,6 +258,57 @@ public class AssetServiceTests
         result.Should().Contain(a => a.Symbol == "USDTRY");
     }
 
+    // ── GetLatestPriceDateAsync ───────────────────────────────────────────
+
+    [Fact]
+    public async Task GetLatestPriceDateAsync_ReturnsDate()
+    {
+        var expected = new DateOnly(2024, 12, 31);
+        _repository.GetLatestPriceDateAsync("USDTRY", Arg.Any<CancellationToken>())
+                   .Returns(expected);
+
+        var result = await _sut.GetLatestPriceDateAsync("USDTRY", CancellationToken.None);
+
+        result.Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task GetLatestPriceDateAsync_NullFromRepository_ThrowsPriceNotFoundException()
+    {
+        _repository.GetLatestPriceDateAsync("USDTRY", Arg.Any<CancellationToken>())
+                   .Returns((DateOnly?)null);
+
+        var act = () => _sut.GetLatestPriceDateAsync("USDTRY", CancellationToken.None);
+
+        await act.Should().ThrowAsync<PriceNotFoundException>();
+    }
+
+    [Fact]
+    public async Task GetLatestPriceDateAsync_SymbolNormalized_QueryUpperCase()
+    {
+        _repository.GetLatestPriceDateAsync("USDTRY", Arg.Any<CancellationToken>())
+                   .Returns(new DateOnly(2024, 12, 31));
+
+        await _sut.GetLatestPriceDateAsync("usdtry", CancellationToken.None);
+
+        await _repository.Received(1)
+            .GetLatestPriceDateAsync("USDTRY", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GetLatestPriceDateAsync_CacheHit_SkipsRepository()
+    {
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString().Contains("latest-date")),
+                Arg.Any<CommandFlags>())
+           .Returns(new RedisValue("\"2024-12-31\""));
+
+        await _sut.GetLatestPriceDateAsync("USDTRY", CancellationToken.None);
+
+        await _repository.DidNotReceive()
+            .GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
     // ── GetPriceRangeAsync ───────────────────────────────────────────────────
 
     [Fact]
@@ -280,6 +331,44 @@ public class AssetServiceTests
         result.Should().HaveCount(3);
         result[0].Close.Should().Be(5.95m);
         result[2].Close.Should().Be(6.05m);
+    }
+
+    [Fact]
+    public async Task GetPriceRangeAsync_SymbolNormalized_QueryUpperCase()
+    {
+        var from = new DateOnly(2020, 1, 1);
+        var to   = new DateOnly(2020, 1, 3);
+
+        _repository.GetPriceRangeAsync("USDTRY", from, to, Arg.Any<CancellationToken>())
+                   .Returns(new List<PricePoint>().AsReadOnly());
+
+        await _sut.GetPriceRangeAsync("usdtry", from, to, "daily", CancellationToken.None);
+
+        await _repository.Received(1)
+            .GetPriceRangeAsync("USDTRY", from, to, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GetPriceRangeAsync_CacheHit_SkipsRepository()
+    {
+        var from = new DateOnly(2020, 1, 1);
+        var to   = new DateOnly(2020, 1, 3);
+        var points = new List<PricePoint>
+        {
+            new() { AssetId = Guid.NewGuid(), PriceDate = from, Close = 5.95m }
+        };
+        var json = System.Text.Json.JsonSerializer.Serialize(points,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+
+        _db.StringGetAsync(
+                Arg.Is<RedisKey>(k => k.ToString().Contains("prices:USDTRY")),
+                Arg.Any<CommandFlags>())
+           .Returns(new RedisValue(json));
+
+        await _sut.GetPriceRangeAsync("USDTRY", from, to, "daily", CancellationToken.None);
+
+        await _repository.DidNotReceive()
+            .GetPriceRangeAsync(Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
     }
 
     // ── GetNearestPriceAsync ─────────────────────────────────────────────────

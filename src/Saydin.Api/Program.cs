@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Localization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -13,6 +15,7 @@ using Serilog;
 using Serilog.Events;
 using Serilog.Sinks.OpenTelemetry;
 using Scalar.AspNetCore;
+using Saydin.Api.BackgroundServices;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Exceptions;
 using Saydin.Api.Options;
@@ -171,15 +174,38 @@ try
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
     builder.Services.AddScoped<IInflationRepository, InflationRepository>();
+    builder.Services.AddScoped<IDailyLimitGuard, DailyLimitGuard>();
     builder.Services.AddScoped<IWhatIfCalculator, WhatIfCalculator>();
     builder.Services.AddScoped<IDcaCalculator, DcaCalculator>();
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
     builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
 
+    // ─── GeoIP (IP → ülke/şehir çözümleme) ────────────────────────────────────
+    builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();
+
+    // ─── Activity Logging (Channel pattern) ───────────────────────────────────
+    var activityChannel = Channel.CreateBounded<ActivityLog>(
+        new BoundedChannelOptions(10_000)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+        });
+
+    builder.Services.AddSingleton(activityChannel);
+    builder.Services.AddSingleton<IActivityLogger, ChannelActivityLogger>();
+    builder.Services.AddHostedService<ActivityLogWriter>();
+
+    // ─── Forwarded Headers (reverse proxy arkasında gerçek IP için) ────────────
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    });
+
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();
 
     app.UseResponseCompression();
+    app.UseForwardedHeaders();
 
     // ─── Request Localization ──────────────────────────────────────────────────
     var supportedCultures = new[] { new CultureInfo("tr"), new CultureInfo("en") };

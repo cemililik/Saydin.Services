@@ -126,8 +126,11 @@ services:
       ConnectionStrings__Postgres: "Host=postgres;Database=saydin;Username=saydin;Password=saydin_dev"
       ConnectionStrings__Redis: "redis:6379"
       Otlp__Endpoint: "http://aspire-dashboard:18889"
+      GeoIp__DatabasePath: "/app/geoip/GeoLite2-City.mmdb"
     ports:
       - "5080:8080"
+    volumes:
+      - ./infrastructure/geoip:/app/geoip:ro
     depends_on:
       postgres:
         condition: service_healthy

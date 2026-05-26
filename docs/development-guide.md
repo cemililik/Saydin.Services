@@ -196,6 +196,63 @@ curl -X POST http://localhost:5080/v1/what-if/calculate \
     "amountType": "TRY"
   }' | jq
 
+# Karşılaştırma (Compare)
+curl -X POST http://localhost:5080/v1/what-if/compare \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "assetSymbols": ["USDTRY", "BTCTRY"],
+    "buyDate": "2020-01-01",
+    "sellDate": "2024-01-01",
+    "amount": 10000,
+    "amountType": "TRY"
+  }' | jq
+
+# Ters senaryo (Reverse What-If)
+curl -X POST http://localhost:5080/v1/what-if/reverse \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "assetSymbol": "USDTRY",
+    "buyDate": "2020-01-01",
+    "sellDate": "2024-01-01",
+    "targetAmount": 50000,
+    "targetAmountType": "TRY"
+  }' | jq
+
+# DCA hesaplama
+curl -X POST http://localhost:5080/v1/what-if/dca \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "assetSymbol": "USDTRY",
+    "startDate": "2020-01-01",
+    "endDate": "2024-01-01",
+    "periodicAmount": 1000,
+    "amountType": "TRY",
+    "period": "monthly",
+    "includeInflation": false
+  }' | jq
+
+# Senaryo kaydet
+curl -X POST http://localhost:5080/v1/scenarios \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "type": "what_if",
+    "assetSymbol": "USDTRY",
+    "title": "USD Test",
+    "parameters": {"buyDate": "2020-01-01", "amount": 10000}
+  }' | jq
+
+# Senaryoları listele
+curl http://localhost:5080/v1/scenarios \
+  -H "X-Device-ID: dev-test-001" | jq
+
+# Uygulama konfigürasyonu
+curl http://localhost:5080/v1/config \
+  -H "X-Device-ID: dev-test-001" | jq
+
 # Prometheus metrikleri
 curl http://localhost:5080/metrics
 ```
