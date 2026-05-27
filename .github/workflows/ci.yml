@@ -38,28 +38,44 @@ jobs:
       - name: Coverage özeti
         if: always()
         run: |
-          # Cobertura XML dosyasını bul
-          COV_FILE=$(find . -name "coverage.cobertura.xml" -path "*/TestResults/*" | head -1)
-          if [ -z "$COV_FILE" ]; then
+          # Birden fazla test projesi var (Api.Tests, PriceIngestion.Tests).
+          # head -1 yerine tümünü dolaş; her dosya için per-project satır + bir basit aggregate.
+          mapfile -t COV_FILES < <(find . -name "coverage.cobertura.xml" -path "*/TestResults/*")
+          if [ "${#COV_FILES[@]}" -eq 0 ]; then
             echo "⚠️ Coverage dosyası bulunamadı" >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
 
-          # XML'den line-rate ve branch-rate parse et
-          LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
-          BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV_FILE" | head -1)
-
-          LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf "%.1f")
-          BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf "%.1f")
-
           echo "## 🧪 Saydin.Services — Test Coverage" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Coverage |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Line   | ${LINE_PCT}% |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${BRANCH_PCT}% |" >> $GITHUB_STEP_SUMMARY
+          echo "| Project | Line | Branch |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|------|--------|" >> $GITHUB_STEP_SUMMARY
 
-          echo "✅ Line: ${LINE_PCT}% | Branch: ${BRANCH_PCT}%"
+          LINE_SUM=0
+          BRANCH_SUM=0
+          COUNT=${#COV_FILES[@]}
+
+          for COV in "${COV_FILES[@]}"; do
+            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV" | head -1)
+            BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV" | head -1)
+
+            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf "%.1f")
+            BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf "%.1f")
+            # Path'ten proje adını çıkar: ./tests/Saydin.Api.Tests/TestResults/<guid>/coverage.cobertura.xml
+            PROJECT=$(echo "$COV" | awk -F/ '{print $3}')
+
+            echo "| $PROJECT | ${LINE_PCT}% | ${BRANCH_PCT}% |" >> $GITHUB_STEP_SUMMARY
+
+            LINE_SUM=$(echo "$LINE_SUM + $LINE_PCT" | bc -l)
+            BRANCH_SUM=$(echo "$BRANCH_SUM + $BRANCH_PCT" | bc -l)
+          done
+
+          if [ "$COUNT" -gt 0 ]; then
+            LINE_AVG=$(echo "$LINE_SUM / $COUNT" | bc -l | xargs printf "%.1f")
+            BRANCH_AVG=$(echo "$BRANCH_SUM / $COUNT" | bc -l | xargs printf "%.1f")
+            echo "| **Average** | **${LINE_AVG}%** | **${BRANCH_AVG}%** |" >> $GITHUB_STEP_SUMMARY
+            echo "✅ Line avg: ${LINE_AVG}% | Branch avg: ${BRANCH_AVG}% (across $COUNT projects)"
+          fi
 
   docker-build:
     runs-on: ubuntu-latest

@@ -61,7 +61,8 @@ try
             }))
         .WithMetrics(metrics => metrics
             // EVDS ingestion failure metric'i + future business counter'lar burada toplanır.
-            .AddMeter("Saydin.Api")
+            // Shared meter adı SaydinMetrics.MeterName'den geliyor — copy/paste hatası riski yok.
+            .AddMeter(SaydinMetrics.MeterName)
             .AddHttpClientInstrumentation()
             .AddRuntimeInstrumentation()
             .AddOtlpExporter(opts =>

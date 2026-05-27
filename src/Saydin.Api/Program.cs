@@ -89,7 +89,7 @@ try
                 opts.Protocol = OtlpExportProtocol.Grpc;
             }))
         .WithMetrics(metrics => metrics
-            .AddMeter(SaydinMetrics.WhatIfCalculations.Meter.Name)
+            .AddMeter(SaydinMetrics.MeterName)
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
             .AddRuntimeInstrumentation()

@@ -81,7 +81,10 @@ public sealed class DailyLimitGuard(
         var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride);
         if (!hasLimit) return;
 
-        var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
+        // DateTime.UtcNow tek noktadan okunur — aksi halde gece yarısı geçişinde
+        // (Date != Now arasında) TTL negatif çıkıp Redis PEXPIRE'ı bozabilir.
+        var now   = DateTime.UtcNow;
+        var ttlMs = (long)(now.Date.AddDays(1) - now).TotalMilliseconds;
         try
         {
             ct.ThrowIfCancellationRequested();

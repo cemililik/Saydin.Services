@@ -39,6 +39,12 @@ public sealed class MaxMindGeoIpResolver : IGeoIpResolver, IDisposable
         if (ip is null || _reader is null)
             return (null, null);
 
+        // IPv4-mapped IPv6 (örn. ::ffff:192.168.1.42) → IPv4'e çevir.
+        // Aksi halde IsLoopback/IsPrivate kontrolleri IPv6 dalına düşer ve private
+        // IPv4 adresleri sızıp MaxMind sorgusu gereksizce çalışır.
+        if (ip.IsIPv4MappedToIPv6)
+            ip = ip.MapToIPv4();
+
         // Loopback ve private IP'ler GeoIP'de çözümlenemez
         if (IPAddress.IsLoopback(ip) || IsPrivate(ip))
             return (null, null);
@@ -54,12 +60,13 @@ public sealed class MaxMindGeoIpResolver : IGeoIpResolver, IDisposable
         }
         catch (Exception ex)
         {
-            // Bilinen edge case (cgnat / kayıp ülke kaydı) production'da gürültü yaratmasın.
-            // Detaylı debug yalnızca Development'ta; prod'da Information seviyesi yeterli.
+            // Beklenen edge-case (cgnat / kayıp ülke kaydı) production'da gürültü
+            // yaratmasın diye Development'ta detaylı debug, prod'da warning.
+            // CLAUDE.md: "LogWarning → beklenen ama anormal durum".
             if (_environment.IsDevelopment())
                 _logger.LogDebug(ex, "GeoIP çözümlemesi başarısız: {Ip}", ip);
             else
-                _logger.LogInformation("GeoIP çözümlemesi başarısız: {Ip} ({ErrorType})",
+                _logger.LogWarning("GeoIP çözümlemesi başarısız: {Ip} ({ErrorType})",
                     ip, ex.GetType().Name);
         }
 

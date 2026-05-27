@@ -192,10 +192,13 @@ public abstract class BaseAssetWorker(
 
     private async Task MarkFailedSafelyAsync(Asset asset, Guid jobId, Exception cause, CancellationToken ct)
     {
-        // job tamamlama best-effort — DB de erişilemez ise ek noise yok
+        // job tamamlama best-effort — DB de erişilemez ise ek noise yok.
+        // GetBaseException(): AggregateException / TaskCanceledException sarmalayıcılarının
+        // altındaki gerçek nedeni alır → ingestion_jobs.error_message daha tanı koymaya
+        // elverişli olur.
         try
         {
-            await jobs.MarkFailedAsync(jobId, cause.Message, ct);
+            await jobs.MarkFailedAsync(jobId, cause.GetBaseException().Message, ct);
         }
         catch (Exception jobEx)
         {

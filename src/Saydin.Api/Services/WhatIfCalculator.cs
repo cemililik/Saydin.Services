@@ -47,7 +47,8 @@ public sealed class WhatIfCalculator(
         catch
         {
             // Hesap başarısız → kotayı iade et ("başarısız hesap kotadan düşmesin").
-            await dailyLimitGuard.ReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: CancellationToken.None);
+            // Release fırlatırsa orijinal exception'ı maskelemesin: best-effort + log.
+            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
             throw;
         }
     }
@@ -113,7 +114,7 @@ public sealed class WhatIfCalculator(
         }
         catch
         {
-            await dailyLimitGuard.ReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: CancellationToken.None);
+            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
             throw;
         }
     }
@@ -139,8 +140,21 @@ public sealed class WhatIfCalculator(
         }
         catch
         {
-            await dailyLimitGuard.ReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: CancellationToken.None);
+            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
             throw;
+        }
+    }
+
+    private async Task TryReleaseAsync(User? user, string deviceId, string usageKeyPrefix)
+    {
+        try
+        {
+            await dailyLimitGuard.ReleaseAsync(user, deviceId, usageKeyPrefix, ct: CancellationToken.None);
+        }
+        catch (Exception releaseEx)
+        {
+            // Release best-effort: orijinal exception kullanıcıya yansımalı, release hatası loglanır.
+            logger.LogWarning(releaseEx, "Daily limit release başarısız: {Prefix}", usageKeyPrefix);
         }
     }
 

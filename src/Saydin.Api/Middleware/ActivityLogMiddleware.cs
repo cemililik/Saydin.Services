@@ -14,10 +14,10 @@ namespace Saydin.Api.Middleware;
 ///   <item>Builder'ın <c>StatusCode</c> değeri response'tan alınır, endpoint
 ///         handler'ın <c>WithStatusCode</c> çağırma yükümlülüğü kalmaz.</item>
 /// </list>
-/// IMiddleware tabanlı (transient DI): IActivityLogger singleton, ama IMiddleware
-/// her request'te yeni instance — Activate.
 /// </summary>
-public sealed class ActivityLogMiddleware(IActivityLogger activityLogger) : IMiddleware
+public sealed class ActivityLogMiddleware(
+    IActivityLogger activityLogger,
+    ILogger<ActivityLogMiddleware> logger) : IMiddleware
 {
     public const string BuilderItemKey = "__saydin-activity-log";
 
@@ -29,11 +29,22 @@ public sealed class ActivityLogMiddleware(IActivityLogger activityLogger) : IMid
         }
         finally
         {
+            // Activity log Send hatasının request pipeline'ını maskelemesini engelle:
+            // builder.Build veya Send fırlatırsa orijinal exception (varsa) korunmalı.
             if (context.Items.TryGetValue(BuilderItemKey, out var raw)
                 && raw is ActivityLogBuilder builder)
             {
-                builder.WithStatusCode((short)context.Response.StatusCode);
-                builder.Send(activityLogger);
+                try
+                {
+                    builder.WithStatusCode((short)context.Response.StatusCode);
+                    builder.Send(activityLogger);
+                }
+                catch (Exception logEx)
+                {
+                    logger.LogError(logEx,
+                        "Activity log gönderimi başarısız (status={StatusCode})",
+                        context.Response.StatusCode);
+                }
             }
         }
     }

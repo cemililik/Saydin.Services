@@ -17,6 +17,22 @@ public static class AssetsEndpoints
     /// </summary>
     private const int MaxPriceRangeDays = 3650;
 
+    private static async Task TryReleaseAsync(
+        IDailyLimitGuard limitGuard, string deviceId, int limit, HttpContext httpContext)
+    {
+        try
+        {
+            await limitGuard.ReleaseAsync(null, deviceId, AssetUsageKeyPrefix, limit, CancellationToken.None);
+        }
+        catch (Exception releaseEx)
+        {
+            // Release hatası orijinal exception'ı maskelemesin (review CodeRabbit feedback).
+            var logger = httpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+                .CreateLogger(typeof(AssetsEndpoints));
+            logger.LogWarning(releaseEx, "Asset endpoint quota release başarısız: {DeviceId}", deviceId);
+        }
+    }
+
     public static IEndpointRouteBuilder MapAssetsEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/assets")
@@ -62,7 +78,9 @@ public static class AssetsEndpoints
         }
         catch
         {
-            await limitGuard.ReleaseAsync(null, deviceId, AssetUsageKeyPrefix, limit, CancellationToken.None);
+            // Release best-effort: orijinal exception (PriceNotFound, ValidationException vb.)
+            // kullanıcıya yansımalı, release hatası onu maskelemesin.
+            await TryReleaseAsync(limitGuard, deviceId, limit, httpContext);
             throw;
         }
     }
@@ -94,7 +112,9 @@ public static class AssetsEndpoints
         }
         catch
         {
-            await limitGuard.ReleaseAsync(null, deviceId, AssetUsageKeyPrefix, limit, CancellationToken.None);
+            // Release best-effort: orijinal exception (PriceNotFound, ValidationException vb.)
+            // kullanıcıya yansımalı, release hatası onu maskelemesin.
+            await TryReleaseAsync(limitGuard, deviceId, limit, httpContext);
             throw;
         }
     }
@@ -142,7 +162,9 @@ public static class AssetsEndpoints
         }
         catch
         {
-            await limitGuard.ReleaseAsync(null, deviceId, AssetUsageKeyPrefix, limit, CancellationToken.None);
+            // Release best-effort: orijinal exception (PriceNotFound, ValidationException vb.)
+            // kullanıcıya yansımalı, release hatası onu maskelemesin.
+            await TryReleaseAsync(limitGuard, deviceId, limit, httpContext);
             throw;
         }
     }

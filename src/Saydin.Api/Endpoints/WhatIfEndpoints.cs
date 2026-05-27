@@ -6,6 +6,9 @@ namespace Saydin.Api.Endpoints;
 
 public static class WhatIfEndpoints
 {
+    /// <summary>ISO-8601 tarih formatı; tüm activity log payload'larında tutarlı kullanılır.</summary>
+    private const string IsoDate = "yyyy-MM-dd";
+
     public static IEndpointRouteBuilder MapWhatIfEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/what-if")
@@ -43,8 +46,8 @@ public static class WhatIfEndpoints
         log.WithData(new
         {
             request.AssetSymbol,
-            buyDate = request.BuyDate.ToString("yyyy-MM-dd"),
-            sellDate = request.SellDate?.ToString("yyyy-MM-dd"),
+            buyDate = request.BuyDate.ToString(IsoDate),
+            sellDate = request.SellDate?.ToString(IsoDate),
             request.Amount,
             request.AmountType,
             request.IncludeInflation,
@@ -54,8 +57,8 @@ public static class WhatIfEndpoints
                 result.ProfitLossTry,
                 result.IsProfit,
                 result.RealProfitLossPercent,
-                actualBuyDate = result.ActualBuyDate?.ToString("yyyy-MM-dd"),
-                actualSellDate = result.ActualSellDate?.ToString("yyyy-MM-dd"),
+                actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
+                actualSellDate = result.ActualSellDate?.ToString(IsoDate),
             }
         });
 
@@ -76,8 +79,8 @@ public static class WhatIfEndpoints
         log.WithData(new
         {
             request.AssetSymbols,
-            buyDate = request.BuyDate.ToString("yyyy-MM-dd"),
-            sellDate = request.SellDate?.ToString("yyyy-MM-dd"),
+            buyDate = request.BuyDate.ToString(IsoDate),
+            sellDate = request.SellDate?.ToString(IsoDate),
             request.Amount,
             request.AmountType,
             request.IncludeInflation,
@@ -110,8 +113,8 @@ public static class WhatIfEndpoints
         log.WithData(new
         {
             request.AssetSymbol,
-            buyDate = request.BuyDate.ToString("yyyy-MM-dd"),
-            sellDate = request.SellDate?.ToString("yyyy-MM-dd"),
+            buyDate = request.BuyDate.ToString(IsoDate),
+            sellDate = request.SellDate?.ToString(IsoDate),
             request.TargetAmount,
             request.TargetAmountType,
             request.IncludeInflation,
@@ -121,8 +124,8 @@ public static class WhatIfEndpoints
                 result.ProfitLossPercent,
                 result.IsProfit,
                 result.RealProfitLossPercent,
-                actualBuyDate = result.ActualBuyDate?.ToString("yyyy-MM-dd"),
-                actualSellDate = result.ActualSellDate?.ToString("yyyy-MM-dd"),
+                actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
+                actualSellDate = result.ActualSellDate?.ToString(IsoDate),
             }
         });
 

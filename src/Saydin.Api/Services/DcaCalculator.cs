@@ -5,6 +5,7 @@ using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
+using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
 namespace Saydin.Api.Services;
@@ -52,8 +53,21 @@ public sealed class DcaCalculator(
         }
         catch
         {
-            await dailyLimitGuard.ReleaseAsync(user, deviceId, DcaUsageKeyPrefix, ct: CancellationToken.None);
+            await TryReleaseAsync(user, deviceId);
             throw;
+        }
+    }
+
+    private async Task TryReleaseAsync(User? user, string deviceId)
+    {
+        try
+        {
+            await dailyLimitGuard.ReleaseAsync(user, deviceId, DcaUsageKeyPrefix, ct: CancellationToken.None);
+        }
+        catch (Exception releaseEx)
+        {
+            // Release best-effort: orijinal calculator exception'ı maskelemesin.
+            logger.LogWarning(releaseEx, "Daily limit release başarısız (DCA)");
         }
     }
 
@@ -130,6 +144,10 @@ public sealed class DcaCalculator(
         // ── Güncel değer ve kâr/zarar ───────────────────────────────────────
         var latestPricePoint = await assetService.GetNearestPriceAsync(symbol, endDate, ct);
         var currentUnitPrice = latestPricePoint.Close;
+        // Purchase-side zero-price guard ile aynı kontrat — yoksa "0 TL şu an" diye
+        // uydurulmuş bir response döner. Terminal fiyatı bulunamadıysa 404.
+        if (currentUnitPrice == 0)
+            throw new PriceNotFoundException(symbol, endDate);
 
         var totalUnitsAcquired = Math.Round(cumulativeUnits, 6, MidpointRounding.AwayFromZero);
         var totalInvestedTry   = Math.Round(cumulativeCost, 2, MidpointRounding.AwayFromZero);

@@ -343,7 +343,12 @@ public class DailyLimitGuardTests
                 Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
            .Returns(RedisResult.Create((RedisValue)1));
 
-        await _sut.TryAcquireAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
+        var act = () => _sut.TryAcquireAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
+
+        await act.Should().NotThrowAsync();
+        await _db.Received(1).ScriptEvaluateAsync(
+            Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+            Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>());
     }
 
     [Fact]

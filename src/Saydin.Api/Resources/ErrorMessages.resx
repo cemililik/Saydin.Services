@@ -44,6 +44,7 @@
   <data name="InvalidInterval"><value>Ge&#x00E7;ersiz interval: '{0}'. Yaln&#x131;zca 'daily' destekleniyor.</value></data>
   <data name="DcaRangeTooWide"><value>DCA tarih aral&#x131;&#x11F;&#x131; &#x00E7;ok geni&#x15F;: tek istekte en fazla {0} alma noktas&#x131; oluyor.</value></data>
   <data name="RequestPayloadMissing"><value>&#x130;stek g&#x00F6;vdesindeki '{0}' alan&#x131; zorunludur.</value></data>
+  <data name="FieldTooLong"><value>'{0}' alan&#x131; en fazla {1} karakter olabilir.</value></data>
   <data name="PriceRangeTooWide"><value>Fiyat aral&#x131;&#x11F;&#x131; &#x00E7;ok geni&#x15F;</value></data>
   <data name="PriceRangeTooWideDetail"><value>Tek istekte en fazla {0} g&#x00FC;nl&#x00FC;k fiyat aral&#x131;&#x11F;&#x131; sorgulanabilir.</value></data>
   <!-- Asset Display Names -->

@@ -55,7 +55,8 @@ public sealed class SavedScenarioService(
                 string.Format(localizer["RequestPayloadMissing"], nameof(request.Type)),
                 field: nameof(request.Type));
 
-        var normalizedType = request.Type.ToLowerInvariant();
+        // Trim before normalize: " what_if " ve " btc " gibi inputlar lookup'ta gereksiz fail etmemeli.
+        var normalizedType = request.Type.Trim().ToLowerInvariant();
 
         if (!AllowedTypes.Contains(normalizedType))
             throw new ValidationException(
@@ -67,28 +68,32 @@ public sealed class SavedScenarioService(
                 string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbol)),
                 field: nameof(request.AssetSymbol));
 
-        if (request.AssetSymbol.Length > MaxSymbolLength)
+        var trimmedSymbol = request.AssetSymbol.Trim();
+        if (trimmedSymbol.Length > MaxSymbolLength)
             throw new ValidationException(
-                "AssetSymbol too long", field: nameof(request.AssetSymbol));
+                string.Format(localizer["FieldTooLong"], nameof(request.AssetSymbol), MaxSymbolLength),
+                field: nameof(request.AssetSymbol));
         if (!string.IsNullOrEmpty(request.AssetDisplayName)
             && request.AssetDisplayName.Length > MaxDisplayNameLength)
             throw new ValidationException(
-                "AssetDisplayName too long", field: nameof(request.AssetDisplayName));
+                string.Format(localizer["FieldTooLong"], nameof(request.AssetDisplayName), MaxDisplayNameLength),
+                field: nameof(request.AssetDisplayName));
         if (!string.IsNullOrEmpty(request.Label) && request.Label.Length > MaxLabelLength)
             throw new ValidationException(
-                "Label too long", field: nameof(request.Label));
+                string.Format(localizer["FieldTooLong"], nameof(request.Label), MaxLabelLength),
+                field: nameof(request.Label));
 
         // what_if / dca tipleri için asset FK kontrolü + sembol/display name canonicalization
         // (kullanıcı "btc" göndermiş olabilir; lookup case-insensitive ve kayıt asset'in
         // canonical değerleriyle yazılır → tutarsız casing veya XSS-yakın display name engellenir).
         Asset? asset = null;
-        string canonicalSymbol      = request.AssetSymbol.ToUpperInvariant();
+        string canonicalSymbol      = trimmedSymbol.ToUpperInvariant();
         string? canonicalDisplayName = request.AssetDisplayName;
 
         if (normalizedType is "what_if" or "dca")
         {
             asset = await repository.GetActiveAssetBySymbolAsync(canonicalSymbol, ct)
-                ?? throw new AssetNotFoundException(request.AssetSymbol);
+                ?? throw new AssetNotFoundException(trimmedSymbol);
             canonicalSymbol      = asset.Symbol;
             canonicalDisplayName = asset.DisplayName;
         }

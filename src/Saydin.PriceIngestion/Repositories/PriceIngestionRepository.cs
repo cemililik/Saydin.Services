@@ -26,16 +26,25 @@ public sealed class PriceIngestionRepository(IDbContextFactory<SaydinDbContext> 
 
         await using var context = await contextFactory.CreateDbContextAsync(ct);
 
+        // Aynı (asset_id, price_date) için PostgreSQL'in ON CONFLICT cümlesi tek statement
+        // içinde "cannot affect row a second time" hatası verir. Aynı pencerede TCMB
+        // weekend chunk overlap'i veya retry sonrası duplikasyon ihtimaline karşı
+        // önce dedupe ediyoruz; aynı keyden son gelen kayıt korunur.
+        var deduped = pricePoints
+            .GroupBy(p => new { p.AssetId, p.PriceDate })
+            .Select(g => g.Last())
+            .ToArray();
+
         // Batch UNNEST UPSERT — tek SQL ile N kayıt yazılır (önceden her satır için
         // ayrı INSERT round-trip vardı; 20 yıl backfill ~100k call → dakikalar).
         // InflationIngestionRepository ile aynı pattern.
-        var assetIds   = pricePoints.Select(p => p.AssetId).ToArray();
-        var priceDates = pricePoints.Select(p => p.PriceDate).ToArray();
-        var closes     = pricePoints.Select(p => p.Close).ToArray();
-        var opens      = pricePoints.Select(p => p.Open).ToArray();
-        var highs      = pricePoints.Select(p => p.High).ToArray();
-        var lows       = pricePoints.Select(p => p.Low).ToArray();
-        var volumes    = pricePoints.Select(p => p.Volume).ToArray();
+        var assetIds   = deduped.Select(p => p.AssetId).ToArray();
+        var priceDates = deduped.Select(p => p.PriceDate).ToArray();
+        var closes     = deduped.Select(p => p.Close).ToArray();
+        var opens      = deduped.Select(p => p.Open).ToArray();
+        var highs      = deduped.Select(p => p.High).ToArray();
+        var lows       = deduped.Select(p => p.Low).ToArray();
+        var volumes    = deduped.Select(p => p.Volume).ToArray();
 
         // ingested_at sütununu NOW() ile dolduruyoruz — replay/backfill izlenebilir kalır.
         await context.Database.ExecuteSqlInterpolatedAsync(

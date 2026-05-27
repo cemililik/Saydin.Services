@@ -6,12 +6,19 @@ namespace Saydin.Api.Helpers;
 /// IP adresinin son oktetini sıfırlayarak KVKK uyumlu maskeleme yapar.
 /// IPv4: 192.168.1.42 → 192.168.1.0
 /// IPv6: son 80 bit sıfırlanır.
+/// IPv4-mapped IPv6 (::ffff:a.b.c.d) önce IPv4'e indirgenir; aksi halde
+/// 16-byte yol tüm adresi sıfırlayıp anlamlı bilgi kaybeder.
 /// </summary>
 public static class IpMasker
 {
     public static IPAddress? Mask(IPAddress? ip)
     {
         if (ip is null) return null;
+
+        // IPv4-mapped IPv6 → IPv4: ::ffff:192.168.1.42 maskeleme öncesinde 192.168.1.42 olur,
+        // sonuçta v4 son okteti sıfırlanır.
+        if (ip.IsIPv4MappedToIPv6)
+            ip = ip.MapToIPv4();
 
         var bytes = ip.GetAddressBytes();
 

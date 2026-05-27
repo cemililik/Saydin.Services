@@ -12,9 +12,9 @@ public sealed class ValidationExceptionHandler(
     IStringLocalizer<ErrorMessages> localizer) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
-        HttpContext context,
+        HttpContext httpContext,
         Exception exception,
-        CancellationToken ct)
+        CancellationToken cancellationToken)
     {
         if (exception is not ValidationException ex)
             return false;
@@ -23,23 +23,26 @@ public sealed class ValidationExceptionHandler(
             "Geçersiz istek alanı: {Field} — {Detail}",
             ex.Field ?? "(none)", ex.Detail);
 
-        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+
+        // Activity.Current null olabilir; ProblemDetails her zaman traceId taşımalı.
+        var traceId = Activity.Current?.TraceId.ToString() ?? httpContext.TraceIdentifier;
 
         var extensions = new Dictionary<string, object?>
         {
-            ["traceId"] = Activity.Current?.TraceId.ToString()
+            ["traceId"] = traceId
         };
         if (ex.Field is not null)
             extensions["field"] = ex.Field;
 
-        await context.Response.WriteAsJsonAsync(new ProblemDetails
+        await httpContext.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type   = "https://saydin.app/errors/validation",
             Title  = localizer["ValidationFailed"],
             Status = StatusCodes.Status400BadRequest,
             Detail = ex.Detail,
             Extensions = extensions,
-        }, ct);
+        }, cancellationToken);
 
         return true;
     }

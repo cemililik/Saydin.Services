@@ -4,7 +4,14 @@ namespace Saydin.Shared.Diagnostics;
 
 public static class SaydinMetrics
 {
-    private static readonly Meter Meter = new("Saydin.Api", "1.0.0");
+    /// <summary>
+    /// OpenTelemetry MeterProvider'a kayıt için meter adı. Tüm metric source'larını
+    /// hem Saydin.Api hem Saydin.PriceIngestion bu tek isim üzerinden yayınlar
+    /// (tarihsel sebep: API'de tanımlanmış, ingestion da aynı meter'ı kullanır).
+    /// </summary>
+    public const string MeterName = "Saydin.Api";
+
+    private static readonly Meter Meter = new(MeterName, "1.0.0");
 
     /// <summary>Toplam hesaplama sayısı (asset.symbol, user.tier tag'leri ile)</summary>
     public static readonly Counter<long> WhatIfCalculations =

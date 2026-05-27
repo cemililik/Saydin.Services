@@ -149,9 +149,12 @@ public sealed class AssetService(
 
         await cache.TrySetAsync(cacheKey, points, TimeSpan.FromHours(1), ct);
 
-        // logger satırı LogDebug görmüyor diye değil, sadece yüksek hacim bilgisi için.
-        logger.LogDebug("GetPriceRange dönüyor: {Symbol} {From}-{To} ({Count} nokta)",
-            symbol, from, to, points.Count);
+        // CLAUDE.md: "LogDebug yalnızca Development ortamında, detay bilgi".
+        // Production minimum log seviyesi Information olduğu için bu zaten no-op; ama
+        // IsEnabled check'i ile string interpolation/boxing maliyeti tamamen sıfırlanır.
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogDebug("GetPriceRange dönüyor: {Symbol} {From}-{To} ({Count} nokta)",
+                symbol, from, to, points.Count);
 
         return points;
     }
