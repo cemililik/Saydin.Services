@@ -20,84 +20,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # SonarCloud blame analizi için tam history gerekiyor.
-          fetch-depth: 0
 
       - name: .NET SDK kur
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      - name: Java kur (SonarCloud scanner için zorunlu)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: SonarCloud cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.sonar/cache
-          key: sonar-cache-${{ runner.os }}
-          restore-keys: sonar-cache-${{ runner.os }}
-
-      - name: dotnet-sonarscanner kur
-        run: |
-          dotnet tool install --global dotnet-sonarscanner
-          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
-
       - name: Bağımlılıkları yükle
         run: dotnet restore
-
-      - name: SonarCloud analizi başlat
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # github.head_ref / base_ref / ref_name PR fork'tan geldiğinde user-controlled
-          # olabiliyor — doğrudan run: bloğunda interpolation script injection açar
-          # (githubactions:S7630). Env var'a alıp shell quoting ile geçiriyoruz.
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_REF: ${{ github.head_ref }}
-          BASE_REF: ${{ github.base_ref }}
-          REF_NAME: ${{ github.ref_name }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          # PR build'lerinde sonar.pullrequest.* parametreleri SonarCloud'a hangi PR olduğunu söyler.
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            dotnet sonarscanner begin \
-              /k:"cemililik_Saydin.Services" \
-              /o:"cemililik" \
-              /d:sonar.token="$SONAR_TOKEN" \
-              /d:sonar.host.url="https://sonarcloud.io" \
-              /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml" \
-              /d:sonar.cs.vscoveragexml.reportsPaths="**/coverage.cobertura.xml" \
-              /d:sonar.exclusions="infrastructure/postgres/migrations/**/*.sql" \
-              /d:sonar.pullrequest.key="$PR_NUMBER" \
-              /d:sonar.pullrequest.branch="$HEAD_REF" \
-              /d:sonar.pullrequest.base="$BASE_REF"
-          else
-            dotnet sonarscanner begin \
-              /k:"cemililik_Saydin.Services" \
-              /o:"cemililik" \
-              /d:sonar.token="$SONAR_TOKEN" \
-              /d:sonar.host.url="https://sonarcloud.io" \
-              /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml" \
-              /d:sonar.cs.vscoveragexml.reportsPaths="**/coverage.cobertura.xml" \
-              /d:sonar.exclusions="infrastructure/postgres/migrations/**/*.sql" \
-              /d:sonar.branch.name="$REF_NAME"
-          fi
 
       - name: Build
         run: dotnet build --no-restore --configuration Release
 
       - name: Testleri çalıştır (coverage ile)
         run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
-
-      - name: SonarCloud analizi bitir
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
       - name: Coverage özeti
         if: always()
