@@ -19,7 +19,10 @@ services:
       # sırayla yürütülür. Yeni migration eklendiğinde ek mount gerekmez.
       - ./infrastructure/postgres/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U saydin -d saydin"]
+      # POSTGRES_USER / POSTGRES_DB parametrik olduğu için healthcheck de aynı env ile çalışır
+      # (env yokluğunda compose substitution boş string verir; pg_isready Postgres'in default
+      # user/db'sine düşer — Postgres image'i POSTGRES_USER yokken postgres/postgres kullanır).
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-saydin}\" -d \"$${POSTGRES_DB:-saydin}\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -30,7 +33,9 @@ services:
     container_name: saydin-pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@saydin.dev}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      # Default şifre kaldırıldı — deploy zamanı PGADMIN_PASSWORD env ile zorunlu sağlanmalı.
+      # Şifre verilmezse compose UI başlangıcı başarısız olur (fail fast > insecure default).
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:?PGADMIN_PASSWORD must be set}
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
     ports:
@@ -144,7 +149,6 @@ services:
       Otlp__Endpoint: "http://aspire-dashboard:18889"
       ExternalApis__CoinGecko__ApiKey: ${COINGECKO_API_KEY:-}
       ExternalApis__OpenExchangeRates__AppId: ${OPENEXCHANGERATES_APP_ID:-}
-      # ExternalApis__GoldApi__ApiKey: ${GOLDAPI_API_KEY:-}  # Pasif
       ExternalApis__TwelveData__ApiKey: ${TWELVEDATA_API_KEY:-}
       ExternalApis__Evds__ApiKey: ${EVDS_API_KEY:-}
       # ── Seçici Worker Kontrolü ──────────────────────────────────────────────

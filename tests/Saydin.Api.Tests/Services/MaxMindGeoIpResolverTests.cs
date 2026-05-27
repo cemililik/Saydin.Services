@@ -1,14 +1,16 @@
 using System.Net;
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 using Saydin.Api.Services;
 
 namespace Saydin.Api.Tests.Services;
 
 public class MaxMindGeoIpResolverTests
 {
-    private static MaxMindGeoIpResolver CreateResolver(string? dbPath = null)
+    private static MaxMindGeoIpResolver CreateResolver(string? dbPath = null, string envName = "Development")
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(
@@ -17,7 +19,10 @@ public class MaxMindGeoIpResolverTests
                     : [])
             .Build();
 
-        return new MaxMindGeoIpResolver(config, NullLogger<MaxMindGeoIpResolver>.Instance);
+        var env = Substitute.For<IHostEnvironment>();
+        env.EnvironmentName.Returns(envName);
+
+        return new MaxMindGeoIpResolver(config, env, NullLogger<MaxMindGeoIpResolver>.Instance);
     }
 
     [Fact]

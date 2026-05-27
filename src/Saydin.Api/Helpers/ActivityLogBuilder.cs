@@ -17,7 +17,7 @@ public sealed class ActivityLogBuilder
     private readonly IGeoIpResolver? _geoIpResolver;
 
     private Guid? _userId;
-    private string _action = default!;
+    private string? _action;
     private object? _data;
     private short _statusCode = 200;
     private string? _errorCode;
@@ -63,6 +63,13 @@ public sealed class ActivityLogBuilder
     {
         _stopwatch.Stop();
 
+        // Build çağrılmadan önce WithAction zorunludur (ActivityLog.Action NOT NULL).
+        // ActivityLogMiddleware Send'i otomatik çağırdığı için sessizce 'unknown' yazmak
+        // yerine bug'ı görünür hâle getiriyoruz.
+        if (string.IsNullOrWhiteSpace(_action))
+            throw new InvalidOperationException(
+                "ActivityLogBuilder.Build çağrılmadan önce WithAction(...) ile bir action belirlenmelidir.");
+
         var deviceId = _httpContext.Items[Endpoints.EndpointExtensions.DeviceIdItemKey] as string
                        ?? _httpContext.Request.Headers["X-Device-ID"].FirstOrDefault()
                        ?? "unknown";
@@ -75,7 +82,7 @@ public sealed class ActivityLogBuilder
         {
             UserId = _userId,
             DeviceId = deviceId,
-            Action = _action,
+            Action = _action!,
             IpAddress = IpMasker.Mask(rawIp),
             Country = country,
             City = city,

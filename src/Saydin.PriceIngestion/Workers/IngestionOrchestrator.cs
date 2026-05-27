@@ -10,7 +10,6 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class IngestionOrchestrator(
     TcmbWorker tcmbWorker,
     CoinGeckoWorker coinGeckoWorker,
-    // GoldApiWorker goldApiWorker,  // Pasif: OpenExchangeRates ile değiştirildi
     OpenExchangeRatesWorker openExchangeRatesWorker,
     TwelveDataWorker twelveDataWorker,
     EvdsInflationWorker evdsInflationWorker,

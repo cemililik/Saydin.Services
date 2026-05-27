@@ -39,6 +39,11 @@
   <data name="InvalidDcaAmountType"><value>Invalid amountType: '{0}'. DCA calculation only supports 'try'.</value></data>
   <data name="InvalidScenarioType"><value>Invalid scenario type: '{0}'. Allowed values: {1}</value></data>
   <data name="FeatureDisabled"><value>This feature is not available on your current plan.</value></data>
+  <data name="FeatureDisabledTitle"><value>Feature disabled on current plan</value></data>
+  <data name="ValidationFailed"><value>Request validation failed</value></data>
+  <data name="InvalidInterval"><value>Invalid interval: '{0}'. Only 'daily' is supported.</value></data>
+  <data name="DcaRangeTooWide"><value>DCA date range too wide: at most {0} purchase points per request.</value></data>
+  <data name="RequestPayloadMissing"><value>The request body field '{0}' is required.</value></data>
   <data name="PriceRangeTooWide"><value>Price range too wide</value></data>
   <data name="PriceRangeTooWideDetail"><value>At most {0} days of price history can be queried in a single request.</value></data>
   <!-- Asset Display Names -->

@@ -39,6 +39,11 @@
   <data name="InvalidDcaAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. DCA hesaplamas&#x131; yaln&#x131;zca 'try' destekler.</value></data>
   <data name="InvalidScenarioType"><value>Ge&#x00E7;ersiz senaryo tipi: '{0}'. &#x130;zin verilen de&#x11F;erler: {1}</value></data>
   <data name="FeatureDisabled"><value>Bu &#x00F6;zellik mevcut plan&#x131;n&#x131;zda kullan&#x131;lam&#x131;yor.</value></data>
+  <data name="FeatureDisabledTitle"><value>&#x00D6;zellik mevcut plan&#x131;n&#x131;zda kapal&#x131;</value></data>
+  <data name="ValidationFailed"><value>&#x130;stek do&#x11F;rulama hatas&#x131;</value></data>
+  <data name="InvalidInterval"><value>Ge&#x00E7;ersiz interval: '{0}'. Yaln&#x131;zca 'daily' destekleniyor.</value></data>
+  <data name="DcaRangeTooWide"><value>DCA tarih aral&#x131;&#x11F;&#x131; &#x00E7;ok geni&#x15F;: tek istekte en fazla {0} alma noktas&#x131; oluyor.</value></data>
+  <data name="RequestPayloadMissing"><value>&#x130;stek g&#x00F6;vdesindeki '{0}' alan&#x131; zorunludur.</value></data>
   <data name="PriceRangeTooWide"><value>Fiyat aral&#x131;&#x11F;&#x131; &#x00E7;ok geni&#x15F;</value></data>
   <data name="PriceRangeTooWideDetail"><value>Tek istekte en fazla {0} g&#x00FC;nl&#x00FC;k fiyat aral&#x131;&#x11F;&#x131; sorgulanabilir.</value></data>
   <!-- Asset Display Names -->

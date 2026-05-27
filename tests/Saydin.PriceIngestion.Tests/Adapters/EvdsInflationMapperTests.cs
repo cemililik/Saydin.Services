@@ -86,13 +86,17 @@ public class EvdsInflationMapperTests
         result[0].PeriodDate.Should().Be(new DateOnly(2003, 2, 1));
     }
 
-    [Fact]
-    public void Map_EmptyStringValue_SkipsRow()
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("   ")]
+    [InlineData("\\t")]   // JSON gövdesinde escape edilmiş tab — IsNullOrWhiteSpace true verir
+    public void Map_EmptyOrWhitespaceValue_SkipsRow(string emptyValue)
     {
-        const string json = """
+        var json = $$"""
             {
               "items": [
-                { "Tarih": "2020-1", "TP_FG_J0": "", "UNIXTIME": {} },
+                { "Tarih": "2020-1", "TP_FG_J0": "{{emptyValue}}", "UNIXTIME": {} },
                 { "Tarih": "2020-2", "TP_FG_J0": "537.10", "UNIXTIME": {} }
               ]
             }

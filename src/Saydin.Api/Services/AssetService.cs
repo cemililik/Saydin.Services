@@ -1,78 +1,81 @@
 using System.Globalization;
-using System.Text.Json;
 using Microsoft.Extensions.Localization;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
 
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
-using StackExchange.Redis;
 
 namespace Saydin.Api.Services;
 
 public sealed class AssetService(
     IPriceRepository repository,
-    IConnectionMultiplexer redis,
+    IRedisCacheHelper cache,
+    IAssetNameLocalizer assetNameLocalizer,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<AssetService> logger) : IAssetService
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
-
     public async Task<IReadOnlyList<Asset>> GetAllAsync(CancellationToken ct)
     {
         // Signature = aktif asset sayısı. 5 dakikada bir DB'den taze okunur.
         // Yeni asset eklenince sayı değişir → yeni cache key oluşur → otomatik invalidasyon.
         const string sigKey = "assets:sig";
 
-        var sig = await TryGetCachedAsync<string>(sigKey);
+        var sig = await cache.TryGetAsync<string>(sigKey, ct);
         if (sig is null)
         {
             var count = await repository.GetActiveAssetCountAsync(ct);
             sig = count.ToString();
-            await TrySetCacheAsync(sigKey, sig, TimeSpan.FromMinutes(5));
+            await cache.TrySetAsync(sigKey, sig, TimeSpan.FromMinutes(5), ct);
         }
 
         var listKey = $"assets:list:{sig}";
-        var cached = await TryGetCachedAsync<List<Asset>>(listKey);
+        var cached = await cache.TryGetAsync<List<Asset>>(listKey, ct);
         if (cached is not null) return cached;
 
         var assets = await repository.GetAllActiveAssetsAsync(ct);
-        await TrySetCacheAsync(listKey, assets, TimeSpan.FromHours(6));
+        await cache.TrySetAsync(listKey, assets, TimeSpan.FromHours(6), ct);
 
         return assets;
+    }
+
+    public async Task<Asset?> GetBySymbolAsync(string symbol, CancellationToken ct)
+    {
+        var upper = symbol.ToUpperInvariant();
+        var all = await GetAllAsync(ct);
+        // assets:list cache'i şu an küçük (~30 asset); ileride büyürse symbol → asset
+        // dictionary cache'i eklenebilir. Şu an LINQ scan O(n) yeterli.
+        return all.FirstOrDefault(a => a.Symbol == upper);
     }
 
     public async Task<IReadOnlyList<AssetResponse>> GetAllAssetInfoAsync(CancellationToken ct)
     {
         const string sigKey = "assets:sig";
 
-        var sig = await TryGetCachedAsync<string>(sigKey);
+        var sig = await cache.TryGetAsync<string>(sigKey, ct);
         if (sig is null)
         {
             var count = await repository.GetActiveAssetCountAsync(ct);
             sig = count.ToString();
-            await TrySetCacheAsync(sigKey, sig, TimeSpan.FromMinutes(5));
+            await cache.TrySetAsync(sigKey, sig, TimeSpan.FromMinutes(5), ct);
         }
 
         var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         var listKey = $"assets:info:{sig}:{lang}";
-        var cached = await TryGetCachedAsync<List<AssetResponse>>(listKey);
+        var cached = await cache.TryGetAsync<List<AssetResponse>>(listKey, ct);
         if (cached is not null) return cached;
 
         var rows = await repository.GetAllActiveAssetsWithDateRangesAsync(ct);
         var result = rows
             .Select(r => new AssetResponse(
                 r.Asset.Symbol,
-                LocalizeDisplayName(r.Asset.Symbol, r.Asset.DisplayName),
+                assetNameLocalizer.Localize(r.Asset.Symbol, r.Asset.DisplayName),
                 r.Asset.Category,
                 r.FirstDate,
                 r.LastDate))
             .ToList();
 
-        await TrySetCacheAsync(listKey, result, TimeSpan.FromHours(1));
+        await cache.TrySetAsync(listKey, result, TimeSpan.FromHours(1), ct);
         return result;
     }
 
@@ -80,7 +83,7 @@ public sealed class AssetService(
     {
         var cacheKey = $"price:{symbol.ToUpperInvariant()}:{date:yyyy-MM-dd}";
 
-        var cached = await TryGetCachedAsync<PricePoint>(cacheKey);
+        var cached = await cache.TryGetAsync<PricePoint>(cacheKey, ct);
         if (cached is not null) return cached;
 
         var price = await repository.GetPriceAsync(symbol.ToUpperInvariant(), date, ct);
@@ -88,7 +91,7 @@ public sealed class AssetService(
         if (price is null)
             throw new PriceNotFoundException(symbol, date);
 
-        await TrySetCacheAsync(cacheKey, price, TimeSpan.FromHours(24));
+        await cache.TrySetAsync(cacheKey, price, TimeSpan.FromHours(24), ct);
 
         return price;
     }
@@ -101,13 +104,13 @@ public sealed class AssetService(
         // Cache: nearest-price:{symbol}:{date} — 24 saat (işlem günleri değişmez)
         var cacheKey = $"nearest-price:{upperSymbol}:{date:yyyy-MM-dd}";
 
-        var cached = await TryGetCachedAsync<PricePoint>(cacheKey);
+        var cached = await cache.TryGetAsync<PricePoint>(cacheKey, ct);
         if (cached is not null) return cached;
 
         var price = await repository.GetNearestPriceAsync(upperSymbol, date, MaxDays, ct)
             ?? throw new PriceNotFoundException(symbol, date);
 
-        await TrySetCacheAsync(cacheKey, price, TimeSpan.FromHours(24));
+        await cache.TrySetAsync(cacheKey, price, TimeSpan.FromHours(24), ct);
         return price;
     }
 
@@ -115,14 +118,14 @@ public sealed class AssetService(
     {
         var cacheKey = $"latest-date:{symbol.ToUpperInvariant()}";
 
-        var cached = await TryGetCachedAsync<string>(cacheKey);
-        if (cached is not null && DateOnly.TryParse(cached, out var cachedDate))
+        var cached = await cache.TryGetAsync<string>(cacheKey, ct);
+        if (cached is not null && DateOnly.TryParse(cached, CultureInfo.InvariantCulture, out var cachedDate))
             return cachedDate;
 
         var date = await repository.GetLatestPriceDateAsync(symbol.ToUpperInvariant(), ct)
             ?? throw new PriceNotFoundException(symbol, DateOnly.FromDateTime(DateTime.UtcNow));
 
-        await TrySetCacheAsync(cacheKey, date.ToString("yyyy-MM-dd"), TimeSpan.FromHours(1));
+        await cache.TrySetAsync(cacheKey, date.ToString("yyyy-MM-dd"), TimeSpan.FromHours(1), ct);
 
         return date;
     }
@@ -130,59 +133,26 @@ public sealed class AssetService(
     public async Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(
         string symbol, DateOnly from, DateOnly to, string interval, CancellationToken ct)
     {
-        var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}";
+        // Yalnız 'daily' destekleniyor; weekly/monthly future enhancement.
+        // Sessizce 'daily' döndürmek yerine açıkça reddet — sessiz kontrat ihlali (review H-9).
+        if (!string.Equals(interval, "daily", StringComparison.OrdinalIgnoreCase))
+            throw new ValidationException(
+                string.Format(localizer["InvalidInterval"], interval),
+                field: nameof(interval));
 
-        var cached = await TryGetCachedAsync<List<PricePoint>>(cacheKey);
+        var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:daily";
+
+        var cached = await cache.TryGetAsync<List<PricePoint>>(cacheKey, ct);
         if (cached is not null) return cached;
 
         var points = await repository.GetPriceRangeAsync(symbol.ToUpperInvariant(), from, to, ct);
 
-        await TrySetCacheAsync(cacheKey, points, TimeSpan.FromHours(1));
+        await cache.TrySetAsync(cacheKey, points, TimeSpan.FromHours(1), ct);
+
+        // logger satırı LogDebug görmüyor diye değil, sadece yüksek hacim bilgisi için.
+        logger.LogDebug("GetPriceRange dönüyor: {Symbol} {From}-{To} ({Count} nokta)",
+            symbol, from, to, points.Count);
 
         return points;
-    }
-
-    /// <summary>
-    /// Asset sembolüne göre lokalize edilmiş display name döner.
-    /// .resx'te key bulunamazsa DB'deki orijinal display name'i kullanır.
-    /// </summary>
-    private string LocalizeDisplayName(string symbol, string fallbackDisplayName)
-    {
-        var localized = localizer[$"Asset_{symbol}"];
-        return localized.ResourceNotFound ? fallbackDisplayName : localized.Value;
-    }
-
-    // ── Redis yardımcıları ────────────────────────────────────────────────────
-
-    private async Task<T?> TryGetCachedAsync<T>(string key) where T : class
-    {
-        try
-        {
-            var db = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            if (!value.HasValue) return null;
-
-            logger.LogDebug("Cache hit: {Key}", key);
-            return JsonSerializer.Deserialize<T>(value.ToString(), JsonOptions);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Redis okuma hatası: {Key}", key);
-            return null;  // Redis çöktüyse DB'ye düş
-        }
-    }
-
-    private async Task TrySetCacheAsync<T>(string key, T value, TimeSpan ttl)
-    {
-        try
-        {
-            var db = redis.GetDatabase();
-            await db.StringSetAsync(key, JsonSerializer.Serialize(value, JsonOptions), ttl);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Redis yazma hatası: {Key}", key);
-            // Cache yazılamazsa hata fırlatma — sadece logla
-        }
     }
 }

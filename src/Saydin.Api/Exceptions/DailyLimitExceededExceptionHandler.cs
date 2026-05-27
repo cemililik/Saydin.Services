@@ -20,7 +20,7 @@ public sealed class DailyLimitExceededExceptionHandler(
         if (exception is not DailyLimitExceededException ex)
             return false;
 
-        logger.LogWarning("Günlük what-if limiti aşıldı: limit={Limit}", ex.Limit);
+        logger.LogWarning("Günlük hesaplama/sorgu limiti aşıldı: limit={Limit}", ex.Limit);
 
         var resetAt = DateTime.UtcNow.Date.AddDays(1).ToString("O");
 

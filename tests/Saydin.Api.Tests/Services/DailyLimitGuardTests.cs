@@ -311,9 +311,95 @@ public class DailyLimitGuardTests
     [Fact]
     public void BuildUsageKey_ContainsCurrentDate()
     {
-        var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        // UTC gece-yarısı sınırında flake olmaması için: key oluşturulduktan sonra UTC tarihi
+        // tekrar oku ve "key oluşmadan önceki gün VEYA şu anki gün" şeklinde tolerans bırak.
         var key = DailyLimitGuard.BuildUsageKey(FreeUser, "device", UsagePrefix);
+        var nowAfter = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var nowAfterMinusOne = DateTime.UtcNow.AddDays(-1).ToString("yyyy-MM-dd");
 
-        key.Should().EndWith(today);
+        key.Should().Match(k => k.EndsWith(nowAfter) || k.EndsWith(nowAfterMinusOne));
+    }
+
+    // ── TryAcquireAsync / ReleaseAsync (Faz 0 follow-up #2) ───────────────
+
+    [Fact]
+    public async Task TryAcquireAsync_AtomicCheckAndIncrement_OverLimit_Throws()
+    {
+        _db.ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+                Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
+           .Returns(RedisResult.Create((RedisValue)(-1)));
+
+        var act = () => _sut.TryAcquireAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
+
+        await act.Should().ThrowAsync<DailyLimitExceededException>();
+    }
+
+    [Fact]
+    public async Task TryAcquireAsync_UnderLimit_DoesNotThrow()
+    {
+        _db.ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+                Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
+           .Returns(RedisResult.Create((RedisValue)1));
+
+        await _sut.TryAcquireAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
+    }
+
+    [Fact]
+    public async Task ReleaseAsync_PremiumNoOverride_DoesNotCallRedis()
+    {
+        await _sut.ReleaseAsync(PremiumUser, PremiumUser.DeviceId!, UsagePrefix);
+
+        await _db.DidNotReceive()
+            .ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+                Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>());
+    }
+
+    [Fact]
+    public async Task ReleaseAsync_FreeUser_CallsLuaScript()
+    {
+        _db.ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+                Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
+           .Returns(RedisResult.Create((RedisValue)0));
+
+        await _sut.ReleaseAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
+
+        await _db.Received(1).ScriptEvaluateAsync(
+            Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+            Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>());
+    }
+
+    [Fact]
+    public async Task ReleaseAsync_RedisDown_FailsOpen()
+    {
+        _db.ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
+                Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
+           .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.UnableToConnect, "test"));
+
+        var act = () => _sut.ReleaseAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
+
+        await act.Should().NotThrowAsync();
+    }
+
+    // ── Premium tier case-insensitivity (review inline comment) ──────────
+
+    [Fact]
+    public async Task CheckAsync_PremiumUserUppercase_SkipsRedisCheck()
+    {
+        var user = new User
+        {
+            Id = Guid.NewGuid(), DeviceId = "u-up", Tier = "PREMIUM",
+            CreatedAt = DateTimeOffset.UtcNow,
+        };
+
+        await _sut.CheckAsync(user, user.DeviceId!, UsagePrefix);
+
+        await _db.DidNotReceive()
+            .StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>());
     }
 }
+

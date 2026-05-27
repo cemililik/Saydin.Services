@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
@@ -18,6 +19,7 @@ using Scalar.AspNetCore;
 using Saydin.Api.BackgroundServices;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Exceptions;
+using Saydin.Api.Middleware;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
@@ -103,6 +105,9 @@ try
 
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();
+    // Sıralı zincir: spesifik handler'lar önce, GlobalExceptionHandler en sonda.
+    builder.Services.AddExceptionHandler<ValidationExceptionHandler>();
+    builder.Services.AddExceptionHandler<FeatureDisabledExceptionHandler>();
     builder.Services.AddExceptionHandler<PriceNotFoundExceptionHandler>();
     builder.Services.AddExceptionHandler<AssetNotFoundExceptionHandler>();
     builder.Services.AddExceptionHandler<ScenarioNotFoundExceptionHandler>();
@@ -179,26 +184,67 @@ try
     builder.Services.AddScoped<IDcaCalculator, DcaCalculator>();
     builder.Services.AddScoped<ISavedScenarioRepository, SavedScenarioRepository>();
     builder.Services.AddScoped<ISavedScenarioService, SavedScenarioService>();
+    builder.Services.AddScoped<IAppConfigService, AppConfigService>();
+    builder.Services.AddSingleton<IRedisCacheHelper, RedisCacheHelper>();
+    builder.Services.AddScoped<IAssetNameLocalizer, AssetNameLocalizer>();
 
     // ─── GeoIP (IP → ülke/şehir çözümleme) ────────────────────────────────────
     builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();
 
     // ─── Activity Logging (Channel pattern) ───────────────────────────────────
+    // DropWrite: kuyruk dolduğunda yeni kayıt düşer ve TryWrite false döner →
+    // ChannelActivityLogger bunu warn loglar (telemetri için kritik).
+    // DropOldest TryWrite'ın her zaman true dönmesine yol açarak drop sayısını
+    // ölçülemez kılıyordu (review C-3 bulgusu).
     var activityChannel = Channel.CreateBounded<ActivityLog>(
         new BoundedChannelOptions(10_000)
         {
-            FullMode = BoundedChannelFullMode.DropOldest,
+            FullMode = BoundedChannelFullMode.DropWrite,
             SingleReader = true,
         });
 
     builder.Services.AddSingleton(activityChannel);
     builder.Services.AddSingleton<IActivityLogger, ChannelActivityLogger>();
     builder.Services.AddHostedService<ActivityLogWriter>();
+    // IMiddleware ile çalıştığı için transient kayıt zorunlu (UseMiddleware<T>() activate eder).
+    builder.Services.AddTransient<ActivityLogMiddleware>();
 
     // ─── Forwarded Headers (reverse proxy arkasında gerçek IP için) ────────────
+    // KnownProxies / KnownNetworks varsayılan olarak yalnızca loopback (127.0.0.1 / ::1)
+    // güvenilirdir. Reverse-proxy arkasında çalışan ortamlarda ForwardedHeaders:KnownProxies
+    // (CSV IP listesi) veya KnownNetworks (CIDR) ile config'ten ek bilinen subnet'ler eklenir.
     builder.Services.Configure<ForwardedHeadersOptions>(options =>
     {
         options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+        var knownProxies = builder.Configuration["ForwardedHeaders:KnownProxies"];
+        if (!string.IsNullOrWhiteSpace(knownProxies))
+        {
+            foreach (var raw in knownProxies.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (IPAddress.TryParse(raw, out var ip))
+                    options.KnownProxies.Add(ip);
+            }
+        }
+
+        var knownNetworks = builder.Configuration["ForwardedHeaders:KnownNetworks"];
+        if (!string.IsNullOrWhiteSpace(knownNetworks))
+        {
+            foreach (var raw in knownNetworks.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var parts = raw.Split('/', 2);
+                if (parts.Length == 2
+                    && IPAddress.TryParse(parts[0], out var prefix)
+                    && int.TryParse(parts[1], out var prefixLength))
+                {
+                    options.KnownIPNetworks.Add(new System.Net.IPNetwork(prefix, prefixLength));
+                }
+            }
+        }
+
+        var forwardLimit = builder.Configuration.GetValue<int?>("ForwardedHeaders:ForwardLimit");
+        if (forwardLimit.HasValue)
+            options.ForwardLimit = forwardLimit.Value;
     });
 
     // ─── Build ───────────────────────────────────────────────────────────────
@@ -219,6 +265,11 @@ try
 
     app.UseExceptionHandler();
     app.UseSerilogRequestLogging();
+
+    // Activity log middleware exception handler'dan SONRA, endpoint mapping'den ÖNCE çalışır.
+    // Pipeline tamamlandığında builder.StatusCode = Response.StatusCode atanır → 4xx/5xx
+    // hatalı isteklerde de activity_logs'a doğru kayıt düşer (review C-3).
+    app.UseMiddleware<ActivityLogMiddleware>();
 
     if (app.Environment.IsDevelopment())
     {

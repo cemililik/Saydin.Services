@@ -28,24 +28,26 @@ public class ChannelActivityLoggerTests
     }
 
     [Fact]
-    public void Log_ChannelFull_DoesNotThrow()
+    public void Log_ChannelFull_DropWriteMode_DoesNotThrow()
     {
+        // DropWrite modunda kuyruk dolduğunda yeni entry düşer ve TryWrite false döner.
+        // (Production'da bu yol Channel.CreateBounded(DropWrite) ile aktif — DropOldest
+        // TryWrite'ı her zaman true döndürdüğü için drop telemetrisi imkansızdı.)
         var channel = Channel.CreateBounded<ActivityLog>(
-            new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest });
+            new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
         var sut = new ChannelActivityLogger(channel, NullLogger<ChannelActivityLogger>.Instance);
 
         var entry1 = new ActivityLog { DeviceId = "d1", Action = "a1", StatusCode = 200 };
         var entry2 = new ActivityLog { DeviceId = "d2", Action = "a2", StatusCode = 200 };
-        var entry3 = new ActivityLog { DeviceId = "d3", Action = "a3", StatusCode = 200 };
 
         var act = () =>
         {
             sut.Log(entry1);
-            sut.Log(entry2);
-            sut.Log(entry3);
+            sut.Log(entry2);   // bu kayıt düşer, exception fırlatmaz
         };
 
         act.Should().NotThrow();
+        channel.Reader.Count.Should().Be(1);
     }
 
     [Fact]
@@ -64,6 +66,11 @@ public class ChannelActivityLoggerTests
             });
         }
 
-        channel.Reader.Count.Should().Be(5);
+        var readBack = new List<ActivityLog>();
+        while (channel.Reader.TryRead(out var entry))
+            readBack.Add(entry);
+
+        readBack.Should().HaveCount(5);
+        readBack.Select(e => e.DeviceId).Should().Equal("device-0", "device-1", "device-2", "device-3", "device-4");
     }
 }

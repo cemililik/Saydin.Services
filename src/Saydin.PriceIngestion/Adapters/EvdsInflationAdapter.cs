@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Mappers;
+using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Adapters;
@@ -54,6 +55,18 @@ public sealed class EvdsInflationAdapter(
                 logger.LogError(
                     "EVDS TÜFE kalıcı API hatası {StatusCode}: {Body} ({From}–{To})",
                     (int)response.StatusCode, body, from, to);
+                // Operasyon ekibinin alarm kurabilmesi için outcome tag'i ayır
+                // (401/403 vs 400 vs diğer 4xx). EVDS worker job kaydı yazmıyor (asset bazlı şema),
+                // bu metric eksikliği telafi eder (review H-7).
+                var outcome = response.StatusCode switch
+                {
+                    System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden => "auth",
+                    System.Net.HttpStatusCode.TooManyRequests => "rate_limit",
+                    _ => "http_4xx",
+                };
+                SaydinMetrics.InflationIngestionFailures.Add(1,
+                    new KeyValuePair<string, object?>("source", Source),
+                    new KeyValuePair<string, object?>("outcome", outcome));
                 throw new HttpRequestException(
                     $"EVDS API kalıcı hata: {(int)response.StatusCode}", null, response.StatusCode);
             }
@@ -82,6 +95,9 @@ public sealed class EvdsInflationAdapter(
         {
             // Geçici hatalar (network, deserialization vb.) — boş liste dön
             logger.LogError(ex, "EVDS TÜFE geçici hata ({From}–{To})", from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "transient"));
             return [];
         }
     }

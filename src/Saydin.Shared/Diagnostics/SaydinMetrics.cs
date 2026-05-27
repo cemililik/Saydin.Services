@@ -24,4 +24,14 @@ public static class SaydinMetrics
         Meter.CreateCounter<long>(
             "saydin.price.not_found.total",
             description: "Fiyat bulunamayan sorgu sayısı");
+
+    /// <summary>
+    /// EVDS / TÜFE ingestion başarısızlık sayısı. Tag: source="evds", outcome="auth|http|other".
+    /// Worker job kaydı yazmadığı için operasyon ekibi alarm'ı bu metriğe göre kurabilir
+    /// (review H-7 / M-17).
+    /// </summary>
+    public static readonly Counter<long> InflationIngestionFailures =
+        Meter.CreateCounter<long>(
+            "saydin.inflation.ingestion.failures.total",
+            description: "EVDS TÜFE ingestion başarısızlıkları (outcome tag'i ile)");
 }

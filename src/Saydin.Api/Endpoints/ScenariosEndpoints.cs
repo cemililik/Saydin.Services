@@ -1,4 +1,4 @@
-using Saydin.Api.Helpers;
+using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
 
@@ -29,22 +29,16 @@ public static class ScenariosEndpoints
         return app;
     }
 
-    private static string GetDeviceId(HttpContext httpContext) =>
-        httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
-
     private static async Task<IResult> GetScenariosAsync(
         HttpContext httpContext,
         ISavedScenarioService service,
-        IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("scenario_list");
+        var log = httpContext.GetOrCreateActivityLog("scenario_list");
 
-        var scenarios = await service.GetScenariosAsync(GetDeviceId(httpContext), ct);
+        var scenarios = await service.GetScenariosAsync(httpContext.GetRequiredDeviceId(), ct);
 
-        log.WithData(new { scenarioCount = scenarios.Count })
-           .Send(activityLogger);
+        log.WithData(new { scenarioCount = scenarios.Count });
 
         return Results.Ok(scenarios);
     }
@@ -53,12 +47,11 @@ public static class ScenariosEndpoints
         HttpContext httpContext,
         SaveScenarioRequest request,
         ISavedScenarioService service,
-        IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("scenario_save");
+        var log = httpContext.GetOrCreateActivityLog("scenario_save");
 
-        var scenario = await service.SaveScenarioAsync(GetDeviceId(httpContext), request, ct);
+        var scenario = await service.SaveScenarioAsync(httpContext.GetRequiredDeviceId(), request, ct);
 
         log.WithData(new
         {
@@ -66,7 +59,7 @@ public static class ScenariosEndpoints
             type = request.Type,
             assetSymbol = request.AssetSymbol,
             label = request.Label
-        }).Send(activityLogger);
+        });
 
         return Results.Created($"/v1/scenarios/{scenario.Id}", scenario);
     }
@@ -75,15 +68,13 @@ public static class ScenariosEndpoints
         Guid id,
         HttpContext httpContext,
         ISavedScenarioService service,
-        IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("scenario_delete");
+        var log = httpContext.GetOrCreateActivityLog("scenario_delete");
 
-        await service.DeleteScenarioAsync(GetDeviceId(httpContext), id, ct);
+        await service.DeleteScenarioAsync(httpContext.GetRequiredDeviceId(), id, ct);
 
-        log.WithData(new { scenarioId = id })
-           .Send(activityLogger);
+        log.WithData(new { scenarioId = id });
 
         return Results.NoContent();
     }

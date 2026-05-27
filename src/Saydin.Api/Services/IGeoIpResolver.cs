@@ -8,8 +8,9 @@ namespace Saydin.Api.Services;
 public interface IGeoIpResolver
 {
     /// <summary>
-    /// IP adresinden ülke (ISO 3166-1 alpha-2) ve şehir bilgisi döner.
-    /// Çözümlenemezse null döner.
+    /// Çözümlenmiş ülke (ISO 3166-1 alpha-2) ve şehir bilgisini taşıyan tuple döner.
+    /// İstemci IP'si null, loopback/private veya MaxMind veritabanında bulunamadıysa
+    /// her iki alan da <c>null</c> olur (tuple kendisi <c>null</c> dönmez).
     /// </summary>
     (string? CountryCode, string? City) Resolve(IPAddress? ip);
 }

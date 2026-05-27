@@ -18,6 +18,11 @@ public sealed class SavedScenarioService(
 {
     private static readonly HashSet<string> AllowedTypes = ["what_if", "comparison", "portfolio", "dca"];
 
+    // DB kolon kapasiteleri ile uyumlu max length validasyonu.
+    private const int MaxSymbolLength      = 64;
+    private const int MaxDisplayNameLength = 200;
+    private const int MaxLabelLength       = 200;
+
     public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct)
     {
         var user = await GetOrCreateUserAsync(deviceId, ct);
@@ -33,6 +38,8 @@ public sealed class SavedScenarioService(
     public async Task<ScenarioResponse> SaveScenarioAsync(
         string deviceId, SaveScenarioRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
+
         var user = await GetOrCreateUserAsync(deviceId, ct);
 
         var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
@@ -43,18 +50,47 @@ public sealed class SavedScenarioService(
                 throw new ScenarioLimitExceededException(scenarioLimit);
         }
 
+        if (string.IsNullOrWhiteSpace(request.Type))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.Type)),
+                field: nameof(request.Type));
+
         var normalizedType = request.Type.ToLowerInvariant();
 
         if (!AllowedTypes.Contains(normalizedType))
-            throw new ArgumentException(
-                string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", AllowedTypes)));
+            throw new ValidationException(
+                string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", AllowedTypes)),
+                field: nameof(request.Type));
 
-        // what_if tipinde asset FK kontrolü yap; diğer tipler için atla
+        if (string.IsNullOrWhiteSpace(request.AssetSymbol))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbol)),
+                field: nameof(request.AssetSymbol));
+
+        if (request.AssetSymbol.Length > MaxSymbolLength)
+            throw new ValidationException(
+                "AssetSymbol too long", field: nameof(request.AssetSymbol));
+        if (!string.IsNullOrEmpty(request.AssetDisplayName)
+            && request.AssetDisplayName.Length > MaxDisplayNameLength)
+            throw new ValidationException(
+                "AssetDisplayName too long", field: nameof(request.AssetDisplayName));
+        if (!string.IsNullOrEmpty(request.Label) && request.Label.Length > MaxLabelLength)
+            throw new ValidationException(
+                "Label too long", field: nameof(request.Label));
+
+        // what_if / dca tipleri için asset FK kontrolü + sembol/display name canonicalization
+        // (kullanıcı "btc" göndermiş olabilir; lookup case-insensitive ve kayıt asset'in
+        // canonical değerleriyle yazılır → tutarsız casing veya XSS-yakın display name engellenir).
         Asset? asset = null;
+        string canonicalSymbol      = request.AssetSymbol.ToUpperInvariant();
+        string? canonicalDisplayName = request.AssetDisplayName;
+
         if (normalizedType is "what_if" or "dca")
         {
-            asset = await repository.GetActiveAssetBySymbolAsync(request.AssetSymbol, ct)
+            asset = await repository.GetActiveAssetBySymbolAsync(canonicalSymbol, ct)
                 ?? throw new AssetNotFoundException(request.AssetSymbol);
+            canonicalSymbol      = asset.Symbol;
+            canonicalDisplayName = asset.DisplayName;
         }
 
         var scenario = new SavedScenario
@@ -62,8 +98,8 @@ public sealed class SavedScenarioService(
             Id = Guid.NewGuid(),
             UserId = user.Id,
             AssetId = asset?.Id,
-            AssetSymbol = request.AssetSymbol,
-            AssetDisplayName = request.AssetDisplayName,
+            AssetSymbol = canonicalSymbol,
+            AssetDisplayName = canonicalDisplayName ?? canonicalSymbol,
             Type = normalizedType,
             ExtraData = request.ExtraData,
             BuyDate = request.BuyDate,
@@ -78,7 +114,7 @@ public sealed class SavedScenarioService(
 
         logger.LogInformation(
             "Senaryo kaydedildi: {DeviceId} → {Type} {AssetSymbol} {BuyDate}",
-            deviceId, request.Type, request.AssetSymbol, request.BuyDate);
+            deviceId, normalizedType, canonicalSymbol, request.BuyDate);
 
         return ToResponse(scenario);
     }

@@ -189,6 +189,7 @@ public class TcmbMapperTests
             <Tarih_Date>
               <Currency CurrencyCode="USD">
                 <Unit>{unitValue}</Unit>
+                <ForexBuying>5.9416</ForexBuying>
                 <ForexSelling>5.9518</ForexSelling>
               </Currency>
             </Tarih_Date>
@@ -197,7 +198,8 @@ public class TcmbMapperTests
         var result = TcmbMapper.Map(xml, AssetId, "USD", SampleDate);
 
         result.Should().NotBeNull();
-        // Unit fallback 1m → değer normalize edilmeden saklanır
+        // Unit fallback 1m → hem Open (ForexBuying) hem Close (ForexSelling) normalize edilmeden saklanır
         result!.Close.Should().Be(5.9518m);
+        result.Open.Should().Be(5.9416m);
     }
 }

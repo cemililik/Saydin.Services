@@ -1,4 +1,4 @@
-using Saydin.Api.Helpers;
+using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
 
@@ -33,12 +33,10 @@ public static class WhatIfEndpoints
         HttpContext httpContext,
         WhatIfRequest request,
         IWhatIfCalculator calculator,
-        IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("what_if_calculate");
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var log = httpContext.GetOrCreateActivityLog("what_if_calculate");
+        var deviceId = httpContext.GetRequiredDeviceId();
 
         var result = await calculator.CalculateAsync(deviceId, request, ct);
 
@@ -59,7 +57,7 @@ public static class WhatIfEndpoints
                 actualBuyDate = result.ActualBuyDate?.ToString("yyyy-MM-dd"),
                 actualSellDate = result.ActualSellDate?.ToString("yyyy-MM-dd"),
             }
-        }).Send(activityLogger);
+        });
 
         return Results.Ok(result);
     }
@@ -68,12 +66,10 @@ public static class WhatIfEndpoints
         HttpContext httpContext,
         CompareRequest request,
         IWhatIfCalculator calculator,
-        IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("what_if_compare");
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var log = httpContext.GetOrCreateActivityLog("what_if_compare");
+        var deviceId = httpContext.GetRequiredDeviceId();
 
         var result = await calculator.CompareAsync(deviceId, request, ct);
 
@@ -95,7 +91,7 @@ public static class WhatIfEndpoints
                     r.Calculation.ProfitLossPercent
                 })
             }
-        }).Send(activityLogger);
+        });
 
         return Results.Ok(result);
     }
@@ -104,12 +100,10 @@ public static class WhatIfEndpoints
         HttpContext httpContext,
         ReverseWhatIfRequest request,
         IWhatIfCalculator calculator,
-        IActivityLogger activityLogger,
         CancellationToken ct)
     {
-        var log = new ActivityLogBuilder(httpContext, httpContext.RequestServices.GetService<IGeoIpResolver>()).WithAction("what_if_reverse");
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var log = httpContext.GetOrCreateActivityLog("what_if_reverse");
+        var deviceId = httpContext.GetRequiredDeviceId();
 
         var result = await calculator.CalculateReverseAsync(deviceId, request, ct);
 
@@ -130,7 +124,7 @@ public static class WhatIfEndpoints
                 actualBuyDate = result.ActualBuyDate?.ToString("yyyy-MM-dd"),
                 actualSellDate = result.ActualSellDate?.ToString("yyyy-MM-dd"),
             }
-        }).Send(activityLogger);
+        });
 
         return Results.Ok(result);
     }

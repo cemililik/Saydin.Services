@@ -16,8 +16,11 @@ public sealed class DailyLimitGuard(
     private (bool HasLimit, int Limit, string Key) GetLimitAndKey(
         User? user, string deviceId, string usageKeyPrefix, int? limitOverride)
     {
-        // Premium kullanıcı override almıyorsa (yani caller bilinçli limit dayatmadıysa) sınırsız
-        if (user?.Tier == PremiumTier && limitOverride is null)
+        // Premium kullanıcı override almıyorsa (yani caller bilinçli limit dayatmadıysa) sınırsız.
+        // Karşılaştırma case-insensitive — tier "Premium" veya "PREMIUM" de gelebilir
+        // (PlanOptions.GetTierOptions zaten OrdinalIgnoreCase ile çözüyor; aynı semantiği koru).
+        if (limitOverride is null
+            && string.Equals(user?.Tier, PremiumTier, StringComparison.OrdinalIgnoreCase))
             return (false, 0, string.Empty);
 
         var limit = limitOverride
@@ -52,7 +55,6 @@ public sealed class DailyLimitGuard(
         }
         catch (OperationCanceledException)
         {
-            // HTTP cancel — caller'a iletilir, fail-open uygulanmaz
             throw;
         }
         catch (Exception ex) when (ex is not DailyLimitExceededException)
@@ -61,7 +63,15 @@ public sealed class DailyLimitGuard(
         }
     }
 
-    public async Task IncrementAsync(
+    public Task IncrementAsync(
+        User? user,
+        string deviceId,
+        string usageKeyPrefix,
+        int? limitOverride = null,
+        CancellationToken ct = default)
+        => TryAcquireAsync(user, deviceId, usageKeyPrefix, limitOverride, ct);
+
+    public async Task TryAcquireAsync(
         User? user,
         string deviceId,
         string usageKeyPrefix,
@@ -99,6 +109,40 @@ public sealed class DailyLimitGuard(
         catch (Exception ex) when (ex is not DailyLimitExceededException)
         {
             logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
+        }
+    }
+
+    public async Task ReleaseAsync(
+        User? user,
+        string deviceId,
+        string usageKeyPrefix,
+        int? limitOverride = null,
+        CancellationToken ct = default)
+    {
+        var (hasLimit, _, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride);
+        if (!hasLimit) return;
+
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            // Atomik DECR; sayaç 0'ın altına düşse bile günlük key TTL ile temizlenir.
+            const string script = """
+                local count = redis.call('GET', KEYS[1])
+                if count and tonumber(count) > 0 then
+                  return redis.call('DECR', KEYS[1])
+                end
+                return 0
+                """;
+            await redis.GetDatabase().ScriptEvaluateAsync(script, keys: [key]);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Release best-effort: hata kullanıcının yoluna yansımaz, telemetry için log yeterli.
+            logger.LogWarning(ex, "Daily limit release başarısız: {Key}", key);
         }
     }
 
