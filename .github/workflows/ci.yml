@@ -54,9 +54,17 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # github.head_ref / base_ref / ref_name PR fork'tan geldiğinde user-controlled
+          # olabiliyor — doğrudan run: bloğunda interpolation script injection açar
+          # (githubactions:S7630). Env var'a alıp shell quoting ile geçiriyoruz.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           # PR build'lerinde sonar.pullrequest.* parametreleri SonarCloud'a hangi PR olduğunu söyler.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "$EVENT_NAME" = "pull_request" ]; then
             dotnet sonarscanner begin \
               /k:"cemililik_Saydin.Services" \
               /o:"cemililik" \
@@ -65,9 +73,9 @@ jobs:
               /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml" \
               /d:sonar.cs.vscoveragexml.reportsPaths="**/coverage.cobertura.xml" \
               /d:sonar.exclusions="infrastructure/postgres/migrations/**/*.sql" \
-              /d:sonar.pullrequest.key="${{ github.event.pull_request.number }}" \
-              /d:sonar.pullrequest.branch="${{ github.head_ref }}" \
-              /d:sonar.pullrequest.base="${{ github.base_ref }}"
+              /d:sonar.pullrequest.key="$PR_NUMBER" \
+              /d:sonar.pullrequest.branch="$HEAD_REF" \
+              /d:sonar.pullrequest.base="$BASE_REF"
           else
             dotnet sonarscanner begin \
               /k:"cemililik_Saydin.Services" \
@@ -77,7 +85,7 @@ jobs:
               /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml" \
               /d:sonar.cs.vscoveragexml.reportsPaths="**/coverage.cobertura.xml" \
               /d:sonar.exclusions="infrastructure/postgres/migrations/**/*.sql" \
-              /d:sonar.branch.name="${{ github.ref_name }}"
+              /d:sonar.branch.name="$REF_NAME"
           fi
 
       - name: Build
