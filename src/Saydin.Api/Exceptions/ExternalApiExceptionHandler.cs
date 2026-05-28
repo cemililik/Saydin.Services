@@ -19,14 +19,14 @@ public sealed class ExternalApiExceptionHandler(
     IStringLocalizer<ErrorMessages> localizer) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
-        HttpContext context,
+        HttpContext httpContext,
         Exception exception,
-        CancellationToken ct)
+        CancellationToken cancellationToken)
     {
         if (exception is not ExternalApiException ex)
             return false;
 
-        var traceId = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier;
+        var traceId = Activity.Current?.TraceId.ToString() ?? httpContext.TraceIdentifier;
 
         logger.LogWarning(
             ex,
@@ -34,9 +34,9 @@ public sealed class ExternalApiExceptionHandler(
             ex.ApiSource,
             traceId);
 
-        context.Response.StatusCode = StatusCodes.Status502BadGateway;
+        httpContext.Response.StatusCode = StatusCodes.Status502BadGateway;
 
-        await context.Response.WriteAsJsonAsync(new ProblemDetails
+        await httpContext.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type = "https://saydin.app/errors/external-api",
             Title = localizer["ServerError"],
@@ -47,7 +47,7 @@ public sealed class ExternalApiExceptionHandler(
                 ["traceId"] = traceId,
                 ["source"]  = ex.ApiSource,
             }
-        }, ct);
+        }, cancellationToken);
 
         return true;
     }

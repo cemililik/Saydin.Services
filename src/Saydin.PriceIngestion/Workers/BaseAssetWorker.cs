@@ -74,7 +74,11 @@ public abstract class BaseAssetWorker(
             {
                 await FetchTodayAsync(ct);
             }
-            catch (OperationCanceledException)
+            // PR #11 follow-up: yalnızca shutdown token tetiklenmişse worker'ı durdur.
+            // Non-shutdown OperationCanceledException (örn. internal HttpClient/Polly
+            // timeout) burada yutulursa worker kalıcı olarak durur ve ertesi günler
+            // hiç veri akmaz; transient cancel sebeplerini orchestrator'a sızdır.
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return;
             }
@@ -91,7 +95,7 @@ public abstract class BaseAssetWorker(
                 await Task.Delay(delay, ct);
                 await FetchTodayAsync(ct);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }

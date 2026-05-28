@@ -28,6 +28,7 @@ Migration'ı mevcut dosyaya ekleme — yeni dosya oluştur.
 
 > ⚠️ F2.9-9 / [C-I-30]: `assets` tablosu şemasını ekleme öncesi doğrula
 > (`source_id` kolonu zorunlu mu? `category` enum değerleri neler?).
+>
 > ```bash
 > docker compose exec postgres psql -U saydin -d saydin -c "\d assets"
 > ```

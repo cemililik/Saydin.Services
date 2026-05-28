@@ -50,7 +50,9 @@ public sealed class LivenessHeartbeatService : BackgroundService
         }
         catch (OperationCanceledException)
         {
-            // host shutdown — beklenen
+            // host shutdown — beklenen, ama operasyon ekibinin "heartbeat ne zaman durdu?"
+            // sorusunu cevaplayabilmesi için Debug seviyesinde olay kaydedilir.
+            _logger.LogDebug("LivenessHeartbeatService host shutdown ile durdu");
         }
     }
 

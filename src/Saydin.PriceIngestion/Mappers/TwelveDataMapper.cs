@@ -44,8 +44,13 @@ public static class TwelveDataMapper
 
         foreach (var item in values.EnumerateArray())
         {
+            // PR #11 follow-up: TwelveData API her zaman "yyyy-MM-dd" formatı döner.
+            // DateOnly.TryParse current culture'a duyarlı (tr-TR locale'de bazı tarih
+            // varyantları beklenmedik parse edebilir) — invariant exact format ile
+            // tek doğru girdi kabul edilir, diğer her şey atlanır.
             if (!item.TryGetProperty("datetime", out var dateEl) ||
-                !DateOnly.TryParse(dateEl.GetString(), out var date))
+                !DateOnly.TryParseExact(dateEl.GetString(), "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
                 continue;
 
             if (!item.TryGetProperty("close", out var closeEl) ||

@@ -68,6 +68,11 @@ public sealed class TwelveDataAdapter(
         }
         catch (HttpRequestException ex)
         {
+            // PR #11 follow-up: ExternalApiException sarmalaması inner stack'i
+            // operasyon ekibine göstermez; orijinal hata burada loglanmalı.
+            logger.LogError(ex,
+                "TwelveData veri alınamadı: {Source} {Symbol} ({From}–{To})",
+                Source, assetSymbol, from, to);
             throw new ExternalApiException(Source,
                 $"TwelveData veri alınamadı: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
         }

@@ -12,6 +12,15 @@ internal static class HttpResilienceExtensions
 {
     public static IHttpClientBuilder AddSaydinResilience(this IHttpClientBuilder builder)
     {
+        // PR #11 follow-up: HttpClient.Timeout'u devre dışı bırak. Polly pipeline'ı
+        // AttemptTimeout (30s) + TotalRequestTimeout (3 dk) ile cancel kontrolünü
+        // tek noktadan yürütüyor. HttpClient'ın default 100s timeout'u veya per-client
+        // 30s ayarı pipeline'ı erken iptal edip retry zincirini bozabilir; özellikle
+        // backoff sırasında pencere açıldığında. ConfigureHttpClient delegate'i
+        // AddHttpClient lambda'sından SONRA çalıştığı için per-client Timeout
+        // ayarlarının üzerine yazılır.
+        builder.ConfigureHttpClient(client => client.Timeout = Timeout.InfiniteTimeSpan);
+
         builder.AddStandardResilienceHandler(opts =>
         {
             // Retry: 3 deneme, exponential backoff (varsayılan delay backoff),

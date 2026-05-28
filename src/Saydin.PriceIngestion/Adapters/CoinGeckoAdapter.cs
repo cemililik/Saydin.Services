@@ -62,6 +62,12 @@ public sealed class CoinGeckoAdapter(
         }
         catch (HttpRequestException ex)
         {
+            // PR #11 follow-up: Polly retry tükendiğinde orijinal exception stack
+            // log'a düşmeden ExternalApiException sarmalanıyordu. Operasyon ekibinin
+            // root-cause analizi için inner stack ve adapter context'i loglanır.
+            logger.LogError(ex,
+                "CoinGecko veri alınamadı: {Source} {Symbol} ({From}–{To})",
+                Source, assetSymbol, from, to);
             throw new ExternalApiException(Source,
                 $"CoinGecko veri alınamadı: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
         }

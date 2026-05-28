@@ -86,6 +86,10 @@ public sealed class EvdsInflationAdapter(
         catch (HttpRequestException ex)
         {
             // Polly retry tükenmiş network hatası.
+            // PR #11 follow-up: metric'in yanı sıra exception stack'i de logla;
+            // ExternalApiException sarmalaması inner stack'i sızdırmaz.
+            logger.LogError(ex,
+                "EVDS network hatası: {Source} ({From}–{To})", Source, from, to);
             SaydinMetrics.InflationIngestionFailures.Add(1,
                 new KeyValuePair<string, object?>("source", Source),
                 new KeyValuePair<string, object?>("outcome", "transient"));
@@ -94,6 +98,8 @@ public sealed class EvdsInflationAdapter(
         }
         catch (JsonException ex)
         {
+            logger.LogError(ex,
+                "EVDS yanıtı çözümlenemedi: {Source} ({From}–{To})", Source, from, to);
             SaydinMetrics.InflationIngestionFailures.Add(1,
                 new KeyValuePair<string, object?>("source", Source),
                 new KeyValuePair<string, object?>("outcome", "parse"));
