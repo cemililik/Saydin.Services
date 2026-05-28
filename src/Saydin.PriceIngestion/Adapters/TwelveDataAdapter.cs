@@ -62,9 +62,12 @@ public sealed class TwelveDataAdapter(
         }
         catch (JsonException ex)
         {
-            logger.LogWarning(ex, "TwelveData JSON çözümlenemedi: {Symbol} ({From}–{To})",
+            // EVDS adaptörüyle paritede malformed JSON yumuşatılmaz; ingestion runner
+            // fail olarak işaretlesin ve upstream contract değişiklikleri kaybolmasın.
+            logger.LogError(ex, "TwelveData JSON çözümlenemedi: {Symbol} ({From}–{To})",
                 assetSymbol, from, to);
-            return [];
+            throw new ExternalApiException(Source,
+                $"TwelveData payload malformed: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
         }
         catch (HttpRequestException ex)
         {

@@ -101,15 +101,18 @@ public class TwelveDataAdapterTests
     }
 
     [Fact]
-    public async Task FetchRange_MalformedJson_ReturnsEmpty()
+    public async Task FetchRange_MalformedJson_ThrowsExternalApiException()
     {
+        // EVDS adaptörüyle paritede malformed JSON ingestion_jobs success olarak
+        // kaybolmamalı; ExternalApiException ile yukarı bildirilir.
         var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent("{ not json"),
         });
 
-        var result = await adapter.FetchRangeAsync(Guid.NewGuid(), "THYAO", "THYAO", From, To, default);
+        var act = () => adapter.FetchRangeAsync(Guid.NewGuid(), "THYAO", "THYAO", From, To, default);
 
-        result.Should().BeEmpty();
+        var ex = await act.Should().ThrowAsync<ExternalApiException>();
+        ex.Which.ApiSource.Should().Be("twelvedata");
     }
 }

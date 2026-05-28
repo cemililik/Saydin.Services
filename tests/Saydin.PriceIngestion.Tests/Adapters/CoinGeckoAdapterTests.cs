@@ -36,7 +36,7 @@ public class CoinGeckoAdapterTests
     [Theory]
     [InlineData(HttpStatusCode.TooManyRequests)]
     [InlineData(HttpStatusCode.Forbidden)]
-    public async Task FetchRange_RateLimitOrForbidden_ThrowsExternalApiException(HttpStatusCode statusCode)
+    public async Task FetchRange_RateLimitOrForbidden_ThrowsExternalApiExceptionAsync(HttpStatusCode statusCode)
     {
         var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(statusCode));
 
@@ -47,21 +47,24 @@ public class CoinGeckoAdapterTests
     }
 
     [Fact]
-    public async Task FetchRange_MalformedJson_ReturnsEmpty()
+    public async Task FetchRange_MalformedJson_ThrowsExternalApiExceptionAsync()
     {
-        // F1.1-3 pattern: bozuk JSON "veri yok" olarak yumuşatılır.
+        // Bozuk JSON sessizce "veri yok" olarak yumuşatılmaz; EVDS adaptörüyle
+        // paritede ExternalApiException fırlar — upstream contract değişiklikleri
+        // ingestion_jobs failed olarak görünmeli, success olarak kaybolmamalı.
         var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent("{ not json"),
         });
 
-        var result = await adapter.FetchRangeAsync(Guid.NewGuid(), "BTC", "bitcoin", From, To, default);
+        var act = () => adapter.FetchRangeAsync(Guid.NewGuid(), "BTC", "bitcoin", From, To, default);
 
-        result.Should().BeEmpty();
+        var ex = await act.Should().ThrowAsync<ExternalApiException>();
+        ex.Which.ApiSource.Should().Be("coingecko");
     }
 
     [Fact]
-    public async Task FetchRange_HttpRequestException_ThrowsExternalApiException()
+    public async Task FetchRange_HttpRequestException_ThrowsExternalApiExceptionAsync()
     {
         var (adapter, _) = BuildAdapter(_ => throw new HttpRequestException("network down"));
 
@@ -72,7 +75,7 @@ public class CoinGeckoAdapterTests
     }
 
     [Fact]
-    public async Task FetchRange_ValidResponse_ReturnsPricePoints()
+    public async Task FetchRange_ValidResponse_ReturnsPricePointsAsync()
     {
         var (adapter, handler) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {

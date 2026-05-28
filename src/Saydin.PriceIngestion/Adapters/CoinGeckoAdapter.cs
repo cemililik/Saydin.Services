@@ -54,11 +54,15 @@ public sealed class CoinGeckoAdapter(
         }
         catch (JsonException ex)
         {
-            // F1.1-3 pattern: bozuk payload'u "veri yok" olarak yumuşat — diğer
-            // hatalar (HTTP, timeout) Polly sonrası dış katmana fırlar.
-            logger.LogWarning(ex, "CoinGecko JSON çözümlenemedi: {Symbol} ({From}–{To})",
+            // Bozuk payload "veri yok" olarak yumuşatıldığında ingestion_jobs success
+            // olarak işaretlenir ve aynı pencere bir daha denenmez — upstream contract
+            // değişiklikleri sessizce kaybolur. EVDS adaptörüyle paritede LogError +
+            // ExternalApiException ile yukarı bildir; ingestion runner fail olarak
+            // işaretler ve operasyon ekibi haberdar olur.
+            logger.LogError(ex, "CoinGecko JSON çözümlenemedi: {Symbol} ({From}–{To})",
                 assetSymbol, from, to);
-            return [];
+            throw new ExternalApiException(Source,
+                $"CoinGecko payload malformed: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
         }
         catch (HttpRequestException ex)
         {

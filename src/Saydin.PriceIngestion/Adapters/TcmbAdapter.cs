@@ -93,7 +93,12 @@ public sealed class TcmbAdapter(
         catch (HttpRequestException ex)
         {
             // Polly retry zinciri tükendi; range fetch'i ingestion_jobs failed olarak
-            // işaretlensin diye yukarı fırlat (review F1.1-3).
+            // işaretlensin diye yukarı fırlat (review F1.1-3). ExternalApiException
+            // sarmalaması inner stack'i operasyon ekibine göstermez, bu yüzden
+            // orijinal hata burada loglanır (CoinGecko/TwelveData ile paritede).
+            logger.LogError(ex,
+                "TCMB veri alınamadı: {Source} {Date} {CurrencyCode}",
+                Source, date, xmlCurrencyCode);
             throw new ExternalApiException(Source,
                 $"TCMB XML alınamadı ({date:yyyy-MM-dd} {xmlCurrencyCode})", ex);
         }
@@ -122,14 +127,18 @@ public sealed class TcmbAdapter(
     private async Task<XDocument?> GetOrFetchDayXmlAsync(
         HttpClient client, DateOnly date, CancellationToken ct)
     {
-        // Race-free: aynı tarih için eşzamanlı fetch'i tek bir Task'a indir.
+        // Race-free single-flight: ConcurrentDictionary.GetOrAdd contention altında
+        // factory'yi birden fazla kez çağırabilir; eski sürümde her invocation eager
+        // olarak FetchDayXmlAsync'i tetikliyor, kaybeden Task'lar leak oluyordu.
+        // Lazy<Task<>> ile fetch yalnızca kazanan entry'nin .Value erişiminde başlar
+        // (LazyThreadSafetyMode.ExecutionAndPublication default).
         var entry = _dayCache.GetOrAdd(date, d => new CachedXmlEntry(
-            FetchDayXmlAsync(client, d, ct),
+            new Lazy<Task<XDocument?>>(() => FetchDayXmlAsync(client, d, ct)),
             DateTime.UtcNow));
 
         try
         {
-            return await entry.XmlTask.ConfigureAwait(false);
+            return await entry.XmlTaskLazy.Value.ConfigureAwait(false);
         }
         catch
         {
@@ -184,5 +193,5 @@ public sealed class TcmbAdapter(
         }
     }
 
-    private sealed record CachedXmlEntry(Task<XDocument?> XmlTask, DateTime CreatedAtUtc);
+    private sealed record CachedXmlEntry(Lazy<Task<XDocument?>> XmlTaskLazy, DateTime CreatedAtUtc);
 }

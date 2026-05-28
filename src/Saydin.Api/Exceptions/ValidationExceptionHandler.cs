@@ -29,7 +29,7 @@ public sealed class ValidationExceptionHandler(
 
         var detailMessage = ex.Detail;
         var field = ex.Field;
-        logger.LogInformation(
+        logger.LogWarning(
             "Geçersiz istek alanı: {Field} — {Detail}",
             field ?? "(none)", detailMessage);
 

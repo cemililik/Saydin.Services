@@ -286,7 +286,12 @@ public sealed class DcaCalculator(
         }
         else
         {
-            for (var i = 0; ; i++)
+            // Sınırlı iterasyon: AddMonths()'a yalnızca [0, monthsDiff] aralığında çağrı
+            // yapılır — `endDate` patolojik biçimde DateOnly.MaxValue'ye yakınsa bile
+            // ArgumentOutOfRangeException üretmez.
+            var monthsDiff = (endDate.Year - startDate.Year) * 12 + (endDate.Month - startDate.Month);
+            if (monthsDiff < 0) monthsDiff = 0;
+            for (var i = 0; i <= monthsDiff; i++)
             {
                 var candidate = startDate.AddMonths(i);
                 if (candidate > endDate) break;
