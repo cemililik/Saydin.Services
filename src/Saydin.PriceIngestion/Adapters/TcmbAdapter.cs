@@ -67,11 +67,16 @@ public sealed class TcmbAdapter(
         return results.AsReadOnly();
     }
 
-    private static string ExtractCurrencyCode(string sourceId) =>
-        // TCMB series kodu "TP.DK.USD.A" → XML'deki CurrencyCode "USD"
-        sourceId.Contains('.', StringComparison.Ordinal)
-            ? sourceId.Split('.')[2]
-            : sourceId;
+    private static string ExtractCurrencyCode(string sourceId)
+    {
+        // TCMB series kodu "TP.DK.USD.A" → XML'deki CurrencyCode "USD".
+        // Defansif: sourceId DB/config'den geldiği için "USD.", "TP.USD" gibi eksik
+        // segmentli değerler beklenmeyen IndexOutOfRangeException üretmemeli — bu
+        // durumda ham değeri olduğu gibi kullan (assets.source_id zaten Asset entity
+        // konfigürasyonunda valide ediliyor, bu sadece extra savunma katmanı).
+        var segments = sourceId.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        return segments.Length >= 3 ? segments[2] : sourceId;
+    }
 
     private async Task<PricePoint?> FetchSingleDayAsync(
         HttpClient client,

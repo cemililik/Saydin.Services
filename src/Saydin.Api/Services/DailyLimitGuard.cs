@@ -96,13 +96,24 @@ public sealed class DailyLimitGuard(
             // okumalarında yanıltıcı oluyordu. Lua script atomic olduğu için race yok;
             // bu varyant niyeti daha net açıklıyor (review F1.3-7).
             // Dönüş: 1 = allow, 0 = reject (limit reached).
+            //
+            // PR #11 follow-up: PEXPIRE yalnızca yeni key'in ilk INCR'ında çağrılır
+            // (`count == 1`). Önceki revizyon her başarılı istekte PEXPIRE atıyordu,
+            // bu hem (a) gereksiz Redis yazma yükü oluşturuyor hem de (b) sliding-window
+            // gibi yanlış bir izlenim veriyordu. Semantik calendar-day: key adı zaten
+            // `usage:{prefix}:{userId}:{yyyy-MM-dd}` formatında tarih içeriyor (gece
+            // yarısı geçince yeni key 0'dan başlar) ve TTL caller tarafından
+            // "gece yarısına kalan ms" olarak hesaplanır. İlk INCR'da TTL set
+            // edildiğinde aynı günün geri kalanı için aynı pencere geçerli olur.
             const string script = """
                 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
                 if current >= tonumber(ARGV[1]) then
                   return 0
                 end
-                redis.call('INCR', KEYS[1])
-                redis.call('PEXPIRE', KEYS[1], ARGV[2])
+                local count = redis.call('INCR', KEYS[1])
+                if count == 1 then
+                  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+                end
                 return 1
                 """;
             var result = (long)await redis.GetDatabase()

@@ -148,7 +148,7 @@ Bu tasarım bilinçlidir: Redis'in geçici olarak erişilememesi kullanıcıyı 
 hata aldığında `LogWarning` ile loglayıp istek path'inin devam etmesine izin verir
 (**fail-open**). Tasarım nedenleri:
 
-1. **Kullanıcı UX'i:** Tek nokta arıza (Redis flap, cluster failover) tüm ücretsiz
+1. **Kullanıcı UX'i:** Tek nokta arızası (Redis flap, cluster failover) tüm ücretsiz
    kullanıcıları "günlük limit doluymuş gibi" bloklamamalı.
 2. **Plan kuralları DB'den okunur:** Limit kontrolü ikincil savunma; ana plan/sınır
    kuralları PostgreSQL'deki `users` ve `PlanOptions`'tan gelir.
