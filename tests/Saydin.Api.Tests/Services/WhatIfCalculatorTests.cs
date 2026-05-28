@@ -203,16 +203,19 @@ public class WhatIfCalculatorTests
 
     // ── Validasyon ───────────────────────────────────────────────────────────
 
+    // P1R-003: deviceId boş/whitespace artık `ValidationException` üretir (handler
+    // yalnızca domain validation ile uğraşır, jenerik ArgumentException 500'e gider).
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    public async Task CalculateAsync_EmptyDeviceId_ThrowsArgumentException(string deviceId)
+    public async Task CalculateAsync_EmptyDeviceId_ThrowsValidationException(string deviceId)
     {
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
         var act = () => _sut.CalculateAsync(deviceId, request, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ArgumentException>();
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == "deviceId");
     }
 
     [Fact]
@@ -884,6 +887,96 @@ public class WhatIfCalculatorTests
         result.Results[0].Calculation.ProfitLossPercent.Should().BeGreaterThan(
             result.Results[1].Calculation.ProfitLossPercent);
         result.Results[1].Rank.Should().Be(2);
+    }
+
+    // P1R-014: Multi-symbol ranking — 3, 4, 5 sembol için Rank pozisyonları doğru;
+    // aynı `ProfitLossPercent`'e sahip semboller arasında OrderByDescending stable
+    // davranır (LINQ Enumerable.OrderByDescending kararlı bir sıralama uygular).
+    [Theory]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public async Task CompareAsync_MultiSymbol_RanksAllPositionsByProfitDescending(int symbolCount)
+    {
+        // Her sembol için farklı sell price → farklı ProfitLossPercent.
+        // Buy price 10, sell price 10+i*5 → kâr i*50% (i=1..5).
+        // Sembol-i'nin daha yüksek olduğu için Rank=1 i=N, Rank=N i=1.
+        var symbols = Enumerable.Range(1, symbolCount).Select(i => $"SYM{i}").ToList();
+
+        for (var i = 0; i < symbolCount; i++)
+        {
+            var sym  = symbols[i];
+            var sell = 10m + (i + 1) * 5m;
+            var asset = new Asset
+            {
+                Id          = Guid.Parse($"eeeeeeee-0000-0000-0000-{i + 1:D12}"),
+                Symbol      = sym,
+                DisplayName = sym,
+                Category    = AssetCategory.Currency,
+                Source      = "tcmb",
+                IsActive    = true
+            };
+            _assetService.GetBySymbolAsync(sym, Arg.Any<CancellationToken>()).Returns(asset);
+            _assetService.GetNearestPriceAsync(sym, BuyDate, Arg.Any<CancellationToken>())
+                         .Returns(new PricePoint { AssetId = asset.Id, PriceDate = BuyDate,  Close = 10m  });
+            _assetService.GetNearestPriceAsync(sym, SellDate, Arg.Any<CancellationToken>())
+                         .Returns(new PricePoint { AssetId = asset.Id, PriceDate = SellDate, Close = sell });
+        }
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(SellDate);
+
+        var request = new CompareRequest(symbols, BuyDate, SellDate, 1000m, "try");
+
+        var result = await _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.Results.Should().HaveCount(symbolCount);
+
+        // Tüm Rank'lar 1..N arasında benzersiz ve azalan ProfitLossPercent sırasında.
+        result.Results.Select(r => r.Rank).Should().Equal(Enumerable.Range(1, symbolCount));
+        result.Results.Should().BeInDescendingOrder(r => r.Calculation.ProfitLossPercent);
+
+        // En tepedeki sembol en yüksek sell price'a sahip olan olmalı.
+        result.Results[0].Calculation.AssetSymbol.Should().Be(symbols[symbolCount - 1]);
+        result.Results[^1].Calculation.AssetSymbol.Should().Be(symbols[0]);
+    }
+
+    // P1R-014: Aynı `ProfitLossPercent`'e sahip semboller — Rank yine benzersiz 1..N
+    // olarak atanır; LINQ stable sort sayesinde girdi sırası tiebreak'i belirler.
+    [Fact]
+    public async Task CompareAsync_DuplicateProfitPercent_AssignsUniqueRanksDeterministically()
+    {
+        var assetA = new Asset
+        {
+            Id = Guid.Parse("ffffffff-0000-0000-0000-000000000001"),
+            Symbol = "AAA", DisplayName = "A", Category = AssetCategory.Currency,
+            Source = "tcmb", IsActive = true
+        };
+        var assetB = new Asset
+        {
+            Id = Guid.Parse("ffffffff-0000-0000-0000-000000000002"),
+            Symbol = "BBB", DisplayName = "B", Category = AssetCategory.Currency,
+            Source = "tcmb", IsActive = true
+        };
+        _assetService.GetBySymbolAsync("AAA", Arg.Any<CancellationToken>()).Returns(assetA);
+        _assetService.GetBySymbolAsync("BBB", Arg.Any<CancellationToken>()).Returns(assetB);
+
+        foreach (var (sym, id) in new[] { ("AAA", assetA.Id), ("BBB", assetB.Id) })
+        {
+            _assetService.GetNearestPriceAsync(sym, BuyDate, Arg.Any<CancellationToken>())
+                         .Returns(new PricePoint { AssetId = id, PriceDate = BuyDate,  Close = 10m });
+            _assetService.GetNearestPriceAsync(sym, SellDate, Arg.Any<CancellationToken>())
+                         .Returns(new PricePoint { AssetId = id, PriceDate = SellDate, Close = 15m });
+        }
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(SellDate);
+
+        var request = new CompareRequest(["AAA", "BBB"], BuyDate, SellDate, 1000m, "try");
+        var result  = await _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.Results.Select(r => r.Rank).Should().Equal(1, 2);
+        // Eşit ProfitLossPercent → her iki sembol de aynı yüzdeye sahip olmalı.
+        result.Results[0].Calculation.ProfitLossPercent
+              .Should().Be(result.Results[1].Calculation.ProfitLossPercent);
     }
 
     // ── CompareAsync Distinct Validation ───────────────────────────────────

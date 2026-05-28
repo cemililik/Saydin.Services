@@ -37,6 +37,15 @@ public static class TcmbMapper
     }
 
     /// <summary>
+    /// Önceden parse edilmiş XDocument üzerinden tek sembol için PricePoint üretir.
+    /// Adapter cache aynı günün XDocument'ini tek sefer parse edip N sembol için
+    /// yeniden kullanır (review F1.1-2: 20 yıl × 30 sembol senaryosunda
+    /// XDocument.Parse ~150k → ~5200).
+    /// </summary>
+    public static PricePoint? Map(XDocument doc, Guid assetId, string currencyCode, DateOnly date) =>
+        MapInternal(doc, assetId, currencyCode, date);
+
+    /// <summary>
     /// XML'i bir kez parse edip aynı doc üzerinden N para birimi için PricePoint üretir
     /// (review F1.1-2: TCMB tek günlük XML tüm sembolleri içerir; gün-bazlı dedup).
     /// </summary>

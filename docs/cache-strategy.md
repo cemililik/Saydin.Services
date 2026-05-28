@@ -142,6 +142,28 @@ Redis bağlantı hatasında:
 
 Bu tasarım bilinçlidir: Redis'in geçici olarak erişilememesi kullanıcıyı bloke etmemeli.
 
+### DailyLimitGuard fail-open politikası (review P1R-006)
+
+`DailyLimitGuard.CheckAsync` / `TryAcquireAsync` / `ReleaseAsync` Redis erişiminde
+hata aldığında `LogWarning` ile loglayıp istek path'inin devam etmesine izin verir
+(**fail-open**). Tasarım nedenleri:
+
+1. **Kullanıcı UX'i:** Tek nokta arıza (Redis flap, cluster failover) tüm ücretsiz
+   kullanıcıları "günlük limit doluymuş gibi" bloklamamalı.
+2. **Plan kuralları DB'den okunur:** Limit kontrolü ikincil savunma; ana plan/sınır
+   kuralları PostgreSQL'deki `users` ve `PlanOptions`'tan gelir.
+
+**Risk:** Bir saldırgan Redis'i bilinçli olarak bozarsa rate limit devre dışı kalır
+ve DDoS koruması zayıflar. Bu nedenle:
+
+- `redis` health check sağlıksız olduğunda operasyon ekibi alarmlanmalı
+  (`Program.cs` `AddHealthChecks().AddRedis(..., tags: ["cache"])` Aspire Dashboard /
+  Prometheus tarafından izlenir).
+- WAF/CDN katmanında genel rate limit (per-IP) ayrıca uygulanmalı —
+  `DailyLimitGuard` yalnızca application-tier kotadır.
+- Lua script `ScriptEvaluateAsync` dönüşü cast hatası fırlatırsa da aynı fail-open
+  yoluna düşer (orijinal exception loglanır, request engellenmez).
+
 ---
 
 ## Cache'i Etkileyen Kod Değişikliklerinde Yapılacaklar

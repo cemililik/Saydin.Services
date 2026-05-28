@@ -38,7 +38,11 @@ public sealed class SavedScenarioService(
     public async Task<ScenarioResponse> SaveScenarioAsync(
         string deviceId, SaveScenarioRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
+        // P1R-003: domain ValidationException ile guard — altyapı kaynaklı ArgumentException
+        // (Redis/EF Core) artık ValidationExceptionHandler tarafından 400'e dönmez.
+        if (request is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
 
         var user = await GetOrCreateUserAsync(deviceId, ct);
 

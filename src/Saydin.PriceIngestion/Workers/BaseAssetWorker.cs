@@ -62,9 +62,13 @@ public abstract class BaseAssetWorker(
     {
         await BackfillAsync(ct);
 
-        // F1.1-11: Backfill bittiğinde bugünün scheduled saati geçmişse derhal
-        // günün verisini çek; aksi halde 24 saat boyunca eksik günlük veri olur.
-        if (!ct.IsCancellationRequested && IsScheduledTimePassedToday())
+        // F1.1-11 / P1R-005: Backfill bittiğinde TargetDate'in verisi henüz yoksa
+        // derhal çek. Önceki kod yalnızca `IsScheduledTimePassedToday()` kontrolü
+        // yapıyordu; uzun bir backfill gece yarısını aşarsa (örn. 23:00→04:00 ertesi
+        // gün) scheduled time hâlâ bugün gelmemiş gibi görünür ve günlük veri 24 saate
+        // kadar eksik kalırdı. Persisted-state tabanlı kontrol (latestStored < target)
+        // saat-bağımsız ve idempotent.
+        if (!ct.IsCancellationRequested && await IsImmediateFetchNeededAsync(ct))
         {
             try
             {
@@ -99,6 +103,28 @@ public abstract class BaseAssetWorker(
         var now = DateTime.UtcNow;
         var scheduledToday = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
         return now >= scheduledToday;
+    }
+
+    /// <summary>
+    /// FetchToday'ı backfill sonrası tetikleyip tetiklememeyi kararlaştırır.
+    /// İki koşul: (1) bugünün scheduled saati geçmiş; (2) herhangi bir aktif
+    /// asset için en son saklanan tarih TargetDate'in gerisinde — yani backfill
+    /// gece yarısını aşmış ve dünün günlük çekimi atlanmış olabilir (review P1R-005).
+    /// </summary>
+    private async Task<bool> IsImmediateFetchNeededAsync(CancellationToken ct)
+    {
+        if (IsScheduledTimePassedToday())
+            return true;
+
+        var target = TargetDate(DateTime.UtcNow);
+        var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
+        foreach (var asset in assets)
+        {
+            var latest = await repository.GetLatestPriceDateAsync(asset.Id, ct);
+            if (latest is null || latest.Value < target)
+                return true;
+        }
+        return false;
     }
 
     private async Task BackfillAsync(CancellationToken ct)

@@ -1,7 +1,9 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /app
 
-COPY Directory.Build.props ./
+# Directory.Packages.props: Central Package Management — csproj'lar Version belirtmiyor,
+# tüm versiyonlar bu dosyadan gelir. COPY zincirinden düşerse `dotnet restore` NU1015 verir.
+COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Saydin.Shared/Saydin.Shared.csproj src/Saydin.Shared/
 COPY src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj src/Saydin.PriceIngestion/
 RUN dotnet restore src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj

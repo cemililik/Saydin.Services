@@ -86,7 +86,7 @@ grep -rnE 'Log(Information|Warning|Error|Debug|Critical)\(\$"' \
     src/ --include="*.cs"
 ```
 
-### 5. Zorunlu Kodlama Kalıpları
+### 6. Zorunlu Kodlama Kalıpları
 
 ```bash
 # IHostedService'in CancellationToken alması gerekir

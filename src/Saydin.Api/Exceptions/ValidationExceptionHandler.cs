@@ -16,37 +16,22 @@ public sealed class ValidationExceptionHandler(
         Exception exception,
         CancellationToken cancellationToken)
     {
-        // F1.2-6: Domain `ValidationException` ek olarak `ArgumentException` da yakalanır
-        // (örn. `ArgumentException.ThrowIfNullOrWhiteSpace(deviceId)` — istek boyunca asla
-        // ulaşılmaması gereken guard'lar). Bu sayede 500 yerine 400 döner ve mesaj
-        // kullanıcıya teknik bilgi sızdırmadan lokalize edilir.
-        string? detailMessage;
-        string? field;
+        // F1.2-6 / P1R-003: Yalnızca domain `ValidationException` handle edilir.
+        // Önceki sürümde `ArgumentException` da yakalanıyordu, ancak base tip
+        // framework ve altyapı katmanlarından (Redis/EF Core/Npgsql) da fırlatılır;
+        // bu hatalar 400 olarak yansıtıldığında kök sebep 5xx alarm/dashboard'lardan
+        // gizlenir. Servis katmanı artık deviceId/null/whitespace guard'larını
+        // doğrudan `ValidationException` ile yapıyor — handler de yalnızca domain
+        // exception'ı işliyor, jenerik `ArgumentException` GlobalExceptionHandler'a
+        // bırakılıp 500 üretiyor.
+        if (exception is not ValidationException ex)
+            return false;
 
-        switch (exception)
-        {
-            case ValidationException ex:
-                detailMessage = ex.Detail;
-                field = ex.Field;
-                logger.LogInformation(
-                    "Geçersiz istek alanı: {Field} — {Detail}",
-                    field ?? "(none)", detailMessage);
-                break;
-
-            case ArgumentException argEx:
-                // ArgumentException.ParamName teknik bir field adıdır; logged'da paylaşılır
-                // ama response'da gösterilmez (kullanıcıya internal field isimlerini sızdırma).
-                field = null;
-                detailMessage = localizer["ValidationFailed"];
-                logger.LogWarning(
-                    argEx,
-                    "ArgumentException → 400 ValidationFailed (ParamName: {ParamName})",
-                    argEx.ParamName ?? "(none)");
-                break;
-
-            default:
-                return false;
-        }
+        var detailMessage = ex.Detail;
+        var field = ex.Field;
+        logger.LogInformation(
+            "Geçersiz istek alanı: {Field} — {Detail}",
+            field ?? "(none)", detailMessage);
 
         httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
 

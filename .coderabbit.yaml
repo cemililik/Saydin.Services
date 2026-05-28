@@ -37,9 +37,14 @@ reviews:
         API key'ler appsettings.json'a yazılmamalı; env var veya user-secrets.
         Endpoint'ler `RequireDeviceId()` filter'ı uygulamalı (anonim erişime kapalı).
         OpenAPI typed result (`TypedResults.Ok<T>`) kullanımı önerilir.
-        IExceptionHandler zinciri: `PriceNotFoundExceptionHandler →
-        AssetNotFoundExceptionHandler → ValidationExceptionHandler →
-        ExternalApiExceptionHandler → ... → GlobalExceptionHandler` (sonda).
+        IExceptionHandler zinciri: `Program.cs` AddExceptionHandler<...> kayıtlarının
+        gerçek sırası referans alınır; `GlobalExceptionHandler` her zaman zincirin
+        **sonunda** (catch-all) ve `traceId` üretmek zorunludur. Her domain exception
+        için ayrı handler vardır (PriceNotFound / AssetNotFound / Validation /
+        FeatureDisabled / ExternalApi / ScenarioNotFound / ScenarioLimitExceeded /
+        DailyLimitExceeded). ValidationExceptionHandler yalnızca domain
+        `ValidationException` yakalar — jenerik `ArgumentException` GlobalExceptionHandler'a
+        bırakılır (P1R-003).
         Kullanıcıya dönecek tüm string'ler `IStringLocalizer<ErrorMessages>` ile lokalize.
         Hardcoded Türkçe/İngilizce YASAK.
 

@@ -27,8 +27,8 @@ public sealed class WhatIfCalculator(
 
     public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequest(request);
+        EnsureDeviceId(deviceId);
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsurePositive(request.Amount, nameof(request.Amount));
@@ -56,8 +56,8 @@ public sealed class WhatIfCalculator(
 
     public async Task<CompareResponse> CompareAsync(string deviceId, CompareRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequest(request);
+        EnsureDeviceId(deviceId);
 
         if (request.AssetSymbols is null)
             throw new ValidationException(
@@ -124,8 +124,8 @@ public sealed class WhatIfCalculator(
     public async Task<ReverseWhatIfResponse> CalculateReverseAsync(
         string deviceId, ReverseWhatIfRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequest(request);
+        EnsureDeviceId(deviceId);
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.TargetAmountType, nameof(request.TargetAmountType));
         EnsurePositive(request.TargetAmount, nameof(request.TargetAmount));
@@ -463,6 +463,23 @@ public sealed class WhatIfCalculator(
         if (string.IsNullOrWhiteSpace(value))
             throw new ValidationException(
                 string.Format(localizer["RequestPayloadMissing"], field), field: field);
+    }
+
+    // P1R-003: ArgumentException base type framework / altyapı tarafından da fırlatılır
+    // (Redis bağlantı yapılandırma, EF Core, Npgsql vs.). Endpoint katmanından gelen
+    // request/deviceId guard'larını domain ValidationException'a çevirerek
+    // ValidationExceptionHandler'ın ArgumentException case'ini kaldırabilir hale getirdik.
+    private void EnsureRequest(object? request)
+    {
+        if (request is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+    }
+
+    private void EnsureDeviceId(string? deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+            throw new ValidationException(localizer["DeviceIdRequiredDetail"], field: "deviceId");
     }
 
     // F1.9-4 ([C-F-14]): Negatif / sıfır amount semantik olarak anlamsız —

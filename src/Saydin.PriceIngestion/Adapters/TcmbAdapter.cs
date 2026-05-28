@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Xml;
+using System.Xml.Linq;
 using Saydin.PriceIngestion.Mappers;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -21,10 +22,12 @@ public sealed class TcmbAdapter(
 {
     public string Source => "tcmb";
 
-    // F1.1-2: gün-bazlı XML cache. SemaphoreSlim/once-per-day fetch eşzamanlılık
-    // koruması için ayrıca AsyncLazy + ConcurrentDictionary tercih edildi:
-    // ilk symbol için fetch çalışırken aynı gün için bekleyen diğer symbol'lerin
-    // tetiklediği fetch'ler aynı Task.Result'ı paylaşır.
+    // F1.1-2: gün-bazlı XDocument cache. SemaphoreSlim/once-per-day fetch eşzamanlılık
+    // koruması için AsyncLazy + ConcurrentDictionary tercih edildi: ilk symbol için
+    // fetch çalışırken aynı gün için bekleyen diğer symbol'lerin tetiklediği fetch'ler
+    // aynı Task.Result'ı paylaşır. XML metni yerine **parse edilmiş XDocument**
+    // tutulur — aynı günün 30 sembolünde XDocument.Parse 30 değil 1 kez çalışır
+    // (review P1R-002: parse-once optimizasyonu).
     private readonly ConcurrentDictionary<DateOnly, CachedXmlEntry> _dayCache = new();
     // 20 yıllık backfill yaklaşık 5200 iş günü XML üretir (5KB × 5200 ≈ 26MB).
     // 60 dakika TTL aynı backfill cycle içinde tüm sembollere yetecek cache hit'i sağlar;
@@ -77,10 +80,10 @@ public sealed class TcmbAdapter(
         DateOnly date,
         CancellationToken ct)
     {
-        string? xml;
+        XDocument? doc;
         try
         {
-            xml = await GetOrFetchDayXmlAsync(client, date, ct);
+            doc = await GetOrFetchDayXmlAsync(client, date, ct);
         }
         catch (HttpRequestException ex)
         {
@@ -89,18 +92,19 @@ public sealed class TcmbAdapter(
             throw new ExternalApiException(Source,
                 $"TCMB XML alınamadı ({date:yyyy-MM-dd} {xmlCurrencyCode})", ex);
         }
+        catch (XmlException ex)
+        {
+            // Cache fetch'inde bozuk XML — gün boyunca tüm semboller için "veri yok"
+            // sayılır (parse-once: aynı XDocument tüm sembollere fail eder).
+            logger.LogWarning(ex, "TCMB XML çözümlenemedi: {Date} {CurrencyCode}", date, xmlCurrencyCode);
+            return null;
+        }
 
-        if (xml is null) return null;  // 404 — TCMB resmi tatil
+        if (doc is null) return null;  // 404 — TCMB resmi tatil
 
         try
         {
-            return TcmbMapper.Map(xml, assetId, xmlCurrencyCode, date);
-        }
-        catch (XmlException ex)
-        {
-            // F1.1-3: Yalnızca bozuk XML'i tek-gün "veri yok" olarak yumuşat.
-            logger.LogWarning(ex, "TCMB XML çözümlenemedi: {Date} {CurrencyCode}", date, xmlCurrencyCode);
-            return null;
+            return TcmbMapper.Map(doc, assetId, xmlCurrencyCode, date);
         }
         catch (FormatException ex)
         {
@@ -110,7 +114,7 @@ public sealed class TcmbAdapter(
         }
     }
 
-    private async Task<string?> GetOrFetchDayXmlAsync(
+    private async Task<XDocument?> GetOrFetchDayXmlAsync(
         HttpClient client, DateOnly date, CancellationToken ct)
     {
         // Race-free: aynı tarih için eşzamanlı fetch'i tek bir Task'a indir.
@@ -130,7 +134,7 @@ public sealed class TcmbAdapter(
         }
     }
 
-    private async Task<string?> FetchDayXmlAsync(
+    private async Task<XDocument?> FetchDayXmlAsync(
         HttpClient client, DateOnly date, CancellationToken ct)
     {
         // URL formatı: YYYYMM/DDMMYYYY.xml (base address ile birleşir)
@@ -146,7 +150,10 @@ public sealed class TcmbAdapter(
         }
 
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var xml = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        // P1R-002: parse'ı cache'in iç tarafında bir kez yap. Çağıran sembolün
+        // sayısı kadar XDocument.Parse çağırmaktan kaçınılır.
+        return XDocument.Parse(xml);
     }
 
     private void PurgeExpiredCacheEntries()
@@ -172,5 +179,5 @@ public sealed class TcmbAdapter(
         }
     }
 
-    private sealed record CachedXmlEntry(Task<string?> XmlTask, DateTime CreatedAtUtc);
+    private sealed record CachedXmlEntry(Task<XDocument?> XmlTask, DateTime CreatedAtUtc);
 }

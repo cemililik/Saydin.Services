@@ -30,8 +30,15 @@ public sealed class DcaCalculator(
 
     public async Task<DcaResponse> CalculateAsync(string deviceId, DcaRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        // P1R-003: domain ValidationException ile guard — handler'ın ArgumentException
+        // catch'i altyapı/framework hatalarını yutmasın diye request/deviceId null check'i
+        // burada explicit yapılır.
+        if (request is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+        if (string.IsNullOrWhiteSpace(deviceId))
+            throw new ValidationException(localizer["DeviceIdRequiredDetail"], field: "deviceId");
+
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsureRequired(request.Period, nameof(request.Period));
