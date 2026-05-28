@@ -24,22 +24,25 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
     public async Task<PricePoint?> GetNearestPriceAsync(
         string symbol, DateOnly date, int maxDays, CancellationToken ct)
     {
-        // Önce geriye: date'e eşit veya önceki en yakın gün
-        var backward = await context.PricePoints
-            .Where(pp => pp.Asset.Symbol == symbol
-                      && pp.PriceDate >= date.AddDays(-maxDays)
-                      && pp.PriceDate <= date)
-            .OrderByDescending(pp => pp.PriceDate)
-            .FirstOrDefaultAsync(ct);
+        // F2.3-2 ([C-C-4]): Tek sorgu — aday penceredeki tüm noktalar arasında
+        // "backward öncelikli" sıralama. Önceki sürüm happy path'te bile her
+        // çağrıda 2 roundtrip yapıyordu (backward, sonra forward fallback).
+        // Yeni sürümde:
+        //   1) priority = 0 → PriceDate ≤ date (backward),
+        //                = 1 → PriceDate > date (forward),
+        //   2) priority içinde target'a en yakın gün önce.
+        // Backward grup içinde "en büyük PriceDate" (date'e en yakın),
+        // forward grup içinde "en küçük PriceDate" (date'in hemen üstündeki gün).
+        var minDate = date.AddDays(-maxDays);
+        var maxDate = date.AddDays(maxDays);
 
-        if (backward is not null) return backward;
-
-        // Fallback: sonraki en yakın gün (tatil başında backfill henüz tamamlanmamış olabilir)
         return await context.PricePoints
             .Where(pp => pp.Asset.Symbol == symbol
-                      && pp.PriceDate > date
-                      && pp.PriceDate <= date.AddDays(maxDays))
-            .OrderBy(pp => pp.PriceDate)
+                      && pp.PriceDate >= minDate
+                      && pp.PriceDate <= maxDate)
+            .OrderBy(pp => pp.PriceDate > date ? 1 : 0)
+            .ThenByDescending(pp => pp.PriceDate <= date ? pp.PriceDate : minDate)
+            .ThenBy(pp => pp.PriceDate > date ? pp.PriceDate : maxDate)
             .FirstOrDefaultAsync(ct);
     }
 

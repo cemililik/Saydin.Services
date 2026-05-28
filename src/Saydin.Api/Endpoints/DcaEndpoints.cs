@@ -14,6 +14,10 @@ public static class DcaEndpoints
         group.MapPost("/dca", CalculateDcaAsync)
             .WithName("CalculateDca")
             .WithSummary("DCA (Dollar-Cost Averaging) hesabı yapar")
+            .Produces<Models.Responses.DcaResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .RequireDeviceId();
 
         return app;

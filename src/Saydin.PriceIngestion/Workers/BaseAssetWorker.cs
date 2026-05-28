@@ -58,6 +58,16 @@ public abstract class BaseAssetWorker(
     protected virtual DateOnly TargetDate(DateTime utcNow) =>
         DateOnly.FromDateTime(utcNow.Date);
 
+    /// <summary>
+    /// F2.4-9 ([G-D-04]): Varsayılan olarak <c>false</c> — backfill yalnız "latestDate
+    /// sonrasını" kovalar (orijinal davranış). Override edilirse <see cref="BackfillAsync"/>
+    /// `[BackfillStartDate, yesterday]` aralığındaki tüm boşlukları DB'de var olmayan
+    /// tarih kümesinden hedefler. Hafta sonu/tatil "boş" olduğu kaynaklar (TCMB, OXR)
+    /// bunu açmamalı — gereksiz API çağrısı yaratır. Crypto (CoinGecko, 7/24 piyasa)
+    /// için uygundur.
+    /// </summary>
+    protected virtual bool EnableGapAwareBackfill => false;
+
     public async Task RunAsync(CancellationToken ct)
     {
         await BackfillAsync(ct);
@@ -137,10 +147,19 @@ public abstract class BaseAssetWorker(
 
         foreach (var asset in assets)
         {
-            var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
-            var effectiveStart = BackfillStartDate;
-            var from = latestDate?.AddDays(1) ?? effectiveStart;
             var to = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-1));
+
+            // F2.4-9: Gap-aware mode (yalnız 7/24 piyasalar için) tüm aralıkta var
+            // olmayan tarihleri hedefler. Default davranış (latestDate sonrası tek blok)
+            // hafta sonu/tatil "boş" olan kaynaklarda gereksiz API çağrısı yaratmaz.
+            if (EnableGapAwareBackfill)
+            {
+                await BackfillGapsAsync(asset, BackfillStartDate, to, ct);
+                continue;
+            }
+
+            var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
+            var from = latestDate?.AddDays(1) ?? BackfillStartDate;
 
             if (from > to)
             {
@@ -150,21 +169,78 @@ public abstract class BaseAssetWorker(
             }
 
             logger.LogInformation("{Symbol} backfill başlıyor: {From} → {To}", asset.Symbol, from, to);
+            await BackfillChunkedAsync(asset, from, to, ct);
+        }
+    }
 
-            var chunkFrom = from;
-            while (chunkFrom <= to && !ct.IsCancellationRequested)
+    private async Task BackfillGapsAsync(Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        if (from > to) return;
+        var existing = await repository.GetExistingDatesAsync(asset.Id, from, to, ct);
+        var missingRanges = ComputeMissingRanges(from, to, existing);
+
+        if (missingRanges.Count == 0)
+        {
+            logger.LogInformation("{Symbol} için backfill gerekmiyor (tüm aralık DB'de mevcut)", asset.Symbol);
+            return;
+        }
+
+        logger.LogInformation(
+            "{Symbol} gap-aware backfill: {RangeCount} eksik blok ({From}..{To})",
+            asset.Symbol, missingRanges.Count, from, to);
+
+        foreach (var (rangeFrom, rangeTo) in missingRanges)
+        {
+            if (ct.IsCancellationRequested) break;
+            await BackfillChunkedAsync(asset, rangeFrom, rangeTo, ct);
+        }
+    }
+
+    private async Task BackfillChunkedAsync(Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var chunkFrom = from;
+        while (chunkFrom <= to && !ct.IsCancellationRequested)
+        {
+            var chunkTo = chunkFrom.AddDays(ChunkDays - 1);
+            if (chunkTo > to) chunkTo = to;
+
+            await FetchAndUpsertAsync(asset, chunkFrom, chunkTo,
+                IngestionJobTypes.HistoricalBackfill, ct);
+            chunkFrom = chunkTo.AddDays(1);
+
+            if (ChunkDelay > TimeSpan.Zero && chunkFrom <= to)
+                await Task.Delay(ChunkDelay, ct);
+        }
+    }
+
+    /// <summary>
+    /// F2.4-9: <paramref name="existing"/> kümesi temel alınarak <paramref name="from"/> ↔
+    /// <paramref name="to"/> aralığında bitişik eksik gün bloklarını döner.
+    /// Açgözlü tarama, O(<c>to-from</c>) zaman; test kapsamı kolay.
+    /// </summary>
+    internal static List<(DateOnly From, DateOnly To)> ComputeMissingRanges(
+        DateOnly from, DateOnly to, IReadOnlySet<DateOnly> existing)
+    {
+        var result = new List<(DateOnly, DateOnly)>();
+        DateOnly? rangeStart = null;
+        for (var d = from; d <= to; d = d.AddDays(1))
+        {
+            if (existing.Contains(d))
             {
-                var chunkTo = chunkFrom.AddDays(ChunkDays - 1);
-                if (chunkTo > to) chunkTo = to;
-
-                await FetchAndUpsertAsync(asset, chunkFrom, chunkTo,
-                    IngestionJobTypes.HistoricalBackfill, ct);
-                chunkFrom = chunkTo.AddDays(1);
-
-                if (ChunkDelay > TimeSpan.Zero && chunkFrom <= to)
-                    await Task.Delay(ChunkDelay, ct);
+                if (rangeStart.HasValue)
+                {
+                    result.Add((rangeStart.Value, d.AddDays(-1)));
+                    rangeStart = null;
+                }
+            }
+            else
+            {
+                rangeStart ??= d;
             }
         }
+        if (rangeStart.HasValue)
+            result.Add((rangeStart.Value, to));
+        return result;
     }
 
     private async Task FetchTodayAsync(CancellationToken ct)

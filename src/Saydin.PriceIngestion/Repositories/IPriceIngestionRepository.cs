@@ -15,4 +15,10 @@ public interface IPriceIngestionRepository
 
     /// <summary>Asset için veritabanındaki en son fiyat tarihini döner. Veri yoksa null.</summary>
     Task<DateOnly?> GetLatestPriceDateAsync(Guid assetId, CancellationToken ct);
+
+    /// <summary>
+    /// F2.4-9: Belirtilen aralıkta asset için DB'de var olan price_date kümesini döner.
+    /// Worker bu seti tamamlayıcı tarihlere doğru gap-aware backfill yapar.
+    /// </summary>
+    Task<IReadOnlySet<DateOnly>> GetExistingDatesAsync(Guid assetId, DateOnly from, DateOnly to, CancellationToken ct);
 }

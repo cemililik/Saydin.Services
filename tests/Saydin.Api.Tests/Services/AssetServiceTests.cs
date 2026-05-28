@@ -143,9 +143,10 @@ public class AssetServiceTests
     [Fact]
     public async Task GetAllAssetInfoAsync_CacheHit_SkipsRepository_AndReturnsCachedList()
     {
+        // F2.3-7: AssetResponse.Category artık string (snake_case server-side projeksiyon).
         var cachedList = new List<AssetResponse>
         {
-            new("USDTRY", "Dolar/TL", AssetCategory.Currency,
+            new("USDTRY", "Dolar/TL", "currency",
                 new DateOnly(2020, 1, 1), new DateOnly(2024, 12, 31))
         };
 

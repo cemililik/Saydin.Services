@@ -28,3 +28,19 @@ scrape_configs:
   #   1. OTel Collector aracılığıyla Prometheus remote write (ADR adayı, Faz 4)
   #   2. Aspire Dashboard'un metrics view'ı yeterli kabul edilir (mevcut durum)
   # Karar verilene kadar bu job kapalı tutulur.
+
+  # F2.7-11 ([C-G-Prom-2]): PostgreSQL exporter scrape — connection count, lag,
+  # active queries gibi DB-side metrikler. docker-compose.yml içinde
+  # postgres-exporter servisi PORT 9187'de.
+  - job_name: postgres
+    static_configs:
+      - targets:
+          - postgres-exporter:9187
+
+  # F2.7-11 ([C-G-Prom-2]): Redis exporter scrape — keyspace size, hit ratio,
+  # latency gibi cache-side metrikler. docker-compose.yml içinde
+  # redis-exporter servisi PORT 9121'de.
+  - job_name: redis
+    static_configs:
+      - targets:
+          - redis-exporter:9121

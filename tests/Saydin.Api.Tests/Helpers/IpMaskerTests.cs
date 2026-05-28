@@ -54,4 +54,17 @@ public class IpMaskerTests
 
         masked.Should().Be(IPAddress.Parse("127.0.0.0"));
     }
+
+    [Fact]
+    public void Mask_IPv4MappedIPv6_NormalizesToIPv4ThenMasks()
+    {
+        // F2.1-10 ([C-A-30/31]): ::ffff:192.168.1.42 önce IPv4'e indirilmeli, son
+        // okteti sıfırlanmalı. Aksi halde 16 byte yol tüm adresi sıfırlayıp anlam kayboluyordu.
+        var v4Mapped = IPAddress.Parse("::ffff:192.168.1.42");
+
+        var masked = IpMasker.Mask(v4Mapped);
+
+        // IPv4'e indirildiği için 4 byte adres döner.
+        masked.Should().Be(IPAddress.Parse("192.168.1.0"));
+    }
 }

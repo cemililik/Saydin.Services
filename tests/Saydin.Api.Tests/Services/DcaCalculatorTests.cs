@@ -82,7 +82,15 @@ public class DcaCalculatorTests
         _assetNameLocalizer.Localize(Arg.Any<string>(), Arg.Any<string?>())
                            .Returns(ci => (string?)ci[1] ?? (string)ci[0]);
 
-        var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions());
+        // F2.2-22: Default test PlanOptions free PriceHistoryMonths sınırını kapatır,
+        // aksi halde geçmişe ait test BuyDate'leri "extended_history" sebebiyle
+        // FeatureDisabled fırlatır.
+        var defaultPlans = new PlanOptions
+        {
+            Free    = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } },
+            Premium = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } }
+        };
+        var options = Microsoft.Extensions.Options.Options.Create(defaultPlans);
         _sut = new DcaCalculator(
             _assetService, _scenarioRepository, _inflationRepository,
             _dailyLimitGuard, _cache, _assetNameLocalizer,

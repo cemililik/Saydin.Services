@@ -14,19 +14,35 @@ public static class WhatIfEndpoints
         var group = app.MapGroup("/v1/what-if")
             .WithTags("WhatIf");
 
+        // F2.1-4 ([C-A-13], [G-A-03]): Typed Results — OpenAPI şeması her endpoint için
+        // explicit dönüş tipi + olası problem kodlarını taşır. Default Results.Ok<T>
+        // gizli return type bilgisini OpenAPI'ye sızdırmaz; Produces<>().ProducesProblem
+        // ile şema tam tanımlı olur.
         group.MapPost("/calculate", CalculateAsync)
             .WithName("CalculateWhatIf")
             .WithSummary("Ya-alsaydım hesabı yapar")
+            .Produces<Models.Responses.WhatIfResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .RequireDeviceId();
 
         group.MapPost("/compare", CompareAsync)
             .WithName("CompareWhatIf")
             .WithSummary("Birden fazla varlık arasında ya-alsaydım karşılaştırması yapar (2-5 sembol)")
+            .Produces<Models.Responses.CompareResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .RequireDeviceId();
 
         group.MapPost("/reverse", ReverseCalculateAsync)
             .WithName("ReverseCalculateWhatIf")
             .WithSummary("Ters hesaplama: hedef tutardan gereken yatırımı hesaplar")
+            .Produces<Models.Responses.ReverseWhatIfResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .RequireDeviceId();
 
         return app;

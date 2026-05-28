@@ -130,4 +130,47 @@ public class ActivityLogBuilderTests
 
         log.IpAddress.Should().Be(System.Net.IPAddress.Parse("192.168.1.0"));
     }
+
+    [Fact]
+    public void Build_TruncatesOversizedHeaders()
+    {
+        // F2.1-12: DB kolon kapasitelerinin üstündeki header değerleri sessizce kırpılır.
+        // X-Device-OS: 30 karakter, X-App-Version: 50 karakter.
+        var longOs       = new string('A', 60);
+        var longVersion  = new string('B', 70);
+
+        var ctx = CreateHttpContext(deviceOs: longOs, appVersion: longVersion);
+
+        var log = new ActivityLogBuilder(ctx)
+            .WithAction("config_fetch")
+            .Build();
+
+        log.DeviceOs.Should().Be(new string('A', 30));
+        log.AppVersion.Should().Be(new string('B', 50));
+    }
+
+    [Fact]
+    public void Build_PreservesNormalSizedHeaders()
+    {
+        var ctx = CreateHttpContext(deviceOs: "android", appVersion: "0.1.1+43");
+
+        var log = new ActivityLogBuilder(ctx)
+            .WithAction("config_fetch")
+            .Build();
+
+        log.DeviceOs.Should().Be("android");
+        log.AppVersion.Should().Be("0.1.1+43");
+    }
+
+    [Fact]
+    public void Build_NoActionConfigured_ThrowsInvalidOperationException()
+    {
+        // F2.1-8: Build() çağrılmadan önce WithAction(...) zorunlu. Aksi durumda
+        // sessizce "unknown" yazmak yerine programcı hatası fail-fast yapılır.
+        var ctx = CreateHttpContext();
+
+        var act = () => new ActivityLogBuilder(ctx).Build();
+
+        act.Should().Throw<InvalidOperationException>();
+    }
 }

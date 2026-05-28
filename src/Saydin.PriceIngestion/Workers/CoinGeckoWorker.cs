@@ -24,4 +24,9 @@ public sealed class CoinGeckoWorker(
     // dakikasının partial verisi yanlış close olarak saklanır.
     protected override DateOnly TargetDate(DateTime utcNow) =>
         DateOnly.FromDateTime(utcNow.Date.AddDays(-1));
+
+    // F2.4-9: Kripto piyasaları 7/24 açık — her gün için fiyat noktası bulunur,
+    // dolayısıyla hafta sonu/tatil "legit hole" yoktur. Gap-aware backfill ile
+    // ingestion bir kez başarısız olmuş tarih bloklarını otomatik geri alır.
+    protected override bool EnableGapAwareBackfill => true;
 }

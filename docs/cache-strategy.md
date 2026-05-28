@@ -25,7 +25,7 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | Asset listesi | `assets:list` | 6 saat | `AssetService` |
 | Tek fiyat noktası | `price:{symbol}:{date}` | 24 saat | `AssetService` |
 | En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
-| Fiyat aralığı | `prices:{symbol}:{from}:{to}` | 1 saat | `AssetService` |
+| Fiyat aralığı | `prices:{symbol}:{from}:{to}:{interval}` | 1 saat | `AssetService` (F2.2-1: interval suffix Faz 2) |
 | En son fiyat tarihi | `latest_date:{symbol}` | 1 saat | `AssetService` |
 | DCA hesaplama | `dca:v1:{symbol}:{startDate}:{endDate}:{amount}:{period}:{amountType}{:inf?}:{lang}` | 1 saat | `DcaCalculator` |
 | Günlük kullanım sayacı (What-If) | `usage:whatif:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `DailyLimitGuard` |
@@ -36,6 +36,15 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 `whatif:v2:...` formatındaki `v2` prefix'i kasıtlıdır. Cache yapısını kıran bir değişiklik yapılırsa
 (yeni alan eklenmesi, format değişikliği) prefix'i `v3` olarak artır — eski key'ler TTL dolunca
 otomatik temizlenir, manuel flush gerekmez.
+
+### Faz 2 — Process-local Caches (Redis dışı)
+
+| Cache | Tip | Sınır | Eviction | Hedef |
+|---|---|---|---|---|
+| `AssetService` symbol→asset dict | `ConcurrentDictionary` | asset count'a göre versiyonlu | invalidasyon = count değişimi | F2.2-20 O(1) sembol lookup |
+| `OpenExchangeRatesAdapter._dayCache` | `ConcurrentDictionary<DateOnly, CachedJson>` | 10k entry + 24sa TTL | en eski yarıyı at | F2.4-4 bellek kontrolü |
+| `TcmbAdapter` day-level XML | `ConcurrentDictionary<DateOnly, CachedXmlEntry>` | 10k entry + 60dk TTL | LRU benzeri | F1.1-2 day dedup |
+| `LastSeenThrottle` | `ConcurrentDictionary<Guid, DateTimeOffset>` | aktif user sayısı | 5dk pencere doğal overwrite | F2.2-12 last_seen throttling |
 
 ---
 

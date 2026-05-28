@@ -16,6 +16,10 @@ public sealed class AssetConfiguration : IEntityTypeConfiguration<Asset>
         builder.Property(a => a.Source).HasMaxLength(50).IsRequired();
         builder.Property(a => a.SourceId).HasMaxLength(100);
         builder.Property(a => a.Category).HasColumnType("asset_category");
+        // F2.5-1: assets.metadata JSONB kolonu Asset entity'sine bağlandı.
+        // Migration 001'de tanımlı kolon EF model tarafından da bilinmesi gerek —
+        // aksi halde Add-Migration sırasında "drop column metadata" üretilir.
+        builder.Property(a => a.Metadata).HasColumnType("jsonb");
 
         builder.HasIndex(a => a.Symbol).IsUnique().HasDatabaseName("uq_assets_symbol");
     }

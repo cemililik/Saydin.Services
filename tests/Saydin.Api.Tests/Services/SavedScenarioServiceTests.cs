@@ -16,6 +16,9 @@ public class SavedScenarioServiceTests
 {
     private readonly ISavedScenarioRepository _repository = Substitute.For<ISavedScenarioRepository>();
     private readonly IStringLocalizer<ErrorMessages> _localizer = Substitute.For<IStringLocalizer<ErrorMessages>>();
+    // F2.2-12: last_seen throttle gerçek implementasyonla beslenir (basit in-memory map).
+    // Throttle ilk çağrıda true döner; test'lerin çoğu tek çağrı ile çalışır.
+    private readonly ILastSeenThrottle _lastSeenThrottle = new LastSeenThrottle();
     private readonly SavedScenarioService _sut;
 
     private const string DeviceId = "test-device-001";
@@ -61,7 +64,7 @@ public class SavedScenarioServiceTests
         _localizer[Arg.Any<string>(), Arg.Any<object[]>()]
             .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
 
-        _sut = new SavedScenarioService(_repository, options, _localizer, NullLogger<SavedScenarioService>.Instance);
+        _sut = new SavedScenarioService(_repository, _lastSeenThrottle, options, _localizer, NullLogger<SavedScenarioService>.Instance);
     }
 
     // ── GetScenariosAsync ────────────────────────────────────────────────────
@@ -105,26 +108,29 @@ public class SavedScenarioServiceTests
     }
 
     [Fact]
-    public async Task GetScenariosAsync_NewDevice_CreatesUserAndReturnsEmptyList()
+    public async Task GetScenariosAsync_NewDevice_DoesNotCreateUserAndReturnsEmptyList()
     {
+        // F2.2-13: GET path'i artık user yaratma side-effect'i taşımaz.
+        // Cihazın kaydı yoksa repository çağrısı kısa devre yapar ve boş liste döner.
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns((User?)null);
-        _repository.CreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
-        _repository.GetByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>())
-                   .Returns(new List<SavedScenario>().AsReadOnly());
 
         var result = await _sut.GetScenariosAsync(DeviceId, CancellationToken.None);
 
         result.Should().BeEmpty();
-        await _repository.Received(1).CreateUserAsync(DeviceId, Arg.Any<CancellationToken>());
+        await _repository.DidNotReceive().GetOrCreateUserAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _repository.DidNotReceive().GetByUserIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task GetScenariosAsync_ExistingUser_UpdatesLastSeen()
+    public async Task GetScenariosAsync_ExistingUser_UpdatesLastSeenOnceThrottled()
     {
+        // F2.2-12: ilk çağrıda last_seen UPDATE atılır; aynı pencere içindeki ikinci
+        // çağrıda atılmaz.
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.GetByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>())
                    .Returns(new List<SavedScenario>().AsReadOnly());
 
+        await _sut.GetScenariosAsync(DeviceId, CancellationToken.None);
         await _sut.GetScenariosAsync(DeviceId, CancellationToken.None);
 
         await _repository.Received(1).UpdateUserLastSeenAsync(FreeUser, Arg.Any<CancellationToken>());
@@ -138,7 +144,7 @@ public class SavedScenarioServiceTests
         var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
             new DateOnly(2021, 1, 1), 10000m, "try", "Bitcoin yatırımım");
 
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
         _repository.GetActiveAssetBySymbolAsync("BTC", Arg.Any<CancellationToken>()).Returns(BtcAsset);
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
@@ -162,7 +168,7 @@ public class SavedScenarioServiceTests
         var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
             null, 10000m, "try", null);
 
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
         _repository.GetActiveAssetBySymbolAsync("BTC", Arg.Any<CancellationToken>()).Returns(BtcAsset);
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
@@ -180,7 +186,7 @@ public class SavedScenarioServiceTests
         var request = new SaveScenarioRequest("YOKASSET", "Bilinmeyen", new DateOnly(2020, 1, 1),
             null, 100m, "try", null);
 
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
         _repository.GetActiveAssetBySymbolAsync("YOKASSET", Arg.Any<CancellationToken>())
                    .Returns((Asset?)null);
@@ -192,14 +198,52 @@ public class SavedScenarioServiceTests
     }
 
     [Fact]
+    public async Task SaveScenarioAsync_DcaTypeWithUnknownAsset_ThrowsAssetNotFoundException()
+    {
+        // F2.6-9 ([C-F-27/28]): DCA scenario type için de FK kontrolü zorunlu.
+        var request = new SaveScenarioRequest("UNKNOWN", "Yok", new DateOnly(2020, 1, 1),
+            null, 100m, "try", null, Type: "dca");
+
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
+        _repository.GetActiveAssetBySymbolAsync("UNKNOWN", Arg.Any<CancellationToken>())
+                   .Returns((Asset?)null);
+
+        var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<AssetNotFoundException>()
+                 .Where(ex => ex.Symbol == "UNKNOWN");
+    }
+
+    [Fact]
+    public async Task SaveScenarioAsync_InvalidType_ThrowsValidationException()
+    {
+        // F2.6-9: bilinmeyen tip ScenarioTypes.All listesi dışında → 400.
+        var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
+            null, 100m, "try", null, Type: "unknown_type");
+
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
+
+        var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == "Type");
+    }
+
+    [Fact]
     public async Task SaveScenarioAsync_ComparisonType_SkipsAssetLookupAndSaves()
     {
-        var request = new SaveScenarioRequest("BTC,ETH", "Bitcoin, Ethereum",
+        // F2.3-6: comparison/portfolio tipinde server AssetSymbol'ü olduğu gibi alır
+        // (asset FK doğrulaması yok) ancak AssetDisplayName client'tan değil
+        // sembolün kendisinden türetilir — buradan istek satırından "Bitcoin, Ethereum"
+        // gibi keyfi metin sızmaz.
+        var request = new SaveScenarioRequest("BTC,ETH", "ClientTextIgnored",
             new DateOnly(2020, 1, 1), new DateOnly(2021, 1, 1),
             10000m, "try", "Kripto karşılaştırması",
             Type: "comparison");
 
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
@@ -208,7 +252,8 @@ public class SavedScenarioServiceTests
 
         result.Type.Should().Be("comparison");
         result.AssetSymbol.Should().Be("BTC,ETH");
-        result.AssetDisplayName.Should().Be("Bitcoin, Ethereum");
+        // F2.3-6: server-side display name = symbol (asset FK yoksa client metnine güvenilmez).
+        result.AssetDisplayName.Should().Be("BTC,ETH");
 
         // Asset FK araması yapılmamalı
         await _repository.DidNotReceive()
@@ -218,12 +263,12 @@ public class SavedScenarioServiceTests
     [Fact]
     public async Task SaveScenarioAsync_PortfolioType_SkipsAssetLookupAndSaves()
     {
-        var request = new SaveScenarioRequest("PORTFOLIO", "Portföyüm",
+        var request = new SaveScenarioRequest("PORTFOLIO", "ClientTextIgnored",
             new DateOnly(2020, 1, 1), null,
             50000m, "try", "Karışık portföy",
             Type: "portfolio");
 
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
@@ -232,7 +277,8 @@ public class SavedScenarioServiceTests
 
         result.Type.Should().Be("portfolio");
         result.AssetSymbol.Should().Be("PORTFOLIO");
-        result.AssetDisplayName.Should().Be("Portföyüm");
+        // F2.3-6: server-side display name = symbol.
+        result.AssetDisplayName.Should().Be("PORTFOLIO");
 
         // Asset FK araması yapılmamalı
         await _repository.DidNotReceive()
@@ -245,7 +291,7 @@ public class SavedScenarioServiceTests
         var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
             null, 100m, "try", null);
 
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(5);
 
         var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
@@ -260,7 +306,7 @@ public class SavedScenarioServiceTests
         var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
             null, 100m, "try", null);
 
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
+        _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(4);
         _repository.GetActiveAssetBySymbolAsync("BTC", Arg.Any<CancellationToken>()).Returns(BtcAsset);
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
@@ -277,7 +323,7 @@ public class SavedScenarioServiceTests
         var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
             null, 100m, "try", null);
 
-        _repository.GetUserByDeviceIdAsync("premium-device", Arg.Any<CancellationToken>()).Returns(PremiumUser);
+        _repository.GetOrCreateUserAsync("premium-device", Arg.Any<CancellationToken>()).Returns(PremiumUser);
         _repository.GetActiveAssetBySymbolAsync("BTC", Arg.Any<CancellationToken>()).Returns(BtcAsset);
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
@@ -289,14 +335,14 @@ public class SavedScenarioServiceTests
     }
 
     [Fact]
-    public async Task SaveScenarioAsync_NewDevice_CreatesUserBeforeSaving()
+    public async Task SaveScenarioAsync_NewDevice_GetOrCreatesUserBeforeSaving()
     {
         var request = new SaveScenarioRequest("BTC", "Bitcoin", new DateOnly(2020, 1, 1),
             null, 100m, "try", null);
         var newUser = new User { Id = Guid.NewGuid(), DeviceId = "new-device", Tier = "free" };
 
-        _repository.GetUserByDeviceIdAsync("new-device", Arg.Any<CancellationToken>()).Returns((User?)null);
-        _repository.CreateUserAsync("new-device", Arg.Any<CancellationToken>()).Returns(newUser);
+        // F2.3-8: yeni cihaz için atomik upsert + select tek bir repository çağrısı.
+        _repository.GetOrCreateUserAsync("new-device", Arg.Any<CancellationToken>()).Returns(newUser);
         _repository.CountByUserIdAsync(newUser.Id, Arg.Any<CancellationToken>()).Returns(0);
         _repository.GetActiveAssetBySymbolAsync("BTC", Arg.Any<CancellationToken>()).Returns(BtcAsset);
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
@@ -304,7 +350,7 @@ public class SavedScenarioServiceTests
 
         await _sut.SaveScenarioAsync("new-device", request, CancellationToken.None);
 
-        await _repository.Received(1).CreateUserAsync("new-device", Arg.Any<CancellationToken>());
+        await _repository.Received(1).GetOrCreateUserAsync("new-device", Arg.Any<CancellationToken>());
     }
 
     // ── DeleteScenarioAsync ──────────────────────────────────────────────────
@@ -362,18 +408,18 @@ public class SavedScenarioServiceTests
     }
 
     [Fact]
-    public async Task DeleteScenarioAsync_NewDevice_CreatesUserAndThrowsNotFound()
+    public async Task DeleteScenarioAsync_NewDevice_DoesNotCreateUserAndThrowsNotFound()
     {
+        // F2.2-13: DELETE path'i de user yaratma side-effect'i taşımaz.
+        // Kullanıcı kaydı yoksa senaryo da yoktur → 404 ScenarioNotFound.
         var scenarioId = Guid.NewGuid();
-        var newUser = new User { Id = Guid.NewGuid(), DeviceId = "ghost-device", Tier = "free" };
 
         _repository.GetUserByDeviceIdAsync("ghost-device", Arg.Any<CancellationToken>()).Returns((User?)null);
-        _repository.CreateUserAsync("ghost-device", Arg.Any<CancellationToken>()).Returns(newUser);
-        _repository.GetByIdAndUserIdAsync(scenarioId, newUser.Id, Arg.Any<CancellationToken>())
-                   .Returns((SavedScenario?)null);
 
         var act = () => _sut.DeleteScenarioAsync("ghost-device", scenarioId, CancellationToken.None);
 
         await act.Should().ThrowAsync<ScenarioNotFoundException>();
+        await _repository.DidNotReceive().GetOrCreateUserAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _repository.DidNotReceive().GetByIdAndUserIdAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 }

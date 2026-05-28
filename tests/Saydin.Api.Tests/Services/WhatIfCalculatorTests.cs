@@ -93,7 +93,15 @@ public class WhatIfCalculatorTests
         _assetNameLocalizer.Localize(Arg.Any<string>(), Arg.Any<string?>())
                            .Returns(ci => (string?)ci[1] ?? (string)ci[0]);
 
-        var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions());
+        // F2.2-21: Default test PlanOptions free PriceHistoryMonths sınırını kapatır,
+        // aksi halde 2020-2021 tarihli WhatIf testleri "extended_history" sebebiyle
+        // FeatureDisabled fırlatır. Sınır enforcement'ı için ayrı testler vardır.
+        var defaultPlans = new PlanOptions
+        {
+            Free    = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } },
+            Premium = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } }
+        };
+        var options = Microsoft.Extensions.Options.Options.Create(defaultPlans);
         _sut = new WhatIfCalculator(
             _assetService,
             _scenarioRepository,
@@ -780,6 +788,8 @@ public class WhatIfCalculatorTests
         {
             Free = new TierOptions { Features = new FeatureOptions {
                 Comparison = true, InflationAdjustment = false,
+                // F2.2-21 history sınırı bu testin niyeti dışında: history'yi sınırsız tut.
+                PriceHistoryMonths = 0,
             } }
         };
         var sut = CreateSutWithOptions(planOptions);

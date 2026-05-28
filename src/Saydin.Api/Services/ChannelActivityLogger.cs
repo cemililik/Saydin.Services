@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
 
 namespace Saydin.Api.Services;
@@ -17,6 +18,10 @@ public sealed class ChannelActivityLogger(
     {
         if (!channel.Writer.TryWrite(entry))
         {
+            // F2.2-15 / F2.2-24: Drop sayısı counter metric'e işlenir, böylece
+            // Prometheus / Aspire dashboard'tan görünür hale gelir. Action tag'i
+            // tek yüksek-kardinalite alan; toplamda <12 değer aldığı için kabul edilebilir.
+            SaydinMetrics.ActivityLogQueueDrops.Add(1, new KeyValuePair<string, object?>("action", entry.Action));
             logger.LogWarning("Activity log kuyruğu dolu, kayıt düşürüldü: {Action}", entry.Action);
         }
     }

@@ -24,7 +24,14 @@ jobs:
       - name: .NET SDK kur
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          # F2.9-3 ([C-I-4]): global.json'daki SDK pin'i kullan (10.0.100 +
+          # rollForward: latestFeature). Dolayısıyla repo CLI ile birebir aynı SDK.
+          global-json-file: global.json
+          # F2.9-1 ([C-I-2]): NuGet packages cache — restore süresini dakikalarca azaltır.
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            Directory.Packages.props
 
       - name: Bağımlılıkları yükle
         run: dotnet restore
@@ -91,8 +98,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # F2.9-2 ([C-I-3]): Docker layer cache. BuildKit + GitHub Actions cache backend
+      # (`type=gha`) ile sonraki run'lar `dotnet restore` ve `RUN` katmanlarını
+      # yeniden kullanır. Soğuk build ~2dk → cache hit'te ~10sn.
+      - name: Docker Buildx kur
+        uses: docker/setup-buildx-action@v3
+
       - name: Saydin.Api Docker image build
-        run: docker build -f src/Saydin.Api/Dockerfile -t saydin-api:ci .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Saydin.Api/Dockerfile
+          tags: saydin-api:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=saydin-api
+          cache-to: type=gha,scope=saydin-api,mode=max
 
       - name: Saydin.PriceIngestion Docker image build
-        run: docker build -f src/Saydin.PriceIngestion/Dockerfile -t saydin-price-ingestion:ci .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Saydin.PriceIngestion/Dockerfile
+          tags: saydin-price-ingestion:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=saydin-price-ingestion
+          cache-to: type=gha,scope=saydin-price-ingestion,mode=max

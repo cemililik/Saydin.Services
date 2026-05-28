@@ -54,6 +54,15 @@ public sealed class DcaCalculator(
         if (!features.Dca)
             throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "dca");
 
+        // F2.2-22 ([G-B-02]): DCA `StartDate` tier'ın PriceHistoryMonths penceresinin
+        // dışına çıkamaz. 0 = sınırsız (premium).
+        if (features.PriceHistoryMonths > 0)
+        {
+            var earliestAllowed = DateOnly.FromDateTime(DateTime.UtcNow).AddMonths(-features.PriceHistoryMonths);
+            if (request.StartDate < earliestAllowed)
+                throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "extended_history");
+        }
+
         if (request.IncludeInflation && !features.InflationAdjustment)
             throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
 
@@ -134,7 +143,8 @@ public sealed class DcaCalculator(
         {
             var pricePoint    = await assetService.GetNearestPriceAsync(symbol, purchaseDate, ct);
             var price         = pricePoint.Close;
-            if (price == 0)
+            // F2.2-23 ([G-B-04]): non-positive fiyat → PriceNotFound (sıfır birim alım engellendi).
+            if (price <= 0)
                 throw new PriceNotFoundException(symbol, purchaseDate);
 
             var unitsAcquired = Math.Round(request.PeriodicAmount / price, 6, MidpointRounding.AwayFromZero);

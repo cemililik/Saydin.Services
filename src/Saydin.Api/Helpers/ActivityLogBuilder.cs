@@ -12,6 +12,13 @@ namespace Saydin.Api.Helpers;
 /// </summary>
 public sealed class ActivityLogBuilder
 {
+    // F2.1-12 ([G-A-02]) / DB kapasiteleri ile uyumlu header truncation limitleri.
+    // activity_logs şemasındaki kolon kapasiteleriyle birebir aynı olmalı (009 migration).
+    private const int MaxDeviceOsLength   = 30;
+    private const int MaxOsVersionLength  = 100;
+    private const int MaxAppVersionLength = 50;
+    private const int MaxErrorCodeLength  = 50;
+
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private readonly HttpContext _httpContext;
     private readonly IGeoIpResolver? _geoIpResolver;
@@ -86,16 +93,30 @@ public sealed class ActivityLogBuilder
             IpAddress = IpMasker.Mask(rawIp),
             Country = country,
             City = city,
-            DeviceOs = _httpContext.Request.Headers["X-Device-OS"].FirstOrDefault(),
-            OsVersion = _httpContext.Request.Headers["X-Device-OS-Version"].FirstOrDefault(),
-            AppVersion = _httpContext.Request.Headers["X-App-Version"].FirstOrDefault(),
+            // F2.1-12: DB kolon kapasiteleriyle uyumlu truncation.
+            DeviceOs   = Truncate(_httpContext.Request.Headers["X-Device-OS"].FirstOrDefault(),         MaxDeviceOsLength),
+            OsVersion  = Truncate(_httpContext.Request.Headers["X-Device-OS-Version"].FirstOrDefault(), MaxOsVersionLength),
+            AppVersion = Truncate(_httpContext.Request.Headers["X-App-Version"].FirstOrDefault(),       MaxAppVersionLength),
             Data = _data is not null
                 ? JsonSerializer.SerializeToElement(_data)
                 : null,
             StatusCode = _statusCode,
-            DurationMs = (int)_stopwatch.ElapsedMilliseconds,
-            ErrorCode = _errorCode,
+            // F2.1-9 ([C-A-29]): long olarak tut — int cast 24.8 günden uzun sürede
+            // overflow yapardı; migration 011 ile DB kolonu BIGINT'e genişler.
+            DurationMs = _stopwatch.ElapsedMilliseconds,
+            ErrorCode  = Truncate(_errorCode, MaxErrorCodeLength),
         };
+    }
+
+    /// <summary>
+    /// F2.1-12: DB kolon kapasitesini aşan header değerlerini sessizce kırpar.
+    /// Activity log telemetri amaçlıdır; ham header değerinin tamamını saklamak
+    /// kritik değil ama row yazımının fail olması toplam observability'yi düşürür.
+    /// </summary>
+    private static string? Truncate(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        return value.Length <= maxLength ? value : value[..maxLength];
     }
 
     /// <summary>

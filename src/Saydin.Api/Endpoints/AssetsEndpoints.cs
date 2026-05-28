@@ -40,20 +40,29 @@ public static class AssetsEndpoints
 
         // Tüm asset endpoint'leri DeviceId ister: anonim enumeration + DB/Redis DoS
         // riskini kapatır. CLAUDE.md "Daily limit / device kontrolü" prensibine uyumlu.
-        group.MapGet("/", GetAllAsync)
+        // F2.1-6: MapGet("") trailing-slash bağımsız.
+        group.MapGet("", GetAllAsync)
             .RequireDeviceId()
             .WithName("GetAssets")
-            .WithSummary("Desteklenen tüm asset'leri listeler");
+            .WithSummary("Desteklenen tüm asset'leri listeler")
+            .Produces<object>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
         group.MapGet("/{symbol}/price/{date}", GetPriceAsync)
             .RequireDeviceId()
             .WithName("GetAssetPrice")
-            .WithSummary("Belirli tarihte fiyat döner");
+            .WithSummary("Belirli tarihte fiyat döner")
+            .Produces<Saydin.Shared.Entities.PricePoint>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
         group.MapGet("/{symbol}/price-range", GetPriceRangeAsync)
             .RequireDeviceId()
             .WithName("GetAssetPriceRange")
-            .WithSummary("Tarih aralığında fiyat serisi döner");
+            .WithSummary("Tarih aralığında fiyat serisi döner")
+            .Produces<object>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
         return app;
     }

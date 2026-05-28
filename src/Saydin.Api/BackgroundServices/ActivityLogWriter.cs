@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using Saydin.Shared.Data;
+using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
 
 namespace Saydin.Api.BackgroundServices;
@@ -11,6 +12,12 @@ public sealed class ActivityLogWriter(
 {
     private const int BatchSize = 50;
     private static readonly TimeSpan ShutdownDrainTimeout = TimeSpan.FromSeconds(30);
+
+    // F2.3-4 ([C-C-22]): Polly bağımlılığı eklemek yerine basit in-process retry.
+    // SaveChangesAsync transient failure'larında (deadlock, connection blink) 2 ek
+    // deneme ile batch'i kurtarmaya çalışır. Toplam attempts = 3 (ilk + 2 retry).
+    private const int MaxAttempts = 3;
+    private static readonly TimeSpan RetryBaseDelay = TimeSpan.FromMilliseconds(200);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -85,21 +92,55 @@ public sealed class ActivityLogWriter(
 
     private async Task FlushAsync(List<ActivityLog> entries, CancellationToken ct)
     {
-        try
+        // F2.3-4: Retry with exponential backoff. Idempotent insert: ActivityLog.Id
+        // entity-side oluşturulur (Guid.CreateVersion7) — aynı batch'in iki yazımı
+        // PK çakışması ile reddedilir, sessiz duplicate riski yok.
+        Exception? lastException = null;
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
-            using var scope = scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<SaydinDbContext>();
-            await db.ActivityLogs.AddRangeAsync(entries, ct);
-            await db.SaveChangesAsync(ct);
+            try
+            {
+                using var scope = scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<SaydinDbContext>();
+                await db.ActivityLogs.AddRangeAsync(entries, ct);
+                await db.SaveChangesAsync(ct);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown / token cancel — retry yapmadan kuyruğu işle.
+                SaydinMetrics.ActivityLogWriteFailures.Add(entries.Count,
+                    new KeyValuePair<string, object?>("outcome", "cancelled"));
+                throw;
+            }
+            catch (Exception ex) when (attempt < MaxAttempts)
+            {
+                lastException = ex;
+                logger.LogWarning(ex,
+                    "Activity log batch yazımı başarısız (deneme {Attempt}/{Max}). {Count} kayıt için tekrar denenecek",
+                    attempt, MaxAttempts, entries.Count);
+
+                // Exponential backoff: 200ms, 400ms.
+                var delay = RetryBaseDelay * (1 << (attempt - 1));
+                try { await Task.Delay(delay, ct); }
+                catch (OperationCanceledException)
+                {
+                    SaydinMetrics.ActivityLogWriteFailures.Add(entries.Count,
+                        new KeyValuePair<string, object?>("outcome", "cancelled"));
+                    throw;
+                }
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+            }
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex,
-                "Activity log yazımı başarısız. {Count} kayıt düşürüldü", entries.Count);
-        }
+
+        // Tüm denemeler tükendi — counter metric ile observability boşluğu kapatılır.
+        SaydinMetrics.ActivityLogWriteFailures.Add(entries.Count,
+            new KeyValuePair<string, object?>("outcome", "retry_exhausted"));
+        logger.LogError(lastException,
+            "Activity log yazımı {Attempts} denemeden sonra başarısız. {Count} kayıt düşürüldü",
+            MaxAttempts, entries.Count);
     }
 }

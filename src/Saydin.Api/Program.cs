@@ -136,10 +136,15 @@ try
     builder.Services.AddSingleton(npgsqlDataSource);
 
     // ─── EF Core ─────────────────────────────────────────────────────────────
+    // F2.3-1 ([C-C-3/10/13], [G-C-01]): API read-heavy bir servistir; tracking ihtiyacı
+    // hemen hiçbir endpoint'te yok. Global NoTracking sorgu maliyetini düşürür
+    // (change tracker entries oluşmaz). Mutasyon gerektiren tek nokta SavedScenarioRepository
+    // — orada explicit `AsTracking()` çağrılır.
     builder.Services.AddDbContext<SaydinDbContext>(options =>
         options.UseNpgsql(npgsqlDataSource, npgsql =>
             npgsql.MapEnum<AssetCategory>("asset_category"))
-               .UseSnakeCaseNamingConvention());
+               .UseSnakeCaseNamingConvention()
+               .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking));
 
     // ─── Health Checks ───────────────────────────────────────────────────────
     builder.Services
@@ -188,6 +193,10 @@ try
     builder.Services.AddScoped<IAppConfigService, AppConfigService>();
     builder.Services.AddSingleton<IRedisCacheHelper, RedisCacheHelper>();
     builder.Services.AddScoped<IAssetNameLocalizer, AssetNameLocalizer>();
+    // F2.2-12: last_seen_at throttle penceresi process-local (in-memory map) tutulur;
+    // sticky session olmadan deploy edilse bile pencere ihlali kullanıcı için
+    // semantik kayıp yaratmaz — yalnız UPDATE sıklığı artar.
+    builder.Services.AddSingleton<ILastSeenThrottle, LastSeenThrottle>();
 
     // ─── GeoIP (IP → ülke/şehir çözümleme) ────────────────────────────────────
     builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();

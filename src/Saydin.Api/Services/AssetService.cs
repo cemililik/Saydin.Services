@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.Extensions.Localization;
 using Saydin.Api.Models.Responses;
@@ -15,6 +16,13 @@ public sealed class AssetService(
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<AssetService> logger) : IAssetService
 {
+    // F2.2-20 ([C-B-CC-7]): process-local sembol → asset cache. Asset listesi her
+    // istekten yeniden FirstOrDefault tarama yapmak yerine ilk istekte dictionary
+    // projeksiyonuna alınır; sonraki istekler O(1) lookup yapar. Sözlük cache asset
+    // listesi imzasıyla (count) versiyonlanır — yeni asset eklenince sıfırlanır.
+    private static int _symbolCacheVersion;
+    private static ConcurrentDictionary<string, Asset>? _symbolCache;
+
     public async Task<IReadOnlyList<Asset>> GetAllAsync(CancellationToken ct)
     {
         // Signature = aktif asset sayısı. 5 dakikada bir DB'den taze okunur.
@@ -43,9 +51,22 @@ public sealed class AssetService(
     {
         var upper = symbol.ToUpperInvariant();
         var all = await GetAllAsync(ct);
-        // assets:list cache'i şu an küçük (~30 asset); ileride büyürse symbol → asset
-        // dictionary cache'i eklenebilir. Şu an LINQ scan O(n) yeterli.
-        return all.FirstOrDefault(a => a.Symbol == upper);
+
+        // F2.2-20: process-local sözlük lookup'ı O(N) FirstOrDefault'u O(1)'e indirir.
+        // Versioning: asset listesinin hash code'unu sentinel olarak kullanmak yerine
+        // count'a yaklaşık dayanırız; sayı değişince DB'den taze gelir ve cache invalidate olur.
+        var snapshot = _symbolCache;
+        if (snapshot is null || _symbolCacheVersion != all.Count)
+        {
+            var built = new ConcurrentDictionary<string, Asset>(StringComparer.Ordinal);
+            foreach (var a in all)
+                built[a.Symbol] = a;
+            _symbolCache = built;
+            _symbolCacheVersion = all.Count;
+            snapshot = built;
+        }
+
+        return snapshot.TryGetValue(upper, out var found) ? found : null;
     }
 
     public async Task<IReadOnlyList<AssetResponse>> GetAllAssetInfoAsync(CancellationToken ct)
@@ -70,13 +91,34 @@ public sealed class AssetService(
             .Select(r => new AssetResponse(
                 r.Asset.Symbol,
                 assetNameLocalizer.Localize(r.Asset.Symbol, r.Asset.DisplayName),
-                r.Asset.Category,
+                // F2.3-7: enum sızıntısı kalktı — DTO string snake_case taşır.
+                ToSnakeCase(r.Asset.Category),
                 r.FirstDate,
                 r.LastDate))
             .ToList();
 
         await cache.TrySetAsync(listKey, result, TimeSpan.FromHours(1), ct);
         return result;
+    }
+
+    /// <summary>
+    /// F2.3-7: PascalCase enum adını snake_case JSON değerine çevirir
+    /// (<c>PreciousMetal → precious_metal</c>). <see cref="JsonNamingPolicy.SnakeCaseLower"/>
+    /// ile aynı algoritmaya uyumlu.
+    /// </summary>
+    private static string ToSnakeCase(AssetCategory category)
+    {
+        var name = category.ToString();
+        // PreciousMetal → precious_metal; Crypto → crypto.
+        var sb = new System.Text.StringBuilder(name.Length + 4);
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (i > 0 && char.IsUpper(c))
+                sb.Append('_');
+            sb.Append(char.ToLowerInvariant(c));
+        }
+        return sb.ToString();
     }
 
     public async Task<PricePoint> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct)
@@ -140,7 +182,11 @@ public sealed class AssetService(
                 string.Format(localizer["InvalidInterval"], interval),
                 field: nameof(interval));
 
-        var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:daily";
+        // F2.2-1 ([C-B-AssetService-5/7]): cache key'e interval suffix ekle. Şu an
+        // yalnızca "daily" destekleniyor; weekly/monthly eklenirse aynı (symbol, from, to)
+        // çiftinin farklı interval'larda farklı response'u olur → cache key ayrımı şart.
+        var normalizedInterval = interval.ToLowerInvariant();
+        var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:{normalizedInterval}";
 
         var cached = await cache.TryGetAsync<List<PricePoint>>(cacheKey, ct);
         if (cached is not null) return cached;

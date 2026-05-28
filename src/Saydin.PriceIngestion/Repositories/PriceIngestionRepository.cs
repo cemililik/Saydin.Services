@@ -46,29 +46,61 @@ public sealed class PriceIngestionRepository(IDbContextFactory<SaydinDbContext> 
         var lows       = deduped.Select(p => p.Low).ToArray();
         var volumes    = deduped.Select(p => p.Volume).ToArray();
 
-        // ingested_at sütununu NOW() ile dolduruyoruz — replay/backfill izlenebilir kalır.
-        await context.Database.ExecuteSqlInterpolatedAsync(
-            $"""
-            INSERT INTO price_points (asset_id, price_date, close, open, high, low, volume, ingested_at)
-            SELECT asset_id, price_date, close, open, high, low, volume, NOW()
-            FROM UNNEST(
-                {assetIds}::uuid[],
-                {priceDates}::date[],
-                {closes}::numeric[],
-                {opens}::numeric[],
-                {highs}::numeric[],
-                {lows}::numeric[],
-                {volumes}::numeric[]
-            ) AS t(asset_id, price_date, close, open, high, low, volume)
-            ON CONFLICT (asset_id, price_date) DO UPDATE
-                SET close       = EXCLUDED.close,
-                    open        = EXCLUDED.open,
-                    high        = EXCLUDED.high,
-                    low         = EXCLUDED.low,
-                    volume      = EXCLUDED.volume,
-                    ingested_at = EXCLUDED.ingested_at
-            """,
-            ct);
+        // F2.4-8 ([C-D-41]): UNNEST batch tek statement olsa da, gelecekteki
+        // multi-statement extension'lara (örn. ingestion_jobs aynı transaction'da
+        // yazımı) hazırlık olarak transaction'a sar. Tek statement içinde
+        // ON CONFLICT atomik olduğu için kısa transaction maliyeti ihmal edilebilir.
+        await using var tx = await context.Database.BeginTransactionAsync(ct);
+        try
+        {
+            // ingested_at sütununu NOW() ile dolduruyoruz — replay/backfill izlenebilir kalır.
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO price_points (asset_id, price_date, close, open, high, low, volume, ingested_at)
+                SELECT asset_id, price_date, close, open, high, low, volume, NOW()
+                FROM UNNEST(
+                    {assetIds}::uuid[],
+                    {priceDates}::date[],
+                    {closes}::numeric[],
+                    {opens}::numeric[],
+                    {highs}::numeric[],
+                    {lows}::numeric[],
+                    {volumes}::numeric[]
+                ) AS t(asset_id, price_date, close, open, high, low, volume)
+                ON CONFLICT (asset_id, price_date) DO UPDATE
+                    SET close       = EXCLUDED.close,
+                        open        = EXCLUDED.open,
+                        high        = EXCLUDED.high,
+                        low         = EXCLUDED.low,
+                        volume      = EXCLUDED.volume,
+                        ingested_at = EXCLUDED.ingested_at
+                """,
+                ct);
+            await tx.CommitAsync(ct);
+        }
+        catch
+        {
+            await tx.RollbackAsync(ct);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// F2.4-9 ([G-D-04]): Belirli bir asset için aralıktaki "var olmayan" price_date
+    /// gün setini döner. Backfill bu gap kümesini hedefleyerek "latestDate sonrası tek
+    /// blok" varsayımını terk eder — geçmişte bir worker ortası kalan boşluklar da kapanır.
+    /// </summary>
+    public async Task<IReadOnlySet<DateOnly>> GetExistingDatesAsync(
+        Guid assetId, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(ct);
+        var dates = await context.PricePoints
+            .Where(pp => pp.AssetId == assetId
+                      && pp.PriceDate >= from
+                      && pp.PriceDate <= to)
+            .Select(pp => pp.PriceDate)
+            .ToListAsync(ct);
+        return dates.ToHashSet();
     }
 
     public async Task<DateOnly?> GetLatestPriceDateAsync(Guid assetId, CancellationToken ct)
