@@ -49,9 +49,32 @@ public abstract class BaseAssetWorker(
     /// </summary>
     protected virtual TimeSpan ChunkDelay => TimeSpan.Zero;
 
+    /// <summary>
+    /// "Today" anlamı kaynağa göre değişebilir (review F1.1-10).
+    /// TCMB / TwelveData / OpenExchangeRates: UTC bugün — son yayın gün-içi gelir.
+    /// CoinGecko: UTC kapanışı 00:00 UTC iken; 02:00 UTC çekimde "yesterday"
+    /// son kapanmış kripto gününü verir. Adapter-specific worker bu metodu override eder.
+    /// </summary>
+    protected virtual DateOnly TargetDate(DateTime utcNow) =>
+        DateOnly.FromDateTime(utcNow.Date);
+
     public async Task RunAsync(CancellationToken ct)
     {
         await BackfillAsync(ct);
+
+        // F1.1-11: Backfill bittiğinde bugünün scheduled saati geçmişse derhal
+        // günün verisini çek; aksi halde 24 saat boyunca eksik günlük veri olur.
+        if (!ct.IsCancellationRequested && IsScheduledTimePassedToday())
+        {
+            try
+            {
+                await FetchTodayAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
 
         while (!ct.IsCancellationRequested)
         {
@@ -69,6 +92,13 @@ public abstract class BaseAssetWorker(
                 break;
             }
         }
+    }
+
+    private bool IsScheduledTimePassedToday()
+    {
+        var now = DateTime.UtcNow;
+        var scheduledToday = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
+        return now >= scheduledToday;
     }
 
     private async Task BackfillAsync(CancellationToken ct)
@@ -109,10 +139,10 @@ public abstract class BaseAssetWorker(
 
     private async Task FetchTodayAsync(CancellationToken ct)
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow.Date);
+        var target = TargetDate(DateTime.UtcNow);
         var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
         foreach (var asset in assets)
-            await FetchAndUpsertAsync(asset, today, today,
+            await FetchAndUpsertAsync(asset, target, target,
                 IngestionJobTypes.DailyUpdate, ct);
     }
 

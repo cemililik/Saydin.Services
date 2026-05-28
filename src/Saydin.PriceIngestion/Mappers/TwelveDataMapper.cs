@@ -1,32 +1,55 @@
 using System.Globalization;
 using System.Text.Json;
 using Saydin.Shared.Entities;
+using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Mappers;
 
 public static class TwelveDataMapper
 {
-    public static IReadOnlyList<PricePoint> Map(string json, Guid assetId)
+    public static IReadOnlyList<PricePoint> Map(
+        string json,
+        Guid assetId,
+        string assetSymbol = "",
+        string source = "twelvedata")
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        // status != "ok" ise veri yok veya hata
-        if (root.TryGetProperty("status", out var statusEl) &&
-            statusEl.GetString() != "ok")
-            return [];
+        // F1.1-6: status="error" yanıtlarında veri yok olarak sessizce dönmek yerine
+        // ExternalApiException fırlat — caller ingestion_jobs failed olarak kaydetsin.
+        if (root.TryGetProperty("status", out var statusEl))
+        {
+            var status = statusEl.GetString();
+            if (string.Equals(status, "error", StringComparison.OrdinalIgnoreCase))
+            {
+                var code = root.TryGetProperty("code", out var codeEl) ? codeEl.ToString() : "n/a";
+                var message = root.TryGetProperty("message", out var msgEl) ? msgEl.GetString() : null;
+                throw new ExternalApiException(source,
+                    $"TwelveData error response (symbol={assetSymbol}, code={code}): {message}");
+            }
+            if (!string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                // ok / error dışı status — gelecekteki "rate_limited" gibi değerler için defansif:
+                // log seviyesinde değil, exception olarak yukarı bildir.
+                throw new ExternalApiException(source,
+                    $"TwelveData beklenmeyen status '{status}' (symbol={assetSymbol})");
+            }
+        }
 
-        if (!root.TryGetProperty("values", out var values))
+        if (!root.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
             return [];
 
         var results = new List<PricePoint>();
 
         foreach (var item in values.EnumerateArray())
         {
-            if (!DateOnly.TryParse(item.GetProperty("datetime").GetString(), out var date))
+            if (!item.TryGetProperty("datetime", out var dateEl) ||
+                !DateOnly.TryParse(dateEl.GetString(), out var date))
                 continue;
 
-            if (!decimal.TryParse(item.GetProperty("close").GetString(),
+            if (!item.TryGetProperty("close", out var closeEl) ||
+                !decimal.TryParse(closeEl.GetString(),
                     NumberStyles.Any, CultureInfo.InvariantCulture, out var close))
                 continue;
 

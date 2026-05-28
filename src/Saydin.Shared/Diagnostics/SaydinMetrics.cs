@@ -6,10 +6,11 @@ public static class SaydinMetrics
 {
     /// <summary>
     /// OpenTelemetry MeterProvider'a kayıt için meter adı. Tüm metric source'larını
-    /// hem Saydin.Api hem Saydin.PriceIngestion bu tek isim üzerinden yayınlar
-    /// (tarihsel sebep: API'de tanımlanmış, ingestion da aynı meter'ı kullanır).
+    /// hem Saydin.Api hem Saydin.PriceIngestion bu tek isim üzerinden yayınlar.
+    /// Service ayrımı `service.name` resource attribute'u ile yapılır; meter adı
+    /// Shared kütüphaneyi referans aldığı için `"Saydin"` olarak tutulur (review F1.5-1).
     /// </summary>
-    public const string MeterName = "Saydin.Api";
+    public const string MeterName = "Saydin";
 
     private static readonly Meter Meter = new(MeterName, "1.0.0");
 

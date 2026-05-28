@@ -37,7 +37,9 @@ grep -rn "ControllerBase\|ApiController\|\[Route\]" src/Saydin.Api/
 
 ```bash
 # Saydin.Api içinde dış finansal API URL'leri olmamalı
-grep -rn "tcmb\|coingecko\|goldapi\|twelvedata" src/Saydin.Api/ --include="*.cs"
+# F1.8-8 / [G-I-04]: OXR (openexchangerates) ve EVDS (evds3.tcmb.gov.tr) eklendi.
+grep -rEn "tcmb|coingecko|goldapi|twelvedata|openexchangerates|evds3?\." \
+    src/Saydin.Api/ --include="*.cs"
 ```
 
 ### 4. Yasak Kodlama Kalıpları
@@ -58,8 +60,30 @@ grep -rn "async void" src/ --include="*.cs"
 # float/double finansal değişkenlerde
 grep -rn "double price\|float price\|double amount\|float amount\|double value\|float value" src/ --include="*.cs"
 
-# SQL string interpolation yasak
-grep -rn '\$".*SELECT\|INSERT\|UPDATE\|DELETE' src/ --include="*.cs"
+# SQL string interpolation YASAK (F1.8-5 / [C-I-21] regex düzeltildi).
+# ExecuteSqlRawAsync($"...") ve FromSqlRaw($"...") gibi C# string interpolation
+# içeren çağrıları yakalar; ExecuteSqlInterpolatedAsync zaten parametreleyici olduğu
+# için yanlış pozitif vermesin diye kasıtlı olarak "Raw" ile sınırlı.
+grep -rnE 'Execute(SqlRaw|SqlCommandRaw)Async\(\$"|FromSqlRaw\(\$"' \
+    src/ --include="*.cs"
+```
+
+### 5. CLAUDE.md Kuralları (F1.8-3 / [C-I-18], F2.9-8 / [C-I-23/26])
+
+```bash
+# IExceptionHandler zinciri tamlığı (Api Program.cs içinde sıralı kayıt)
+grep -nE "AddExceptionHandler<\w+ExceptionHandler>" src/Saydin.Api/Program.cs
+# → PriceNotFound → AssetNotFound → ScenarioNotFound → ScenarioLimitExceeded →
+#   DailyLimitExceeded → Validation → FeatureDisabled → ExternalApi → Global (en son).
+
+# IStringLocalizer<ErrorMessages> kullanımı — kullanıcıya dönen hardcoded TR/EN string yasak
+grep -rn 'throw new ValidationException("' src/ --include="*.cs"
+grep -rn 'Detail = ex.Message' src/Saydin.Api/Exceptions/ --include="*.cs"
+# → Detail her zaman localizer["..."] formatı üzerinden gelmeli.
+
+# Log mesajında string interpolation YASAK (parametreli mesaj zorunlu)
+grep -rnE 'Log(Information|Warning|Error|Debug|Critical)\(\$"' \
+    src/ --include="*.cs"
 ```
 
 ### 5. Zorunlu Kodlama Kalıpları

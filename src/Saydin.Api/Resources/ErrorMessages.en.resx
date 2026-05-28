@@ -47,6 +47,7 @@
   <data name="FieldTooLong"><value>The '{0}' field cannot exceed {1} characters.</value></data>
   <data name="PriceRangeTooWide"><value>Price range too wide</value></data>
   <data name="PriceRangeTooWideDetail"><value>At most {0} days of price history can be queried in a single request.</value></data>
+  <data name="AmountMustBePositive"><value>Amount must be greater than zero.</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dollar/TRY</value></data>
   <data name="Asset_EURTRY"><value>Euro/TRY</value></data>

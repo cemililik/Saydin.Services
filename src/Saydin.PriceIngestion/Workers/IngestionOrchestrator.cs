@@ -24,7 +24,7 @@ public sealed class IngestionOrchestrator(
         {
             var enabled = configuration.GetValue<bool?>($"IngestionWorkers:{key}:Enabled") ?? true;
             if (enabled)
-                tasks.Add(runAsync());
+                tasks.Add(RunSafelyAsync(key, runAsync, stoppingToken));
             else
                 logger.LogInformation("Worker devre dışı (config): {Worker}", key);
         }
@@ -42,7 +42,27 @@ public sealed class IngestionOrchestrator(
         }
 
         logger.LogInformation("IngestionOrchestrator başlatıldı ({Count} aktif worker)", tasks.Count);
+        // F1.1-8: Task.WhenAll fail-fast değil — her worker kendi RunSafelyAsync sarmalayıcısı
+        // içinde exception'ı yakalar; bir worker çökerse diğerleri çalışmaya devam eder.
         await Task.WhenAll(tasks);
+    }
+
+    private async Task RunSafelyAsync(string workerName, Func<Task> runAsync, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await runAsync();
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Host shutdown — beklenen, log gürültüsü yapma.
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(ex,
+                "Worker fatal hata: {Worker} — orchestrator izolasyonu devreye girdi (diğer worker'lar devam ediyor)",
+                workerName);
+        }
     }
 
     public override Task StopAsync(CancellationToken stoppingToken)

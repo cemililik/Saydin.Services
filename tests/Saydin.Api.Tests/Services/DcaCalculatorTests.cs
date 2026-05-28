@@ -234,6 +234,23 @@ public class DcaCalculatorTests
         await act.Should().ThrowAsync<ValidationException>();
     }
 
+    // F1.9-4 ([C-F-14]): Negatif / sıfır periyodik tutar pozitif zorunlu.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-1000)]
+    public async Task CalculateAsync_NonPositivePeriodicAmount_ThrowsValidationException(decimal amount)
+    {
+        SetupConstantPrice(10m);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, amount, "monthly");
+
+        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == nameof(request.PeriodicAmount));
+    }
+
     [Fact]
     public async Task CalculateAsync_UnknownAsset_ThrowsAssetNotFoundException()
     {

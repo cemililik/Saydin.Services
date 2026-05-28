@@ -24,4 +24,12 @@ USER appuser
 
 COPY --from=build /app/publish .
 
+# Container liveness (review F1.7-6) — LivenessHeartbeatService /tmp/saydin-ingestion-healthy
+# dosyasını her 30 saniyede touch eder. Probe dosyanın son 2 dakika içinde dokunulduğunu
+# doğrular (process hung / Task.WhenAll deadlock durumlarında mtime güncellenmez).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD test -f /tmp/saydin-ingestion-healthy \
+        && find /tmp/saydin-ingestion-healthy -mmin -2 -print -quit | grep -q . \
+        || exit 1
+
 ENTRYPOINT ["dotnet", "Saydin.PriceIngestion.dll"]

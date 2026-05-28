@@ -1,6 +1,6 @@
 # /add-asset — Yeni Asset Ekleme Rehberi
 
-Yeni bir finansal asset eklerken bu 8 adımlı checklist'in **tamamını** uygula.
+Yeni bir finansal asset eklerken bu 9 adımlı checklist'in **tamamını** uygula.
 
 ## Kullanım
 
@@ -25,6 +25,12 @@ VALUES ('<SYMBOL>', '<Görünen Ad>', '<category>', true, '<source>', '<source_i
 ```
 
 Migration'ı mevcut dosyaya ekleme — yeni dosya oluştur.
+
+> ⚠️ F2.9-9 / [C-I-30]: `assets` tablosu şemasını ekleme öncesi doğrula
+> (`source_id` kolonu zorunlu mu? `category` enum değerleri neler?).
+> ```bash
+> docker compose exec postgres psql -U saydin -d saydin -c "\d assets"
+> ```
 
 ### Adım 2: Adapter Kontrolü
 
@@ -91,9 +97,29 @@ docker exec saydin-postgres psql -U saydin -d saydin \
 
 Veri akıyorsa ✅, akmıyorsa hata loglarını incele.
 
-### Adım 8: Dokümantasyon Güncelleme
+### Adım 8: Lokalize Asset Display Name (F1.8-7 / [C-I-29] / [G-I-06])
 
-`docs/architecture/overview.md` dosyasındaki "Desteklenen Asset'ler" tablosuna yeni satır ekle:
+`src/Saydin.Api/Resources/ErrorMessages.resx` ve `ErrorMessages.en.resx` dosyalarına
+asset'in Türkçe ve İngilizce display name'lerini ekle. Key formatı:
+`Asset_{SYMBOL}` — `IAssetNameLocalizer` runtime'da bu key üzerinden çözer.
+
+```xml
+<!-- ErrorMessages.resx (tr-TR) -->
+<data name="Asset_THYAO"><value>Türk Hava Yolları</value></data>
+
+<!-- ErrorMessages.en.resx -->
+<data name="Asset_THYAO"><value>Turkish Airlines</value></data>
+```
+
+Anahtar yoksa `AssetNameLocalizer.Localize` DB'deki `display_name` kolonuna düşer
+(fallback). Türkçe nüansı (örn. "Lira" değil "TL") DB değil resx'e yazılmalı.
+
+### Adım 9: Dokümantasyon Güncelleme
+
+`docs/architecture.md` dosyasındaki "Desteklenen Asset'ler" tablosuna yeni satır ekle:
+
+> F1.8-6 / [C-I-28] / [G-I-05]: Önceki sürümde `docs/architecture/overview.md`
+> referansı vardı — bu dosya backend repo'da yok. Doğru hedef: kök `docs/architecture.md`.
 
 ```markdown
 | `<SYMBOL>` | <Görünen Ad> | <category> | <source> |
@@ -103,6 +129,6 @@ Veri akıyorsa ✅, akmıyorsa hata loglarını incele.
 
 ## Tamamlanma Kriteri
 
-Tüm 8 adım ✅ ise asset başarıyla eklendi.
+Tüm 9 adım ✅ ise asset başarıyla eklendi.
 
 Herhangi bir adım eksikse görevi "bitti" sayma — kullanıcıya hangi adımın eksik olduğunu bildir.

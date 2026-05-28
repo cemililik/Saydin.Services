@@ -19,3 +19,12 @@ scrape_configs:
     static_configs:
       - targets:
           - localhost:9090
+
+  # F1.6-2 / [C-G-Prom-1]: Saydin.PriceIngestion scrape job (defer).
+  # PriceIngestion bir Worker servisidir; CLAUDE.md "Microsoft.AspNetCore referansı
+  # YASAK" kuralı gereği /metrics HTTP endpoint açamaz. Metrikler hâlihazırda OTLP/gRPC
+  # ile Aspire Dashboard'a (saydin-aspire-dashboard:18889) push edilir. Worker scrape
+  # job'ı için iki seçenek:
+  #   1. OTel Collector aracılığıyla Prometheus remote write (ADR adayı, Faz 4)
+  #   2. Aspire Dashboard'un metrics view'ı yeterli kabul edilir (mevcut durum)
+  # Karar verilene kadar bu job kapalı tutulur.

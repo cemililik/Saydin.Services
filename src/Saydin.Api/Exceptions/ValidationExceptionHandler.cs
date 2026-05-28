@@ -16,12 +16,37 @@ public sealed class ValidationExceptionHandler(
         Exception exception,
         CancellationToken cancellationToken)
     {
-        if (exception is not ValidationException ex)
-            return false;
+        // F1.2-6: Domain `ValidationException` ek olarak `ArgumentException` da yakalanır
+        // (örn. `ArgumentException.ThrowIfNullOrWhiteSpace(deviceId)` — istek boyunca asla
+        // ulaşılmaması gereken guard'lar). Bu sayede 500 yerine 400 döner ve mesaj
+        // kullanıcıya teknik bilgi sızdırmadan lokalize edilir.
+        string? detailMessage;
+        string? field;
 
-        logger.LogInformation(
-            "Geçersiz istek alanı: {Field} — {Detail}",
-            ex.Field ?? "(none)", ex.Detail);
+        switch (exception)
+        {
+            case ValidationException ex:
+                detailMessage = ex.Detail;
+                field = ex.Field;
+                logger.LogInformation(
+                    "Geçersiz istek alanı: {Field} — {Detail}",
+                    field ?? "(none)", detailMessage);
+                break;
+
+            case ArgumentException argEx:
+                // ArgumentException.ParamName teknik bir field adıdır; logged'da paylaşılır
+                // ama response'da gösterilmez (kullanıcıya internal field isimlerini sızdırma).
+                field = null;
+                detailMessage = localizer["ValidationFailed"];
+                logger.LogWarning(
+                    argEx,
+                    "ArgumentException → 400 ValidationFailed (ParamName: {ParamName})",
+                    argEx.ParamName ?? "(none)");
+                break;
+
+            default:
+                return false;
+        }
 
         httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
 
@@ -32,15 +57,15 @@ public sealed class ValidationExceptionHandler(
         {
             ["traceId"] = traceId
         };
-        if (ex.Field is not null)
-            extensions["field"] = ex.Field;
+        if (field is not null)
+            extensions["field"] = field;
 
         await httpContext.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type   = "https://saydin.app/errors/validation",
             Title  = localizer["ValidationFailed"],
             Status = StatusCodes.Status400BadRequest,
-            Detail = ex.Detail,
+            Detail = detailMessage,
             Extensions = extensions,
         }, cancellationToken);
 

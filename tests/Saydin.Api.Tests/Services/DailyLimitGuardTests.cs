@@ -153,10 +153,11 @@ public class DailyLimitGuardTests
     [Fact]
     public async Task IncrementAsync_FreeUserOverLimit_ThrowsDailyLimitExceededException()
     {
+        // F1.3-7: yeni check-then-INCR Lua script over-limit'te 0 döner (eski sürüm -1 idi).
         _db.ScriptEvaluateAsync(
                 Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
                 Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create((RedisValue)(-1)));
+           .Returns(RedisResult.Create((RedisValue)0));
 
         var act = () => _sut.IncrementAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
 
@@ -263,11 +264,12 @@ public class DailyLimitGuardTests
 
         await _sut.IncrementAsync(null, DeviceId, UsagePrefix, limitOverride: 500);
 
-        // Lua script'in ARGV[1]=ttlMs, ARGV[2]=limit. Override 500 olarak geçirilmiş olmalı.
+        // F1.3-7: yeni check-then-INCR Lua script imzası ARGV[1]=limit, ARGV[2]=ttlMs.
+        // Override 500 olarak v[0]'da geçer.
         await _db.Received(1).ScriptEvaluateAsync(
             Arg.Any<string>(),
             Arg.Any<RedisKey[]?>(),
-            Arg.Is<RedisValue[]?>(v => v != null && (long)v[1] == 500L),
+            Arg.Is<RedisValue[]?>(v => v != null && (long)v[0] == 500L),
             Arg.Any<CommandFlags>());
     }
 
@@ -325,10 +327,11 @@ public class DailyLimitGuardTests
     [Fact]
     public async Task TryAcquireAsync_AtomicCheckAndIncrement_OverLimit_Throws()
     {
+        // F1.3-7: yeni check-then-INCR Lua script over-limit'te 0 döner.
         _db.ScriptEvaluateAsync(
                 Arg.Any<string>(), Arg.Any<RedisKey[]?>(),
                 Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create((RedisValue)(-1)));
+           .Returns(RedisResult.Create((RedisValue)0));
 
         var act = () => _sut.TryAcquireAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
 

@@ -31,6 +31,7 @@ public sealed class WhatIfCalculator(
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
+        EnsurePositive(request.Amount, nameof(request.Amount));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         var features = options.Value.GetTierOptions(user?.Tier).Features;
@@ -63,6 +64,7 @@ public sealed class WhatIfCalculator(
                 string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbols)),
                 field: nameof(request.AssetSymbols));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
+        EnsurePositive(request.Amount, nameof(request.Amount));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
 
@@ -126,6 +128,7 @@ public sealed class WhatIfCalculator(
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.TargetAmountType, nameof(request.TargetAmountType));
+        EnsurePositive(request.TargetAmount, nameof(request.TargetAmount));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         var features = options.Value.GetTierOptions(user?.Tier).Features;
@@ -460,6 +463,15 @@ public sealed class WhatIfCalculator(
         if (string.IsNullOrWhiteSpace(value))
             throw new ValidationException(
                 string.Format(localizer["RequestPayloadMissing"], field), field: field);
+    }
+
+    // F1.9-4 ([C-F-14]): Negatif / sıfır amount semantik olarak anlamsız —
+    // "ya 0 TL alsaydım?" pratik bir hesap değil. Validation tüm calculator
+    // entry-point'lerinde aynı şekilde uygulanır.
+    private void EnsurePositive(decimal value, string field)
+    {
+        if (value <= 0m)
+            throw new ValidationException(localizer["AmountMustBePositive"], field: field);
     }
 
     private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(

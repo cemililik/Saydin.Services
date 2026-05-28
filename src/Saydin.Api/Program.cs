@@ -113,6 +113,7 @@ try
     builder.Services.AddExceptionHandler<ScenarioNotFoundExceptionHandler>();
     builder.Services.AddExceptionHandler<ScenarioLimitExceededExceptionHandler>();
     builder.Services.AddExceptionHandler<DailyLimitExceededExceptionHandler>();
+    builder.Services.AddExceptionHandler<ExternalApiExceptionHandler>();
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
     // ─── JSON Serialization ──────────────────────────────────────────────────

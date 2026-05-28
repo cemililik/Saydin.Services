@@ -10,7 +10,8 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-saydin}
       POSTGRES_USER: ${POSTGRES_USER:-saydin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      # F1.7-1: Default 'changeme' fallback'i kaldırıldı — env zorunlu (compose fail-fast).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     ports:
       - "5432:5432"
     volumes:
@@ -43,6 +44,14 @@ services:
     volumes:
       - pgadmin_data:/var/lib/pgadmin
       - ./infrastructure/pgadmin/servers.json:/pgadmin4/servers.json:ro
+      # F1.6-3: servers.json `PassFile: /tmp/pgpassfile` referansını çözer.
+      # Gerçek dosya .gitignored — geliştirici bir kerelik setup:
+      #   cp infrastructure/pgadmin/pgpassfile.sample infrastructure/pgadmin/pgpassfile
+      #   chmod 600 infrastructure/pgadmin/pgpassfile  # libpq passfile şart koşar
+      # Dosya yoksa pgAdmin auto-connect başarısız olur (UI'dan manuel girilir),
+      # geri kalan stack etkilenmez. Mount uyarısı: dosya olmadan compose up dizin
+      # yaratır — sample'ı kopyalamak unutulmamalı.
+      - ./infrastructure/pgadmin/pgpassfile:/tmp/pgpassfile:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -124,7 +133,7 @@ services:
     container_name: saydin-api
     environment:
       ASPNETCORE_ENVIRONMENT: Development
-      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:-changeme}"
+      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
       ConnectionStrings__Redis: "redis:6379"
       Otlp__Endpoint: "http://aspire-dashboard:18889"
       GeoIp__DatabasePath: "/app/geoip/GeoLite2-City.mmdb"
@@ -137,6 +146,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      # F1.7-6: Compose-level liveness — Dockerfile HEALTHCHECK ile aynı endpoint'i kullanır.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     restart: unless-stopped
 
   saydin-price-ingestion:
@@ -145,7 +161,7 @@ services:
       dockerfile: src/Saydin.PriceIngestion/Dockerfile
     container_name: saydin-price-ingestion
     environment:
-      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:-changeme}"
+      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
       Otlp__Endpoint: "http://aspire-dashboard:18889"
       ExternalApis__CoinGecko__ApiKey: ${COINGECKO_API_KEY:-}
       ExternalApis__OpenExchangeRates__AppId: ${OPENEXCHANGERATES_APP_ID:-}
@@ -161,6 +177,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      # F1.7-6: LivenessHeartbeatService /tmp/saydin-ingestion-healthy dosyasını
+      # her 30 saniyede touch eder. Dosyanın son 2 dakika içinde dokunulduğunu doğrula.
+      test:
+        - "CMD-SHELL"
+        - "test -f /tmp/saydin-ingestion-healthy && find /tmp/saydin-ingestion-healthy -mmin -2 -print -quit | grep -q . || exit 1"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     restart: unless-stopped
 
 volumes:

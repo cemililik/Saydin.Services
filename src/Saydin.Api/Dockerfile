@@ -19,8 +19,9 @@ WORKDIR /app
 
 # libgssapi-krb5-2: .NET runtime GSSAPI/Kerberos kütüphanesini yükler;
 # yoksa ilk Npgsql SCRAM-SHA-256 handshake bozulur.
+# curl: container-level HEALTHCHECK (review F1.7-6) — /health endpoint'ine HTTP probe.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Güvenlik: root olmayan kullanıcı
@@ -32,5 +33,9 @@ COPY --from=build /app/publish .
 EXPOSE 8080
 ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production
+
+# Container liveness — Program.cs `MapHealthChecks("/health")` cevap vermezse unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["dotnet", "Saydin.Api.dll"]

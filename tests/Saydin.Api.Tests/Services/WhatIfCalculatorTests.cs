@@ -797,6 +797,95 @@ public class WhatIfCalculatorTests
         result.Results.Should().HaveCount(2);
     }
 
+    // ── Amount Validation (F1.9-4) ─────────────────────────────────────────
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-1000)]
+    public async Task CalculateAsync_NonPositiveAmount_ThrowsValidationException(decimal amount)
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, amount, "try");
+
+        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == nameof(request.Amount));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-50)]
+    public async Task CalculateReverseAsync_NonPositiveTargetAmount_ThrowsValidationException(decimal target)
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, target, "try");
+
+        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == nameof(request.TargetAmount));
+    }
+
+    [Fact]
+    public async Task CompareAsync_NonPositiveAmount_ThrowsValidationException()
+    {
+        var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, -100m, "try");
+
+        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == nameof(request.Amount));
+    }
+
+    // ── CompareAsync Happy Path (F1.9-5) ───────────────────────────────────
+
+    [Fact]
+    public async Task CompareAsync_TwoSymbols_RanksByProfitDescending()
+    {
+        // Arrange: USDTRY %43, BTC %200. Ranking: BTC (1), USDTRY (2).
+        var btc = new Asset
+        {
+            Id          = Guid.Parse("dddddddd-0000-0000-0000-000000000001"),
+            Symbol      = "BTC",
+            DisplayName = "Bitcoin",
+            Category    = AssetCategory.Crypto,
+            Source      = "coingecko",
+            IsActive    = true
+        };
+        _assetService.GetBySymbolAsync("BTC", Arg.Any<CancellationToken>()).Returns(btc);
+
+        // USDTRY 5.95 → 8.50 (~%43 kâr)
+        _assetService.GetNearestPriceAsync("USDTRY", BuyDate, Arg.Any<CancellationToken>())
+                     .Returns(new PricePoint { AssetId = AssetId, PriceDate = BuyDate, Close = 5.95m });
+        _assetService.GetNearestPriceAsync("USDTRY", SellDate, Arg.Any<CancellationToken>())
+                     .Returns(new PricePoint { AssetId = AssetId, PriceDate = SellDate, Close = 8.50m });
+        // BTC 10000 → 30000 (%200 kâr)
+        _assetService.GetNearestPriceAsync("BTC", BuyDate, Arg.Any<CancellationToken>())
+                     .Returns(new PricePoint { AssetId = btc.Id, PriceDate = BuyDate, Close = 10_000m });
+        _assetService.GetNearestPriceAsync("BTC", SellDate, Arg.Any<CancellationToken>())
+                     .Returns(new PricePoint { AssetId = btc.Id, PriceDate = SellDate, Close = 30_000m });
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(SellDate);
+
+        var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try");
+
+        // Act
+        var result = await _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+
+        // Assert
+        result.Results.Should().HaveCount(2);
+        result.Results.Select(r => r.Calculation.AssetSymbol).Should()
+              .ContainInOrder(new[] { "BTC", "USDTRY" },
+                  "yüksek getirili sembol Rank=1 olmalı");
+        result.Results[0].Rank.Should().Be(1);
+        result.Results[0].Calculation.IsProfit.Should().BeTrue();
+        result.Results[0].Calculation.ProfitLossPercent.Should().BeGreaterThan(
+            result.Results[1].Calculation.ProfitLossPercent);
+        result.Results[1].Rank.Should().Be(2);
+    }
+
     // ── CompareAsync Distinct Validation ───────────────────────────────────
 
     [Fact]
