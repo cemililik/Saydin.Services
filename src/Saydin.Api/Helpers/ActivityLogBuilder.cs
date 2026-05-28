@@ -14,6 +14,10 @@ namespace Saydin.Api.Helpers;
 /// </summary>
 public sealed class ActivityLogBuilder
 {
+    // Sonar S1192: "unknown" literal 4 yerde tekrarlıyordu — tek sabite indirgendi.
+    // Action whitelist'ine düşmeyen action veya DeviceId fallback'i için kullanılır.
+    private const string UnknownFallback = "unknown";
+
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private readonly HttpContext _httpContext;
     private readonly IGeoIpResolver? _geoIpResolver;
@@ -78,8 +82,8 @@ public sealed class ActivityLogBuilder
         // edebilirdi (CHECK + bisection retry maliyeti). Pre-validation burada.
         var deviceId = _httpContext.Items[Endpoints.EndpointExtensions.DeviceIdItemKey] as string
                        ?? _httpContext.Request.Headers["X-Device-ID"].FirstOrDefault()
-                       ?? "unknown";
-        deviceId = TruncateSurrogateSafe(deviceId, ActivityLogLimits.DeviceIdMaxLength) ?? "unknown";
+                       ?? UnknownFallback;
+        deviceId = TruncateSurrogateSafe(deviceId, ActivityLogLimits.DeviceIdMaxLength) ?? UnknownFallback;
 
         // Önce orijinal IP'den lokasyon çöz, sonra IP'yi maskele
         var rawIp = _httpContext.Connection.RemoteIpAddress;
@@ -98,7 +102,7 @@ public sealed class ActivityLogBuilder
             var byteSize = EstimateUtf8Size(element);
             if (byteSize > ActivityLogLimits.DataMaxBytes)
             {
-                var actionTag = ActivityActions.All.Contains(_action!) ? _action! : "unknown";
+                var actionTag = ActivityActions.Lookup.Contains(_action!) ? _action! : UnknownFallback;
                 SaydinMetrics.ActivityLogDataTruncations.Add(1,
                     new KeyValuePair<string, object?>("action", actionTag));
                 // Boş `{"_truncated":true}` placeholder ile yine satır yazılır,
@@ -115,9 +119,9 @@ public sealed class ActivityLogBuilder
         {
             UserId = _userId,
             DeviceId = deviceId,
-            // LOGR-002: action whitelist — bilinmeyen action "unknown" fallback ile
+            // LOGR-002: action whitelist — bilinmeyen action UnknownFallback fallback ile
             // CHECK constraint ihlali engellenir; row CHECK'te düşmez, bisection retry tetiklenmez.
-            Action = ActivityActions.All.Contains(_action!) ? _action! : "unknown",
+            Action = ActivityActions.Lookup.Contains(_action!) ? _action! : UnknownFallback,
             IpAddress = IpMasker.Mask(rawIp),
             Country = country,
             City = city,
@@ -142,6 +146,10 @@ public sealed class ActivityLogBuilder
     private static string? TruncateSurrogateSafe(string? value, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
+        // F6 follow-up: maxLength ≤ 0 ise value[cut - 1] IndexOutOfRangeException
+        // fırlatır. Tüm caller'lar ActivityLogLimits sabitleri kullanıyor (min 2),
+        // ama defensive guard latent bug'ı kapatır.
+        if (maxLength <= 0) return null;
         if (value.Length <= maxLength) return value;
 
         // Cut point'in tam üzerinde high-surrogate varsa bir karakter geri.

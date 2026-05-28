@@ -25,6 +25,11 @@ public sealed class WhatIfCalculator(
     private const string WhatIfUsageKeyPrefix = "usage:whatif:";
     private const int    MaxPriceHistoryPoints = 60;
 
+    // Sonar S1192: `IStringLocalizer["FeatureDisabled"]` 4 yerde tekrarlanıyordu —
+    // tek sabite indirgendi. Resx key adı buradan referans alınır; key'i yeniden
+    // adlandırmak gerekirse tek yer güncellenir.
+    private const string FeatureDisabledKey = "FeatureDisabled";
+
     public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
     {
         EnsureRequest(request);
@@ -41,7 +46,7 @@ public sealed class WhatIfCalculator(
         EnsureWithinHistoryWindow(request.BuyDate, features.PriceHistoryMonths);
 
         if (request.IncludeInflation && !features.InflationAdjustment)
-            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "inflation");
 
         // Önce atomik reserve — TOCTOU race kapatıldı. Pahalı hesap öncesi limit dayatılır.
         await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
@@ -74,7 +79,7 @@ public sealed class WhatIfCalculator(
 
         var features = options.Value.GetTierOptions(user?.Tier).Features;
         if (!features.Comparison)
-            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "comparison");
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "comparison");
 
         // CompareAsync 5 sembolü tek kullanım sayar; ancak inflation tier kuralı CalculateAsync
         // ile aynı: özellik kapalıysa request bayrağını sessizce yok say.
@@ -144,7 +149,7 @@ public sealed class WhatIfCalculator(
         EnsureWithinHistoryWindow(request.BuyDate, features.PriceHistoryMonths);
 
         if (request.IncludeInflation && !features.InflationAdjustment)
-            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "inflation");
 
         await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
         try
@@ -519,7 +524,7 @@ public sealed class WhatIfCalculator(
         if (months <= 0) return;
         var earliestAllowed = DateOnly.FromDateTime(DateTime.UtcNow).AddMonths(-months);
         if (buyDate < earliestAllowed)
-            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "extended_history");
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "extended_history");
     }
 
     private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(

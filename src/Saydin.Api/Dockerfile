@@ -1,8 +1,9 @@
-# CFGR-003 follow-up: SHA digest pin (immutable). `:10.0-bookworm-slim` MCR'da
-# yok (P2R PR #12 CI fail kanıtı); `:10.0` (multi-arch manifest list) + SHA
-# digest reproducibility'yi garanti eder. Dependabot/Renovate `mcr.microsoft.com/
-# dotnet/sdk:10.0` pattern'iyle bump'ı otomatikleştirebilir.
-FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:69ff714a42f7931475acfcd2792d69cd4a656e4f3653d520e25c0fbe3c6d0cba AS build
+# CFGR-003 follow-up: SHA digest pin (immutable). Sonar S6596: image
+# referansında tag VE digest birlikte kullanılmaz — digest tek başına yeterli
+# (immutable kanonik referans). Dependabot Docker ecosystem `# tag: v10.0`
+# yorumlarını da bump edebilir; tag bilgisi yorumda saklanır.
+# tag: 10.0 (mcr.microsoft.com/dotnet/sdk)
+FROM mcr.microsoft.com/dotnet/sdk@sha256:69ff714a42f7931475acfcd2792d69cd4a656e4f3653d520e25c0fbe3c6d0cba AS build
 WORKDIR /app
 
 # Bağımlılık katmanını önbelleğe al
@@ -20,7 +21,8 @@ RUN dotnet publish src/Saydin.Api/Saydin.Api.csproj \
     -c Release \
     -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:a7f704b4b87284c80df9b90ab0e06810a241785204dc191ec05f2b26b5847623 AS runtime
+# tag: 10.0 (mcr.microsoft.com/dotnet/aspnet)
+FROM mcr.microsoft.com/dotnet/aspnet@sha256:a7f704b4b87284c80df9b90ab0e06810a241785204dc191ec05f2b26b5847623 AS runtime
 WORKDIR /app
 
 # libgssapi-krb5-2: .NET runtime GSSAPI/Kerberos kütüphanesini yükler;

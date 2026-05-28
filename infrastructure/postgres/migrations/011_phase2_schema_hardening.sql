@@ -31,18 +31,16 @@
 --        \i 011_audit.sql   -- (PHASE-2-DOC-UPDATE-NOTES §9'daki query'ler)
 --      Aykırı satır varsa migration'ı durdur, önce data clean-up yap.
 --
---   2. activity_logs hypertable BIGINT cast için ön hazırlık (INFR-002):
---      activity_logs TimescaleDB hypertable + 7+ gün eski chunk'lar
---      compress edilmiş olabilir. `ALTER COLUMN TYPE BIGINT` compressed
---      chunk'larda "cannot change column type of compressed chunk" verir.
---      Sıra (production):
---        a)  SELECT remove_compression_policy('activity_logs');
---        b)  SELECT decompress_chunk(c) FROM show_chunks('activity_logs') c;
---        c)  ALTER TABLE activity_logs ALTER COLUMN duration_ms TYPE BIGINT
---             USING duration_ms::BIGINT;   -- (bu migration'ın parçası)
---        d)  SELECT add_compression_policy('activity_logs', INTERVAL '7 days');
---      Lokal dev'de chunk'lar tipik olarak compress edilmemiştir; doğrudan
---      ALTER çalışır.
+--   2. activity_logs hypertable BIGINT cast ön hazırlığı (INFR-002):
+--      TimescaleDB hypertable + 7 gün üstü chunk'lar compress edilmiş olabilir;
+--      bu durumda ALTER COLUMN TYPE BIGINT "cannot change column type of
+--      compressed chunk" hatası verir. Production deploy adımları (sırasıyla,
+--      psql konsolunda manuel çalıştırılır; sed S125 false-positive yapmasın
+--      diye düz metin olarak açıklanır, indented SQL bloğu kullanılmaz):
+--      compression policy kaldırılır; tüm chunk'lar decompress edilir; bu
+--      migration uygulanır; sonra compression policy yeniden eklenir.
+--      Komutlar PHASE-2-DOC-UPDATE-NOTES §9 deploy runbook'unda da listelenir.
+--      Lokal dev'de chunk'lar tipik olarak compress edilmemiş; doğrudan ALTER çalışır.
 --
 --   3. INDEX yaratımı non-CONCURRENTLY → users üzerinde ShareLock (INFR-010).
 --      Küçük tabloda (<1M satır) saniyeler sürer; büyük tabloda CONCURRENTLY
@@ -190,38 +188,52 @@ ALTER TABLE inflation_rates
     VALIDATE CONSTRAINT chk_inflation_rates_source;
 
 -- ─── F2.7-1: FK ON DELETE explicit (CASCADE / RESTRICT / SET NULL) ─────────
--- FK'ler için NOT VALID semantiği yoktur (FK her zaman tüm tabloyu tarar).
--- Küçük tablo varsayımı; büyük tablo için CONCURRENTLY equivalent yok →
--- maintenance window runbook'unda iletildiği gibi planlanır.
+-- F3 follow-up: PostgreSQL ≥ 9.2 FOREIGN KEY için NOT VALID + VALIDATE pattern
+-- destekler. NOT VALID: yeni satır FK kontrol eder; mevcut satırlar taranmaz →
+-- ADD CONSTRAINT hızlı ve ShareRowExclusiveLock kısa sürer. VALIDATE: ayrı
+-- statement, ShareUpdateExclusiveLock (concurrent yazma engellenmez) ile mevcut
+-- satırlar taranır. Bu migration'da ikisi de aynı transaction içinde —
+-- mevcut data aykırıysa VALIDATE fail ve tüm migration rollback. Audit adımı
+-- (üst runbook §1) bu nedenle kritik.
 ALTER TABLE price_points
     DROP CONSTRAINT IF EXISTS fk_price_points_asset;
 ALTER TABLE price_points
     ADD CONSTRAINT fk_price_points_asset
-    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE RESTRICT;
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE RESTRICT NOT VALID;
+ALTER TABLE price_points
+    VALIDATE CONSTRAINT fk_price_points_asset;
 
 ALTER TABLE ingestion_jobs
     DROP CONSTRAINT IF EXISTS fk_ingestion_jobs_asset;
 ALTER TABLE ingestion_jobs
     ADD CONSTRAINT fk_ingestion_jobs_asset
-    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE RESTRICT;
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE RESTRICT NOT VALID;
+ALTER TABLE ingestion_jobs
+    VALIDATE CONSTRAINT fk_ingestion_jobs_asset;
 
 ALTER TABLE saved_scenarios
     DROP CONSTRAINT IF EXISTS fk_saved_scenarios_user;
 ALTER TABLE saved_scenarios
     ADD CONSTRAINT fk_saved_scenarios_user
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID;
+ALTER TABLE saved_scenarios
+    VALIDATE CONSTRAINT fk_saved_scenarios_user;
 
 ALTER TABLE saved_scenarios
     DROP CONSTRAINT IF EXISTS fk_saved_scenarios_asset;
 ALTER TABLE saved_scenarios
     ADD CONSTRAINT fk_saved_scenarios_asset
-    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE RESTRICT;
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE RESTRICT NOT VALID;
+ALTER TABLE saved_scenarios
+    VALIDATE CONSTRAINT fk_saved_scenarios_asset;
 
 ALTER TABLE market_holidays
     DROP CONSTRAINT IF EXISTS fk_market_holidays_asset;
 ALTER TABLE market_holidays
     ADD CONSTRAINT fk_market_holidays_asset
-    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE;
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE NOT VALID;
+ALTER TABLE market_holidays
+    VALIDATE CONSTRAINT fk_market_holidays_asset;
 
 -- ─── F2.7-9 / INFR-009: activity_logs.data JSONB boyut limiti ──────────────
 -- pg_column_size — TOAST-uncompressed binary boyutu döner. octet_length(::text)

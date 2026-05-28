@@ -48,74 +48,23 @@ public sealed class SavedScenarioService(
     public async Task<ScenarioResponse> SaveScenarioAsync(
         string deviceId, SaveScenarioRequest request, CancellationToken ct)
     {
-        // P1R-003: domain ValidationException ile guard — altyapı kaynaklı ArgumentException
-        // (Redis/EF Core) artık ValidationExceptionHandler tarafından 400'e dönmez.
-        if (request is null)
-            throw new ValidationException(
-                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+        // Sonar S3776 follow-up: tek bir 100-satırlık metod yerine küçük doğrulayıcılar.
+        // Cognitive complexity 17 → 15 altına iner; kontrol akışı linear okunur.
+        ValidateRequestNotNull(request);
 
-        // F2.3-8: Save path'inde user kesinlikle yaratılır — atomik upsert + select.
+        // Save path'inde user atomik upsert + select.
         var user = await repository.GetOrCreateUserAsync(deviceId, ct);
         await TryTouchLastSeenAsync(user, ct);
 
-        var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
-        if (scenarioLimit > 0)
-        {
-            var count = await repository.CountByUserIdAsync(user.Id, ct);
-            if (count >= scenarioLimit)
-                throw new ScenarioLimitExceededException(scenarioLimit);
-        }
+        await EnforceScenarioLimitAsync(user, ct);
 
-        if (string.IsNullOrWhiteSpace(request.Type))
-            throw new ValidationException(
-                string.Format(localizer["RequestPayloadMissing"], nameof(request.Type)),
-                field: nameof(request.Type));
-
-        // Trim before normalize: " what_if " ve " btc " gibi inputlar lookup'ta gereksiz fail etmemeli.
-        var normalizedType = request.Type.Trim().ToLowerInvariant();
-
-        // F2.5-2 sync: kabul edilen tipler tek noktadan (ScenarioTypes.All) gelir.
-        if (!ScenarioTypes.All.Contains(normalizedType))
-            throw new ValidationException(
-                string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", ScenarioTypes.All)),
-                field: nameof(request.Type));
-
-        // F2.2-11 ([C-B-SavedScenario-2]): asset sembolü what_if/dca için zorunlu,
-        // comparison/portfolio için opsiyonel (portföy "PORTFOLIO" gibi sentinel
-        // sembol veya boş gönderebilir). Tip-bağımlı validation aşağıda yapılır.
-        var requiresAssetSymbol = normalizedType is ScenarioTypes.WhatIf or ScenarioTypes.Dca;
-        if (requiresAssetSymbol && string.IsNullOrWhiteSpace(request.AssetSymbol))
-            throw new ValidationException(
-                string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbol)),
-                field: nameof(request.AssetSymbol));
-
-        // Boş sembol gelirse (comparison/portfolio için) sentinel kullan.
-        var trimmedSymbol = string.IsNullOrWhiteSpace(request.AssetSymbol)
-            ? "PORTFOLIO"
-            : request.AssetSymbol.Trim();
-        if (trimmedSymbol.Length > MaxSymbolLength)
-            throw new ValidationException(
-                string.Format(localizer["FieldTooLong"], nameof(request.AssetSymbol), MaxSymbolLength),
-                field: nameof(request.AssetSymbol));
-        if (!string.IsNullOrEmpty(request.AssetDisplayName)
-            && request.AssetDisplayName.Length > MaxDisplayNameLength)
-            throw new ValidationException(
-                string.Format(localizer["FieldTooLong"], nameof(request.AssetDisplayName), MaxDisplayNameLength),
-                field: nameof(request.AssetDisplayName));
-        if (!string.IsNullOrEmpty(request.Label) && request.Label.Length > MaxLabelLength)
-            throw new ValidationException(
-                string.Format(localizer["FieldTooLong"], nameof(request.Label), MaxLabelLength),
-                field: nameof(request.Label));
-
-        // SVCR-012: Quantity ≤ 0 DB'ye yazılmasın — semantic anlamsız.
-        // (request.Amount → SavedScenario.Quantity'ye map ediliyor.)
-        if (request.Amount <= 0m)
-            throw new ValidationException(
-                localizer["AmountMustBePositive"], field: nameof(request.Amount));
+        var normalizedType = NormalizeAndValidateType(request);
+        var (trimmedSymbol, requiresAssetSymbol) = ValidateAssetSymbol(request, normalizedType);
+        ValidateOptionalFields(request);
+        ValidateQuantity(request);
 
         // F2.3-6 ([C-C-29]): client-tarafı AssetDisplayName artık güven kaynağı değil —
-        // server-side resolve. what_if/dca için Asset tablosundan kanonik isim okunur;
-        // comparison/portfolio için label varsa label, yoksa sembolün kendisi kullanılır.
+        // server-side resolve.
         Asset? asset = null;
         string canonicalSymbol       = trimmedSymbol.ToUpperInvariant();
         string  canonicalDisplayName = canonicalSymbol;
@@ -208,4 +157,83 @@ public sealed class SavedScenarioService(
         s.Type,
         s.ExtraData
     );
+
+    // ─── Sonar S3776: SaveScenarioAsync için validation helper'ları ──────────
+
+    private void ValidateRequestNotNull(SaveScenarioRequest request)
+    {
+        // P1R-003: domain ValidationException ile guard.
+        if (request is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+    }
+
+    private async Task EnforceScenarioLimitAsync(User user, CancellationToken ct)
+    {
+        var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
+        if (scenarioLimit <= 0) return;
+
+        var count = await repository.CountByUserIdAsync(user.Id, ct);
+        if (count >= scenarioLimit)
+            throw new ScenarioLimitExceededException(scenarioLimit);
+    }
+
+    private string NormalizeAndValidateType(SaveScenarioRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Type))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.Type)),
+                field: nameof(request.Type));
+
+        // Trim before normalize: " what_if " ve " btc " gibi inputlar lookup'ta gereksiz fail etmemeli.
+        var normalizedType = request.Type.Trim().ToLowerInvariant();
+
+        // F2.5-2 sync: kabul edilen tipler tek noktadan (ScenarioTypes.All) gelir.
+        if (!ScenarioTypes.Lookup.Contains(normalizedType))
+            throw new ValidationException(
+                string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", ScenarioTypes.All)),
+                field: nameof(request.Type));
+        return normalizedType;
+    }
+
+    private (string TrimmedSymbol, bool RequiresAssetSymbol) ValidateAssetSymbol(
+        SaveScenarioRequest request, string normalizedType)
+    {
+        // F2.2-11: what_if/dca zorunlu sembol; comparison/portfolio için sentinel.
+        var requiresAssetSymbol = normalizedType is ScenarioTypes.WhatIf or ScenarioTypes.Dca;
+        if (requiresAssetSymbol && string.IsNullOrWhiteSpace(request.AssetSymbol))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbol)),
+                field: nameof(request.AssetSymbol));
+
+        var trimmedSymbol = string.IsNullOrWhiteSpace(request.AssetSymbol)
+            ? "PORTFOLIO"
+            : request.AssetSymbol.Trim();
+        if (trimmedSymbol.Length > MaxSymbolLength)
+            throw new ValidationException(
+                string.Format(localizer["FieldTooLong"], nameof(request.AssetSymbol), MaxSymbolLength),
+                field: nameof(request.AssetSymbol));
+        return (trimmedSymbol, requiresAssetSymbol);
+    }
+
+    private void ValidateOptionalFields(SaveScenarioRequest request)
+    {
+        if (!string.IsNullOrEmpty(request.AssetDisplayName)
+            && request.AssetDisplayName.Length > MaxDisplayNameLength)
+            throw new ValidationException(
+                string.Format(localizer["FieldTooLong"], nameof(request.AssetDisplayName), MaxDisplayNameLength),
+                field: nameof(request.AssetDisplayName));
+        if (!string.IsNullOrEmpty(request.Label) && request.Label.Length > MaxLabelLength)
+            throw new ValidationException(
+                string.Format(localizer["FieldTooLong"], nameof(request.Label), MaxLabelLength),
+                field: nameof(request.Label));
+    }
+
+    private void ValidateQuantity(SaveScenarioRequest request)
+    {
+        // SVCR-012: Quantity ≤ 0 DB'ye yazılmasın (request.Amount → SavedScenario.Quantity).
+        if (request.Amount <= 0m)
+            throw new ValidationException(
+                localizer["AmountMustBePositive"], field: nameof(request.Amount));
+    }
 }

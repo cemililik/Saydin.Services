@@ -23,7 +23,7 @@ public sealed class ChannelActivityLogger(
             // Action tag whitelist'e tabi tutulur — bilinmeyen action gelirse "unknown"
             // fallback ile yazılır, Prometheus tag cardinality fixed kümede kalır
             // (~12 değer); dev'in keyfi action string'i metric explosion'a yol açmaz.
-            var actionTag = ActivityActions.All.Contains(entry.Action) ? entry.Action : "unknown";
+            var actionTag = ActivityActions.Lookup.Contains(entry.Action) ? entry.Action : "unknown";
             SaydinMetrics.ActivityLogQueueDrops.Add(1, new KeyValuePair<string, object?>("action", actionTag));
             logger.LogWarning("Activity log kuyruğu dolu, kayıt düşürüldü: {Action}", entry.Action);
         }

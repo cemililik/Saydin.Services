@@ -138,7 +138,10 @@ public abstract class BaseAssetWorker(
     {
         var backoff = TimeSpan.FromMinutes(5);
         const int maxAttempts = 5;
-        logger.LogError(cause,
+        // Sonar S6646: aynı block içinde 2 LogError vardı (giriş + tükenme). Giriş
+        // mesajı transient hata için "henüz error değil" → LogWarning'e indirildi.
+        // Asıl LogError sadece tüm denemeler tükendiğinde atılır.
+        logger.LogWarning(cause,
             "{Source} günlük çekim sırasında beklenmeyen hata — exponential backoff ile {Max} deneme",
             adapter.Source, maxAttempts);
 

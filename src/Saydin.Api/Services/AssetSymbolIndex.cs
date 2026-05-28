@@ -52,11 +52,15 @@ public sealed class AssetSymbolIndex : IAssetSymbolIndex
 
     private static FrozenDictionary<string, Asset> BuildIndex(IReadOnlyList<Asset> assets)
     {
+        // F8 follow-up: Lookup `symbol.ToUpperInvariant()` ile sorguluyordu ama
+        // BuildIndex raw `a.Symbol` ile saklıyordu. AssetConfiguration sembolü
+        // normalize etmiyor → mixed-case asset satırı pratikte kalıcı cache miss'e
+        // yol açıyordu. Burada da ToUpperInvariant ile saklarız; Lookup ile birebir uyum.
         // Aynı sembolü taşıyan iki satır pratikte yok (Asset.Symbol UNIQUE) — ama
         // savunma: son giren kazanır.
         var dict = new Dictionary<string, Asset>(assets.Count, StringComparer.Ordinal);
         foreach (var a in assets)
-            dict[a.Symbol] = a;
+            dict[a.Symbol.ToUpperInvariant()] = a;
         return dict.ToFrozenDictionary(StringComparer.Ordinal);
     }
 

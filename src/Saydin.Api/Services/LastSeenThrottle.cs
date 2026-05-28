@@ -26,8 +26,9 @@ public sealed class LastSeenThrottle : ILastSeenThrottle
     // sağladığı için "stale" tutmuş olsak bile semantik kayıp yok.
     private const int MaxEntries = 100_000;
 
-    // SVCR-009/010: Concurrent map. Race-free güncelleme `AddOrUpdate` üzerinden;
-    // factory paralel çağrılırsa atomik şekilde yalnız bir tanesi pencere açar.
+    // SVCR-009/010: Lock-free TryGetValue/TryAdd/TryUpdate döngüsü ile çalışan
+    // concurrent map (bkz. ShouldUpdate). Factory side-effect tipiyle race
+    // riskini taşıyan AddOrUpdate kullanılmaz.
     private readonly ConcurrentDictionary<Guid, DateTimeOffset> _lastUpdates = new();
 
     public bool ShouldUpdate(Guid userId)

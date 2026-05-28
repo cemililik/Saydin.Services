@@ -1,5 +1,6 @@
-# CFGR-003 follow-up: SHA digest pin (bkz. Saydin.Api/Dockerfile).
-FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:69ff714a42f7931475acfcd2792d69cd4a656e4f3653d520e25c0fbe3c6d0cba AS build
+# CFGR-003 follow-up + Sonar S6596: SHA digest pin (digest tek başına; tag yok).
+# tag: 10.0 (mcr.microsoft.com/dotnet/sdk)
+FROM mcr.microsoft.com/dotnet/sdk@sha256:69ff714a42f7931475acfcd2792d69cd4a656e4f3653d520e25c0fbe3c6d0cba AS build
 WORKDIR /app
 
 # Directory.Packages.props: Central Package Management — csproj'lar Version belirtmiyor,
@@ -15,7 +16,8 @@ RUN dotnet publish src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj \
     -c Release \
     -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/runtime:10.0@sha256:01ce5748bb1d7d3f356524c1c1514b8c3f2a251e2b40e7d2c63f2dd4847bf1c4 AS runtime
+# tag: 10.0 (mcr.microsoft.com/dotnet/runtime)
+FROM mcr.microsoft.com/dotnet/runtime@sha256:01ce5748bb1d7d3f356524c1c1514b8c3f2a251e2b40e7d2c63f2dd4847bf1c4 AS runtime
 WORKDIR /app
 
 RUN apt-get update \

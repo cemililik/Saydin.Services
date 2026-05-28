@@ -41,10 +41,10 @@ otomatik temizlenir, manuel flush gerekmez.
 
 | Cache | Tip | Sınır | Eviction | Hedef |
 |---|---|---|---|---|
-| `AssetService` symbol→asset dict | `ConcurrentDictionary` | asset count'a göre versiyonlu | invalidasyon = count değişimi | F2.2-20 O(1) sembol lookup |
-| `OpenExchangeRatesAdapter._dayCache` | `ConcurrentDictionary<DateOnly, CachedJson>` | 10k entry + 24sa TTL | en eski yarıyı at | F2.4-4 bellek kontrolü |
-| `TcmbAdapter` day-level XML | `ConcurrentDictionary<DateOnly, CachedXmlEntry>` | 10k entry + 60dk TTL | LRU benzeri | F1.1-2 day dedup |
-| `LastSeenThrottle` | `ConcurrentDictionary<Guid, DateTimeOffset>` | aktif user sayısı | 5dk pencere doğal overwrite | F2.2-12 last_seen throttling |
+| `IAssetSymbolIndex` symbol→asset snapshot | `FrozenDictionary<string, Asset>` (immutable snapshot, singleton) | asset listesi **içerik hash'i** (XOR / Count) ile versiyonlu | hash değişiminde `Interlocked.CompareExchange` ile snapshot atılır + yeni `FrozenDictionary` inşa edilir | F2.2-20 / SVCR-001..003 O(1) sembol lookup, content-aware invalidation |
+| `OpenExchangeRatesAdapter._dayCache` | `ConcurrentDictionary<DateOnly, CachedJson>` | 10_000 entry üst sınırı + 24sa entry TTL | TTL miss → entry silinir; sınır aşılınca `EvictOldestHalf` (CachedAt'a göre en eski yarısı atılır, `Interlocked.CompareExchange` flag ile tek seferlik) | F2.4-4 / INGR-008/009 bellek kontrolü, race-free eviction |
+| `TcmbAdapter` day-level XML | `ConcurrentDictionary<DateOnly, CachedXmlEntry>` | 10_000 entry üst sınırı + 60 dk entry TTL | TTL bazlı stale silme + sınır aşılınca en eski entry'ler atılır (CachedAt sıralı) | F1.1-2 day dedup |
+| `LastSeenThrottle` | `ConcurrentDictionary<Guid, DateTimeOffset>` (lock-free TryGetValue/TryAdd/TryUpdate loop) | **MaxEntries=100_000** sabit üst sınır | sınır aşılınca `MaybeEvict`: (a) pencere dışı (>5dk) entry'ler tek geçişte silinir, (b) hâlâ sınır üstündeyse en eski yarısı atılır (deterministik); `Interlocked.CompareExchange` flag ile tek seferlik | F2.2-12 / SVCR-009/010 last_seen UPDATE throttling, race-free + bounded |
 
 ---
 

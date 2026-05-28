@@ -10,7 +10,14 @@ public static class UserTiers
     public const string Free    = "free";
     public const string Premium = "premium";
 
-    /// <summary>Tüm geçerli değerlerin sırasız kümesi (case-insensitive eşleşme).</summary>
-    public static readonly IReadOnlySet<string> All =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Free, Premium };
+    /// <summary>F13 follow-up: sıralı sabit liste — CHECK SQL deterministic.</summary>
+    public static readonly IReadOnlyList<string> All = new[]
+    {
+        Free,
+        Premium,
+    };
+
+    /// <summary>Case-insensitive membership kontrolü (kullanıcı kayıtlarındaki mixed-case).</summary>
+    public static readonly IReadOnlySet<string> Lookup =
+        new HashSet<string>(All, StringComparer.OrdinalIgnoreCase);
 }

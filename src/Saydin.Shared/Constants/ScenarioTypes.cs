@@ -12,7 +12,16 @@ public static class ScenarioTypes
     public const string Portfolio  = "portfolio";
     public const string Dca        = "dca";
 
-    /// <summary>Tüm geçerli değerlerin sırasız kümesi (case-sensitive eşleşme).</summary>
-    public static readonly IReadOnlySet<string> All =
-        new HashSet<string>(StringComparer.Ordinal) { WhatIf, Comparison, Portfolio, Dca };
+    /// <summary>F13 follow-up: alfabetik sıralı sabit liste — CHECK SQL deterministic.</summary>
+    public static readonly IReadOnlyList<string> All = new[]
+    {
+        Comparison,
+        Dca,
+        Portfolio,
+        WhatIf,
+    };
+
+    /// <summary>O(1) membership kontrolü.</summary>
+    public static readonly IReadOnlySet<string> Lookup =
+        new HashSet<string>(All, StringComparer.Ordinal);
 }

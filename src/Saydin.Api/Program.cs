@@ -221,6 +221,10 @@ try
     // SVCR-001/002/003 follow-up: AssetService'in static field cache'i kalktı.
     // IAssetSymbolIndex singleton — içerik hash imzasıyla snapshot; atomik swap.
     builder.Services.AddSingleton<IAssetSymbolIndex, AssetSymbolIndex>();
+    // F5 follow-up: endpoint katmanı repository'ye doğrudan erişmesin diye
+    // plan limitlerini çözen service. Sonar S107 ile birlikte handler parametre
+    // sayısı 8'den 6'ya iner.
+    builder.Services.AddScoped<IPlanLimitResolver, PlanLimitResolver>();
 
     // ─── GeoIP (IP → ülke/şehir çözümleme) ────────────────────────────────────
     builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();

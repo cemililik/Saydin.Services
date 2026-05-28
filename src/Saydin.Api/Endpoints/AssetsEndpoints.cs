@@ -1,9 +1,6 @@
 using Microsoft.Extensions.Localization;
-using Microsoft.Extensions.Options;
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Responses;
-using Saydin.Api.Options;
-using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Exceptions;
 
@@ -18,19 +15,6 @@ public static class AssetsEndpoints
     /// 10 yıldan uzun aralık DoS / pratik olmayan response sebebi sayılır.
     /// </summary>
     private const int MaxPriceRangeDays = 3650;
-
-    /// <summary>
-    /// SVCR-015: kullanıcının tier'ına göre `DailyAssetQueryLimit` döner. Önceki
-    /// sürüm her zaman <c>Free.DailyAssetQueryLimit</c> kullanıyordu — premium
-    /// kullanıcı bile free limit'e tabi kalıyordu.
-    /// </summary>
-    private static async Task<int> ResolveLimitAsync(
-        ISavedScenarioRepository scenarioRepository, IOptions<PlanOptions> plans,
-        string deviceId, CancellationToken ct)
-    {
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        return plans.Value.GetTierOptions(user?.Tier).DailyAssetQueryLimit;
-    }
 
     private static async Task TryReleaseAsync(
         IDailyLimitGuard limitGuard, string deviceId, int limit, HttpContext httpContext)
@@ -87,13 +71,12 @@ public static class AssetsEndpoints
         HttpContext httpContext,
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
-        ISavedScenarioRepository scenarioRepository,
-        IOptions<PlanOptions> plans,
+        IPlanLimitResolver planLimits,
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("assets_list");
         var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = await ResolveLimitAsync(scenarioRepository, plans, deviceId, ct);
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
 
         await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
         try
@@ -117,13 +100,12 @@ public static class AssetsEndpoints
         HttpContext httpContext,
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
-        ISavedScenarioRepository scenarioRepository,
-        IOptions<PlanOptions> plans,
+        IPlanLimitResolver planLimits,
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("asset_price");
         var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = await ResolveLimitAsync(scenarioRepository, plans, deviceId, ct);
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
 
         await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
         try
@@ -153,8 +135,7 @@ public static class AssetsEndpoints
         HttpContext httpContext,
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
-        ISavedScenarioRepository scenarioRepository,
-        IOptions<PlanOptions> plans,
+        IPlanLimitResolver planLimits,
         IStringLocalizer<ErrorMessages> localizer,
         CancellationToken ct,
         string interval = "daily")
@@ -171,7 +152,7 @@ public static class AssetsEndpoints
 
         var log = httpContext.GetOrCreateActivityLog("asset_price_range");
         var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = await ResolveLimitAsync(scenarioRepository, plans, deviceId, ct);
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
 
         await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
         try
@@ -186,7 +167,11 @@ public static class AssetsEndpoints
                 interval,
                 pointCount = points.Count
             });
-            return Results.Ok(new PriceRangeResponse(symbol, interval, points));
+            // F7 follow-up: domain `PricePoint` sızıntısı kalkar — public DTO map.
+            var pricePoints = points
+                .Select(p => new PricePointResponse(p.PriceDate, p.Close, p.Open, p.High, p.Low, p.Volume))
+                .ToList();
+            return Results.Ok(new PriceRangeResponse(symbol, interval, pricePoints));
         }
         catch
         {

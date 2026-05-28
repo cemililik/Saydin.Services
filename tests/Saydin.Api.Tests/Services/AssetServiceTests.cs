@@ -161,6 +161,9 @@ public class AssetServiceTests
 
         result.Should().HaveCount(1);
         result[0].Symbol.Should().Be("USDTRY");
+        // F14 follow-up: Category string kontrat regresyonu için assertion eklendi
+        // (enum → string projeksiyonu F2.3-7'de yapılmıştı; cache-hit path'i koruma).
+        result[0].Category.Should().Be("currency");
         await _repository.DidNotReceive()
             .GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>());
     }

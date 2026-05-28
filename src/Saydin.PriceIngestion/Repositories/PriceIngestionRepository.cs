@@ -86,9 +86,11 @@ public sealed class PriceIngestionRepository(IDbContextFactory<SaydinDbContext> 
     }
 
     /// <summary>
-    /// F2.4-9 ([G-D-04]): Belirli bir asset için aralıktaki "var olmayan" price_date
-    /// gün setini döner. Backfill bu gap kümesini hedefleyerek "latestDate sonrası tek
-    /// blok" varsayımını terk eder — geçmişte bir worker ortası kalan boşluklar da kapanır.
+    /// F2.4-9 ([G-D-04]): Belirli bir asset için aralıkta DB'de **var olan** (mevcut)
+    /// price_date gün setini döner. Caller "gap" kümesini, beklenen tarih aralığından
+    /// bu seti çıkararak hesaplar (<see cref="Workers.BaseAssetWorker.ComputeMissingRanges"/>).
+    /// Backfill ettiği yer "latestDate sonrası tek blok" varsayımını terk eder —
+    /// geçmişte bir worker ortası kalan boşluklar da kapanır.
     /// </summary>
     public async Task<IReadOnlySet<DateOnly>> GetExistingDatesAsync(
         Guid assetId, DateOnly from, DateOnly to, CancellationToken ct)
