@@ -62,4 +62,15 @@ public static class SaydinMetrics
         Meter.CreateCounter<long>(
             "saydin.activity_log.queue.drops.total",
             description: "Channel kuyruğu dolduğundan dolayı düşürülen activity log sayısı");
+
+    /// <summary>
+    /// LOGR-028 follow-up: <c>ActivityLogBuilder</c> pre-validation aşamasında
+    /// `data` JSONB byte size limitini aşan kayıt sayısı. Tag: action="...".
+    /// Builder placeholder yazar, gerçek payload kullanıcı tarafına geri dönmez —
+    /// bu sayaç olmadan trunc edilmiş data sessizce kaybolurdu.
+    /// </summary>
+    public static readonly Counter<long> ActivityLogDataTruncations =
+        Meter.CreateCounter<long>(
+            "saydin.activity_log.data.truncations.total",
+            description: "Pre-validation aşamasında byte limit aşıldığı için truncate edilen data sayısı");
 }

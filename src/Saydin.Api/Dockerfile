@@ -1,7 +1,8 @@
-# CFGR-003: Base image patch-level pin. SHA digest pin'leme prod için
-# (Dependabot/Renovate ile otomatik bump) ileride eklenmeli; floating `:10.0`
-# yerine `:10.0.0-bookworm-slim` minor + flavor sabit kalır.
-FROM mcr.microsoft.com/dotnet/sdk:10.0.0-bookworm-slim AS build
+# CFGR-003 follow-up: SHA digest pin (immutable). `:10.0-bookworm-slim` MCR'da
+# yok (P2R PR #12 CI fail kanıtı); `:10.0` (multi-arch manifest list) + SHA
+# digest reproducibility'yi garanti eder. Dependabot/Renovate `mcr.microsoft.com/
+# dotnet/sdk:10.0` pattern'iyle bump'ı otomatikleştirebilir.
+FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:69ff714a42f7931475acfcd2792d69cd4a656e4f3653d520e25c0fbe3c6d0cba AS build
 WORKDIR /app
 
 # Bağımlılık katmanını önbelleğe al
@@ -19,7 +20,7 @@ RUN dotnet publish src/Saydin.Api/Saydin.Api.csproj \
     -c Release \
     -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.0-bookworm-slim AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:a7f704b4b87284c80df9b90ab0e06810a241785204dc191ec05f2b26b5847623 AS runtime
 WORKDIR /app
 
 # libgssapi-krb5-2: .NET runtime GSSAPI/Kerberos kütüphanesini yükler;

@@ -33,41 +33,56 @@ public sealed class LastSeenThrottle : ILastSeenThrottle
     public bool ShouldUpdate(Guid userId)
     {
         var now = DateTimeOffset.UtcNow;
-        var winner = false;
 
-        // SVCR-009: check-then-write yarışı kapalı. AddOrUpdate atomik: aynı
-        // kullanıcı için iki paralel çağrıdan yalnız biri `winner=true` alır.
-        _lastUpdates.AddOrUpdate(
-            userId,
-            addValueFactory: _ =>
-            {
-                winner = true;
-                return now;
-            },
-            updateValueFactory: (_, previous) =>
+        // SVCR-009 follow-up (Codacy uyarısı): `AddOrUpdate` factory delegate'leri
+        // contention durumunda birden fazla kez çağrılabilir; factory içinde local
+        // bayrak set etmek "winner" bilgisinin yanlış kalmasına yol açabiliyordu.
+        // Lock-free TryGetValue/TryAdd/TryUpdate döngüsü ile factory side-effect'siz:
+        //   1. Snapshot oku → pencere içinde mi karar ver.
+        //   2. Snapshot bulunmazsa TryAdd ile yarış: kazanan winner=true.
+        //   3. Pencere dışındaysa TryUpdate ile yarış: kazanan winner=true.
+        //   4. Race kaybedersek (concurrent başka thread güncelledi) baştan tara.
+        while (true)
+        {
+            if (_lastUpdates.TryGetValue(userId, out var previous))
             {
                 if (now - previous < Window)
-                    return previous; // pencere içinde — UPDATE atılmaz
-                winner = true;
-                return now;
-            });
+                    return false; // pencere içinde — UPDATE atılmaz
 
+                if (_lastUpdates.TryUpdate(userId, now, previous))
+                {
+                    MaybeEvict(now);
+                    return true; // pencere dışıydı, biz güncelledik → UPDATE atılır
+                }
+                // TryUpdate fail → başka thread snapshot değiştirdi; baştan tara.
+                continue;
+            }
+
+            if (_lastUpdates.TryAdd(userId, now))
+            {
+                MaybeEvict(now);
+                return true; // yeni kullanıcı, biz ekledik → UPDATE atılır
+            }
+            // TryAdd fail → başka thread aynı anda ekledi; döngüye dön ve TryGetValue ile bak.
+        }
+    }
+
+    private void MaybeEvict(DateTimeOffset now)
+    {
         // SVCR-010: en eski yarıyı evict. Hot path'te O(N) tarama olmasın diye
         // sınıra ulaşıldığında bir kez yapılır; aynı `now`'da paralel iki eviction
         // tetiklenirse Interlocked flag ile tek seferlik koşulur.
-        if (_lastUpdates.Count > MaxEntries && Interlocked.Exchange(ref _evicting, 1) == 0)
+        if (_lastUpdates.Count <= MaxEntries
+            || Interlocked.CompareExchange(ref _evicting, 1, 0) != 0)
+            return;
+        try
         {
-            try
-            {
-                EvictOldestHalf(now);
-            }
-            finally
-            {
-                Volatile.Write(ref _evicting, 0);
-            }
+            EvictOldestHalf(now);
         }
-
-        return winner;
+        finally
+        {
+            Volatile.Write(ref _evicting, 0);
+        }
     }
 
     private int _evicting;

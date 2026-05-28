@@ -25,10 +25,13 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      # CFGR-004: Third-party action'lar full-length commit SHA ile pinli; tag (v4)
+      # mutable'dır. Dependabot/Renovate `# v4` yorumlarını okuyarak otomatik bump
+      # yapabilir.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: .NET SDK kur
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           # F2.9-3 ([C-I-4]): global.json'daki SDK pin'i kullan (10.0.100 +
           # rollForward: latestFeature). Dolayısıyla repo CLI ile birebir aynı SDK.
@@ -55,7 +58,7 @@ jobs:
       # karşılaştırılabilir kılar (Codecov / Coveralls'a feed edilebilir).
       - name: Coverage artefakt yükle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-reports
           path: '**/coverage.cobertura.xml'
@@ -115,13 +118,14 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # F2.9-2 ([C-I-3]): Docker layer cache. BuildKit + GitHub Actions cache backend
       # (`type=gha`) ile sonraki run'lar `dotnet restore` ve `RUN` katmanlarını
       # yeniden kullanır. Soğuk build ~2dk → cache hit'te ~10sn.
+      # CFGR-004: SHA pin.
       - name: Docker Buildx kur
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # CFGR-002: Fork PR cache poisoning'i engelle. Cache **yazma** sadece
       # internal push'larda (main / development) yapılır; fork PR'lar cache'i
@@ -138,7 +142,7 @@ jobs:
           fi
 
       - name: Saydin.Api Docker image build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: src/Saydin.Api/Dockerfile
@@ -149,7 +153,7 @@ jobs:
           cache-to: ${{ steps.cache_target.outputs.api }}
 
       - name: Saydin.PriceIngestion Docker image build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: src/Saydin.PriceIngestion/Dockerfile

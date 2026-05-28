@@ -60,7 +60,9 @@ public class IpMaskerTests
     {
         // F2.1-10 ([C-A-30/31]): ::ffff:192.168.1.42 önce IPv4'e indirilmeli, son
         // okteti sıfırlanmalı. Aksi halde 16 byte yol tüm adresi sıfırlayıp anlam kayboluyordu.
-        var v4Mapped = IPAddress.Parse("::ffff:192.168.1.42");
+        // Codacy/SonarQube IP sabit kullanımına S1313 verir; test fixture sabitleri
+        // production secret değildir — RFC 5735 §3 / RFC 6890 doc IP range'i kullanılır.
+        var v4Mapped = IPAddress.Parse("::ffff:192.168.1.42"); // NOSONAR S1313 — test fixture, RFC 1918 private
 
         var masked = IpMasker.Mask(v4Mapped);
 

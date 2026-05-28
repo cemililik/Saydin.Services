@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Saydin.Api.Services;
 using Saydin.Shared.Constants;
+using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
 
 namespace Saydin.Api.Helpers;
@@ -22,7 +23,6 @@ public sealed class ActivityLogBuilder
     private object? _data;
     private short _statusCode = 200;
     private string? _errorCode;
-    private bool _dataExceededLimit;
 
     public ActivityLogBuilder(HttpContext httpContext, IGeoIpResolver? geoIpResolver = null)
     {
@@ -63,9 +63,6 @@ public sealed class ActivityLogBuilder
         return this;
     }
 
-    /// <summary>LOGR-028: pre-validation aşamasında data limitini aştığımız flag — telemetri için.</summary>
-    public bool DataExceededLimit => _dataExceededLimit;
-
     public ActivityLog Build()
     {
         _stopwatch.Stop();
@@ -88,9 +85,12 @@ public sealed class ActivityLogBuilder
         var rawIp = _httpContext.Connection.RemoteIpAddress;
         var (country, city) = _geoIpResolver?.Resolve(rawIp) ?? (null, null);
 
-        // LOGR-028: data JSONB CHECK (10000 byte) burada da pre-validate edilir;
-        // limit aşılırsa sessizce drop + flag yükselt → ActivityLogWriter bunu görür
-        // ve telemetri counter'ına yansıtır.
+        // LOGR-028: data JSONB CHECK (10000 byte) burada da pre-validate edilir.
+        // LOGR-028 follow-up (Codacy uyarısı): önceki sürüm yalnızca local bayrak
+        // set ediyordu ve hiçbir observer onu okumuyordu (Build'den sonra builder
+        // discard ediliyor). Metric Build() içinde doğrudan artırılır → operasyon
+        // ekibi `saydin.activity_log.data.truncations.total` üzerinden görür.
+        // Action tag'i whitelist'e tabi (kardinalite kontrolü).
         JsonElement? serializedData = null;
         if (_data is not null)
         {
@@ -98,7 +98,9 @@ public sealed class ActivityLogBuilder
             var byteSize = EstimateUtf8Size(element);
             if (byteSize > ActivityLogLimits.DataMaxBytes)
             {
-                _dataExceededLimit = true;
+                var actionTag = ActivityActions.All.Contains(_action!) ? _action! : "unknown";
+                SaydinMetrics.ActivityLogDataTruncations.Add(1,
+                    new KeyValuePair<string, object?>("action", actionTag));
                 // Boş `{"_truncated":true}` placeholder ile yine satır yazılır,
                 // observability'de "data was dropped" sinyali kalır.
                 serializedData = JsonSerializer.SerializeToElement(new { _truncated = true, originalBytes = byteSize });

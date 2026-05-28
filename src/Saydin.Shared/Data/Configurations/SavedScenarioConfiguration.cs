@@ -26,9 +26,15 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
         builder.Property(s => s.AssetSymbol).HasMaxLength(100).IsRequired();
         builder.Property(s => s.AssetDisplayName).HasMaxLength(200).IsRequired();
         builder.Property(s => s.Type).HasMaxLength(20).IsRequired().HasDefaultValue(ScenarioTypes.WhatIf);
-        // SHRD-012: JsonElement? için ValueComparer. Default raw-text equality her
-        // istekte gereksiz UPDATE üretiyordu (aynı obje, farklı whitespace/ordering →
-        // farklı raw text). ValueComparer JSON normalized text üzerinden karşılaştırır.
+        // SHRD-012: JsonElement? için ValueComparer. EF Core'un default object
+        // identity karşılaştırması struct JsonElement için her zaman "değişti"
+        // diyebiliyor; bu ValueComparer raw text üzerinden equality sağlar.
+        // NOT: GetRawText() normalizasyon YAPMAZ — whitespace farkları ve
+        // property order'ı doğrudan etkiler. Üretici tarafında deterministik
+        // serializer kullanılırsa (System.Text.Json default) aynı C# objesi
+        // için aynı raw text üretilir; pratikte gereksiz UPDATE riski yoktur.
+        // Tam normalize karşılaştırma istenirse JsonNode tree'ye parse + sort
+        // gerekir (allocation pahalı) — şu an basit yaklaşım kabul edilebilir.
         builder.Property(s => s.ExtraData)
             .HasColumnType("jsonb")
             .Metadata.SetValueComparer(new ValueComparer<JsonElement?>(
@@ -60,9 +66,10 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
     }
 
     /// <summary>
-    /// SHRD-012: İki <c>JsonElement?</c>'i normalized text üzerinden karşılaştır.
-    /// Whitespace farkları ve property order'ı etkilemez; null vs HasValue=false
-    /// = true olarak değerlendirilir.
+    /// SHRD-012: İki <c>JsonElement?</c>'i ham metin (raw text) üzerinden karşılaştır.
+    /// Null vs HasValue=false eşittir. Whitespace ve property order farkları
+    /// karşılaştırmayı etkiler — JsonElement.GetRawText() normalizasyon yapmaz;
+    /// deterministik serializer kullanmak çağıranın sorumluluğunda.
     /// </summary>
     private static bool CompareJson(JsonElement? a, JsonElement? b)
     {

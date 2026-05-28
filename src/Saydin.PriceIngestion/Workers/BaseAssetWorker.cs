@@ -114,14 +114,64 @@ public abstract class BaseAssetWorker(
                 // INGR-007: FetchTodayAsync non-shutdown exception (örn. transient DB
                 // hatası, dış API beklenmeyen geri dönüş) tüm worker'ı sessizce
                 // sonlandırmamalı. Loop'u kaldıran tek sebep shutdown token'ıdır.
-                // Burada 5 dk bekle + döngüye dön; bir sonraki scheduled saatte tekrar dene.
-                logger.LogError(ex,
-                    "{Source} günlük çekim sırasında beklenmeyen hata — 5dk bekle ve döngüye dön",
-                    adapter.Source);
-                try { await Task.Delay(TimeSpan.FromMinutes(5), ct); }
-                catch (OperationCanceledException) { break; }
+                //
+                // INGR-007 follow-up (Codacy uyarısı): basitçe `continue` yapmak
+                // GetDelayUntilNextRun()'in scheduled saatin geçtiğini görüp 24sa
+                // beklemesine yol açıyordu — günlük veri tamamen atlanırdı.
+                // Çözüm: exponential backoff ile aynı gün içinde sınırlı sayıda
+                // tekrar dene (5dk → 10dk → 20dk → 40dk → 80dk). Hepsi başarısız
+                // olursa bir sonraki scheduled saate düş (24sa yerine en fazla
+                // 155dk veri kaybı kabul edilebilir, "tamamen atlama" engellenir).
+                if (!await TryRecoverWithBackoffAsync(ex, ct))
+                    break; // cancellation token tetiklendi
             }
         }
+    }
+
+    /// <summary>
+    /// INGR-007 follow-up: Transient hatadan exponential backoff ile kurtulmayı dener.
+    /// Aynı gün içinde en fazla 5 deneme yapar; her biri başarılı olursa <c>true</c>
+    /// döner ve döngü normal scheduled cycle'a geri döner. Cancellation token
+    /// tetiklenirse <c>false</c> döner (caller break eder).
+    /// </summary>
+    private async Task<bool> TryRecoverWithBackoffAsync(Exception cause, CancellationToken ct)
+    {
+        var backoff = TimeSpan.FromMinutes(5);
+        const int maxAttempts = 5;
+        logger.LogError(cause,
+            "{Source} günlük çekim sırasında beklenmeyen hata — exponential backoff ile {Max} deneme",
+            adapter.Source, maxAttempts);
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try { await Task.Delay(backoff, ct); }
+            catch (OperationCanceledException) { return false; }
+
+            try
+            {
+                await FetchTodayAsync(ct);
+                logger.LogInformation(
+                    "{Source} transient hatadan kurtulundu (deneme {Attempt}/{Max})",
+                    adapter.Source, attempt, maxAttempts);
+                return true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return false;
+            }
+            catch (Exception retryEx)
+            {
+                logger.LogWarning(retryEx,
+                    "{Source} retry {Attempt}/{Max} başarısız; {Backoff:hh\\:mm} bekle",
+                    adapter.Source, attempt, maxAttempts, backoff);
+                backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+            }
+        }
+
+        logger.LogError(
+            "{Source} {MaxAttempts} deneme sonrasında günlük veri çekilemedi; bir sonraki scheduled cycle'a düşülüyor",
+            adapter.Source, maxAttempts);
+        return true; // caller döngüye dönsün; bir sonraki cycle planla.
     }
 
     private bool IsScheduledTimePassedToday()

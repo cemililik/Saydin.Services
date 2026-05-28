@@ -62,11 +62,17 @@ public sealed class AssetSymbolIndex : IAssetSymbolIndex
 
     private static int ComputeSignature(IReadOnlyList<Asset> assets)
     {
-        // Order-independent içerik imzası — Linq.Sum yerine accumulator (allocation yok).
+        // SVCR-001/002/003 follow-up (Codacy uyarısı): HashCode.Combine sıraya
+        // duyarlıdır. PostgreSQL `ORDER BY` belirtilmediği için VACUUM / UPDATE
+        // sonrası dönen sıra değişebilir → aynı içerik, farklı imza → gereksiz
+        // FrozenDictionary yeniden inşası.
+        //
+        // XOR'lu order-independent imza: her asset için içerik hash'i tek tek
+        // hesapla, sonuçları XOR ile birleştir. Listenin uzunluğunu Count haline
+        // dahil et ki delete-then-add senaryosu aynı hash'e düşmesin.
         var hash = 0;
         foreach (var a in assets)
-            hash = HashCode.Combine(hash, a.Symbol, a.IsActive, a.DisplayName, a.Category);
-        // Listenin uzunluğu da girsin ki delete-then-add aynı hash'e düşmesin.
+            hash ^= HashCode.Combine(a.Symbol, a.IsActive, a.DisplayName, a.Category);
         return HashCode.Combine(hash, assets.Count);
     }
 
