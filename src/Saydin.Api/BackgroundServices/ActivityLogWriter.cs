@@ -66,9 +66,9 @@ public sealed class ActivityLogWriter(
             if (buffer.Count > 0)
                 await FlushAsync(buffer, cts.Token);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
-            logger.LogWarning(
+            logger.LogWarning(ex,
                 "ActivityLogWriter shutdown drain timeout aşıldı ({Timeout}s); {Remaining} kayıt yazılamadı",
                 ShutdownDrainTimeout.TotalSeconds, buffer.Count + channel.Reader.Count);
         }

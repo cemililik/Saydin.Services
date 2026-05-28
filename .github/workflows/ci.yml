@@ -59,6 +59,11 @@ jobs:
             LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV" | head -1)
             BRANCH_RATE=$(grep -oP 'branch-rate="\K[^"]+' "$COV" | head -1)
 
+            # Bozuk/eksik Cobertura raporlarına karşı koruma — bc boş input
+            # alırsa hata fırlatıp tüm step'i FAIL ettirir.
+            [[ "$LINE_RATE"   =~ ^[0-9.]+$ ]] || LINE_RATE=0
+            [[ "$BRANCH_RATE" =~ ^[0-9.]+$ ]] || BRANCH_RATE=0
+
             LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf "%.1f")
             BRANCH_PCT=$(echo "$BRANCH_RATE * 100" | bc -l | xargs printf "%.1f")
             # Path'ten proje adını çıkar: ./tests/Saydin.Api.Tests/TestResults/<guid>/coverage.cobertura.xml

@@ -14,7 +14,7 @@ public sealed class DailyLimitGuard(
     private const string PremiumTier = "premium";
 
     private (bool HasLimit, int Limit, string Key) GetLimitAndKey(
-        User? user, string deviceId, string usageKeyPrefix, int? limitOverride)
+        User? user, string deviceId, string usageKeyPrefix, int? limitOverride, DateTime now)
     {
         // Premium kullanıcı override almıyorsa (yani caller bilinçli limit dayatmadıysa) sınırsız.
         // Karşılaştırma case-insensitive — tier "Premium" veya "PREMIUM" de gelebilir
@@ -29,7 +29,7 @@ public sealed class DailyLimitGuard(
         if (limit <= 0)
             return (false, 0, string.Empty);
 
-        var key = BuildUsageKey(user, deviceId, usageKeyPrefix);
+        var key = BuildUsageKey(user, deviceId, usageKeyPrefix, now);
         return (true, limit, key);
     }
 
@@ -40,7 +40,10 @@ public sealed class DailyLimitGuard(
         int? limitOverride = null,
         CancellationToken ct = default)
     {
-        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride);
+        // Tek nokta UtcNow okuması — key date'i ile TTL'in farklı dakikalardan
+        // (gece yarısı geçişinde) çıkmasını engeller.
+        var now = DateTime.UtcNow;
+        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
         try
@@ -78,12 +81,12 @@ public sealed class DailyLimitGuard(
         int? limitOverride = null,
         CancellationToken ct = default)
     {
-        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride);
+        // Aynı `now` değeri hem key date'i hem TTL hesabı için kullanılır;
+        // BuildUsageKey'in bağımsız UtcNow okuması ile oluşan midnight race kapanır.
+        var now = DateTime.UtcNow;
+        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
-        // DateTime.UtcNow tek noktadan okunur — aksi halde gece yarısı geçişinde
-        // (Date != Now arasında) TTL negatif çıkıp Redis PEXPIRE'ı bozabilir.
-        var now   = DateTime.UtcNow;
         var ttlMs = (long)(now.Date.AddDays(1) - now).TotalMilliseconds;
         try
         {
@@ -122,7 +125,8 @@ public sealed class DailyLimitGuard(
         int? limitOverride = null,
         CancellationToken ct = default)
     {
-        var (hasLimit, _, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride);
+        var now = DateTime.UtcNow;
+        var (hasLimit, _, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
         try
@@ -149,10 +153,18 @@ public sealed class DailyLimitGuard(
         }
     }
 
-    internal static string BuildUsageKey(User? user, string deviceId, string prefix)
+    /// <summary>
+    /// Usage key formatı: <c>{prefix}{userId|deviceId}:{yyyy-MM-dd}</c>.
+    /// <paramref name="now"/> parametresi opsiyonel; verilmezse <see cref="DateTime.UtcNow"/>
+    /// kullanılır (testler için kullanışlı). Production yollarında caller tek bir
+    /// timestamp yakalayıp TTL hesabıyla aynı değeri buraya geçirir — gece yarısı
+    /// race koşulu kapanır.
+    /// </summary>
+    internal static string BuildUsageKey(User? user, string deviceId, string prefix, DateTime? now = null)
     {
+        var effective = now ?? DateTime.UtcNow;
         var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var dateKey = effective.ToString("yyyy-MM-dd");
         return $"{prefix}{userId}:{dateKey}";
     }
 }
