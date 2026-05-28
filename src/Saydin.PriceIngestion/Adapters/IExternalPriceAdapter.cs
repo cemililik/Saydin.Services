@@ -4,7 +4,8 @@ namespace Saydin.PriceIngestion.Adapters;
 
 /// <summary>
 /// Dış finansal API adaptörlerinin ortak sözleşmesi.
-/// Her adaptör bu interface'i implement eder: TCMB, CoinGecko, GoldAPI, TwelveData.
+/// INGR-004 follow-up: GoldAPI pasifleştirildi (migration 003); aktif kaynaklar:
+/// TCMB, CoinGecko, OpenExchangeRates, TwelveData. EVDS ayrı `IInflationAdapter`'ı uygular.
 /// </summary>
 public interface IExternalPriceAdapter
 {

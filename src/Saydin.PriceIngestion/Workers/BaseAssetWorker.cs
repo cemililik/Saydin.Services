@@ -109,6 +109,18 @@ public abstract class BaseAssetWorker(
             {
                 break;
             }
+            catch (Exception ex)
+            {
+                // INGR-007: FetchTodayAsync non-shutdown exception (örn. transient DB
+                // hatası, dış API beklenmeyen geri dönüş) tüm worker'ı sessizce
+                // sonlandırmamalı. Loop'u kaldıran tek sebep shutdown token'ıdır.
+                // Burada 5 dk bekle + döngüye dön; bir sonraki scheduled saatte tekrar dene.
+                logger.LogError(ex,
+                    "{Source} günlük çekim sırasında beklenmeyen hata — 5dk bekle ve döngüye dön",
+                    adapter.Source);
+                try { await Task.Delay(TimeSpan.FromMinutes(5), ct); }
+                catch (OperationCanceledException) { break; }
+            }
         }
     }
 

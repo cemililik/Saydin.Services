@@ -15,7 +15,7 @@ public static class EvdsInflationMapper
     // TP.FG.J0 → EVDS JSON field: TP_FG_J0
     private const string FieldName = "TP_FG_J0";
 
-    public static IReadOnlyList<InflationRate> Map(string json)
+    public static IReadOnlyList<InflationRate> Map(string json, string source = "tuik")
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -48,7 +48,11 @@ public static class EvdsInflationMapper
             {
                 PeriodDate = periodDate,
                 IndexValue = indexValue,
-                Source     = "tuik",
+                // INGR-001: source parametrik — adapter `Source => "evds"` ile aynı
+                // değer geçilmesi tutarsızlığı kapatır. Default "tuik" mevcut data ile
+                // geriye uyumluluk için bırakıldı; caller EvdsInflationAdapter
+                // `EvdsInflationMapper.Map(json, source: Source)` ile doğru değeri verir.
+                Source     = source,
                 CreatedAt  = now,
                 UpdatedAt  = now,
             });

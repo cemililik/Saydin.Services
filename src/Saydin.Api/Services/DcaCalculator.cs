@@ -97,8 +97,9 @@ public sealed class DcaCalculator(
         var symbol     = request.AssetSymbol.ToUpperInvariant();
         var endDate    = request.EndDate
             ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
-        var amountType = request.AmountType.ToLowerInvariant();
-        var period     = request.Period.ToLowerInvariant();
+        // SVCR-018: amountType/period için trim öncelikli — "WEEKLY " geçerli sayılır.
+        var amountType = request.AmountType.Trim().ToLowerInvariant();
+        var period     = request.Period.Trim().ToLowerInvariant();
 
         if (request.StartDate > endDate)
             throw new ValidationException(localizer["BuyDateAfterSellDate"], field: nameof(request.StartDate));
@@ -143,9 +144,14 @@ public sealed class DcaCalculator(
         {
             var pricePoint    = await assetService.GetNearestPriceAsync(symbol, purchaseDate, ct);
             var price         = pricePoint.Close;
-            // F2.2-23 ([G-B-04]): non-positive fiyat → PriceNotFound (sıfır birim alım engellendi).
+            // F2.2-23 ([G-B-04]) / SVCR-016: non-positive fiyat → PriceNotFound + data bug log.
             if (price <= 0)
+            {
+                logger.LogWarning(
+                    "DCA purchase fiyat non-positive — data bug şüphesi: {Symbol} {Date} → {Price}",
+                    symbol, purchaseDate, price);
                 throw new PriceNotFoundException(symbol, purchaseDate);
+            }
 
             var unitsAcquired = Math.Round(request.PeriodicAmount / price, 6, MidpointRounding.AwayFromZero);
 
@@ -183,10 +189,17 @@ public sealed class DcaCalculator(
         // ── Güncel değer ve kâr/zarar ───────────────────────────────────────
         var latestPricePoint = await assetService.GetNearestPriceAsync(symbol, endDate, ct);
         var currentUnitPrice = latestPricePoint.Close;
-        // Purchase-side zero-price guard ile aynı kontrat — yoksa "0 TL şu an" diye
-        // uydurulmuş bir response döner. Terminal fiyatı bulunamadıysa 404.
-        if (currentUnitPrice == 0)
+        // SVCR-004 follow-up: purchase-side ≤0 guard ile asimetri kalktı. Negatif
+        // fiyat (data bug) terminalde de reddedilir; aksi halde negatif
+        // `currentValueTry` ve bozuk `IsProfit` sızar. Log warning data bug
+        // telemetrisini Prometheus/Aspire'a yansıtır (SVCR-016).
+        if (currentUnitPrice <= 0)
+        {
+            logger.LogWarning(
+                "DCA terminal fiyat non-positive — data bug şüphesi: {Symbol} {EndDate} → {Price}",
+                symbol, endDate, currentUnitPrice);
             throw new PriceNotFoundException(symbol, endDate);
+        }
 
         var totalUnitsAcquired = Math.Round(cumulativeUnits, 6, MidpointRounding.AwayFromZero);
         var totalInvestedTry   = Math.Round(cumulativeCost, 2, MidpointRounding.AwayFromZero);

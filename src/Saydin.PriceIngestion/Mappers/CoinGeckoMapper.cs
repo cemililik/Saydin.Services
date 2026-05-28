@@ -18,9 +18,12 @@ public static class CoinGeckoMapper
         using var doc = JsonDocument.Parse(json);
         var prices = doc.RootElement.GetProperty("prices");
 
-        // Her gün için "midnight'a uzaklık (ms) + fiyat" tutulur. İlk gözlem koşulsuz
-        // yazılır; sonraki gözlem midnight'a daha yakınsa üzerine yazılır.
-        var daily = new Dictionary<DateOnly, (long DistanceMs, decimal Price)>();
+        // Her gün için "midnight'a uzaklık (ms) + ham timestamp + fiyat" tutulur.
+        // INGR-003: tie-breaking deterministik — aynı uzaklıkta iki gözlem geldiğinde
+        // **küçük timestamp** (yani önce gelen, daha "midnight'a doğru" olan) kazanır.
+        // Önceki strict `<` aynı timestamp'in iki kez geldiği patolojik girişte array
+        // sırasına bağlıydı; deterministik tie-break sırayı dışarıdan tahmin edilebilir kılar.
+        var daily = new Dictionary<DateOnly, (long DistanceMs, long TimestampMs, decimal Price)>();
 
         foreach (var pair in prices.EnumerateArray())
         {
@@ -34,8 +37,12 @@ public static class CoinGeckoMapper
             var midnight    = new DateTimeOffset(date.Year, date.Month, date.Day, 0, 0, 0, TimeSpan.Zero);
             var distanceMs  = Math.Abs((long)(utcMoment - midnight).TotalMilliseconds);
 
-            if (!daily.TryGetValue(date, out var existing) || distanceMs < existing.DistanceMs)
-                daily[date] = (distanceMs, price);
+            if (!daily.TryGetValue(date, out var existing)
+                || distanceMs < existing.DistanceMs
+                || (distanceMs == existing.DistanceMs && timestampMs < existing.TimestampMs))
+            {
+                daily[date] = (distanceMs, timestampMs, price);
+            }
         }
 
         return daily
@@ -50,3 +57,4 @@ public static class CoinGeckoMapper
             .AsReadOnly();
     }
 }
+

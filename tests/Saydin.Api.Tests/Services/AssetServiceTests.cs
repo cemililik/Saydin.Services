@@ -41,8 +41,11 @@ public class AssetServiceTests
         _assetNameLocalizer.Localize(Arg.Any<string>(), Arg.Any<string?>())
                            .Returns(ci => (string?)ci[1] ?? (string)ci[0]);
 
+        // SVCR-001/002/003 follow-up: IAssetSymbolIndex singleton testlerde gerçek
+        // implementasyonla beslenir (instance scope test isolation'ı bozmaz).
         _sut = new AssetService(
-            _repository, _cache, _assetNameLocalizer, _localizer, NullLogger<AssetService>.Instance);
+            _repository, _cache, new AssetSymbolIndex(),
+            _assetNameLocalizer, _localizer, NullLogger<AssetService>.Instance);
     }
 
     // ── GetPriceAsync ────────────────────────────────────────────────────────

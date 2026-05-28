@@ -75,7 +75,9 @@ public sealed class EvdsInflationAdapter(
             }
 
             var json = await response.Content.ReadAsStringAsync(ct);
-            var rates = EvdsInflationMapper.Map(json);
+            // INGR-001: Source `Source` ile aynı değer ("evds") map'lenir; adapter
+            // ile DB satırı arasında source-string tutarsızlığı kalktı.
+            var rates = EvdsInflationMapper.Map(json, source: Source);
 
             logger.LogInformation(
                 "EVDS TÜFE: {Count} aylık endeks alındı ({From}–{To})",

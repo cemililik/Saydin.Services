@@ -1,4 +1,5 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# CFGR-003: Base image patch-level pin (bkz. Saydin.Api/Dockerfile).
+FROM mcr.microsoft.com/dotnet/sdk:10.0.0-bookworm-slim AS build
 WORKDIR /app
 
 # Directory.Packages.props: Central Package Management — csproj'lar Version belirtmiyor,
@@ -14,7 +15,7 @@ RUN dotnet publish src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj \
     -c Release \
     -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
+FROM mcr.microsoft.com/dotnet/runtime:10.0.0-bookworm-slim AS runtime
 WORKDIR /app
 
 RUN apt-get update \

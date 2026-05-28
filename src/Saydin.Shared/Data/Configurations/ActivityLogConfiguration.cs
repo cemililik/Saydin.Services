@@ -16,17 +16,21 @@ public sealed class ActivityLogConfiguration : IEntityTypeConfiguration<Activity
             $"action IN ({string.Join(", ", ActivityActions.All.Select(v => $"'{v}'"))})"));
         builder.HasKey(a => new { a.Id, a.CreatedAt });
 
-        builder.Property(a => a.DeviceId).HasMaxLength(200).IsRequired();
-        builder.Property(a => a.Action).HasMaxLength(30).IsRequired();
+        // LOGR-007: ActivityLogLimits constants tek source-of-truth. Sabitler değişirse
+        // hem migration hem bu konfigürasyon güncellenmelidir.
+        builder.Property(a => a.DeviceId).HasMaxLength(ActivityLogLimits.DeviceIdMaxLength).IsRequired();
+        builder.Property(a => a.Action).HasMaxLength(ActivityLogLimits.ActionMaxLength).IsRequired();
         builder.Property(a => a.IpAddress).HasColumnType("inet");
-        builder.Property(a => a.Country).HasMaxLength(2);
-        builder.Property(a => a.City).HasMaxLength(100);
-        builder.Property(a => a.DeviceOs).HasMaxLength(30);
-        builder.Property(a => a.OsVersion).HasMaxLength(100);
-        builder.Property(a => a.AppVersion).HasMaxLength(50);
+        builder.Property(a => a.Country).HasMaxLength(ActivityLogLimits.CountryMaxLength);
+        builder.Property(a => a.City).HasMaxLength(ActivityLogLimits.CityMaxLength);
+        builder.Property(a => a.DeviceOs).HasMaxLength(ActivityLogLimits.DeviceOsMaxLength);
+        builder.Property(a => a.OsVersion).HasMaxLength(ActivityLogLimits.OsVersionMaxLength);
+        builder.Property(a => a.AppVersion).HasMaxLength(ActivityLogLimits.AppVersionMaxLength);
         builder.Property(a => a.Data).HasColumnType("jsonb");
         builder.Property(a => a.StatusCode).IsRequired();
-        builder.Property(a => a.ErrorCode).HasMaxLength(50);
+        // LOGR-024: DurationMs migration 011 ile BIGINT — EF tarafında da explicit.
+        builder.Property(a => a.DurationMs).HasColumnType("bigint");
+        builder.Property(a => a.ErrorCode).HasMaxLength(ActivityLogLimits.ErrorCodeMaxLength);
 
         builder.HasOne(a => a.User)
             .WithMany()
@@ -46,8 +50,9 @@ public sealed class ActivityLogConfiguration : IEntityTypeConfiguration<Activity
             .HasDatabaseName("idx_activity_logs_country")
             .IsDescending(false, true);
 
+        // SHRD-013: GIN index adı kolonu (data JSONB) yansıtır — migration 011 ile rename.
         builder.HasIndex(a => a.Data)
-            .HasDatabaseName("idx_activity_logs_asset_symbol")
+            .HasDatabaseName("idx_activity_logs_data_gin")
             .HasMethod("GIN")
             .HasOperators("jsonb_path_ops");
     }

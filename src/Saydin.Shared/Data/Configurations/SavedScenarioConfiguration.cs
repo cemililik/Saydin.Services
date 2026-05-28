@@ -1,4 +1,6 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
@@ -24,7 +26,15 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
         builder.Property(s => s.AssetSymbol).HasMaxLength(100).IsRequired();
         builder.Property(s => s.AssetDisplayName).HasMaxLength(200).IsRequired();
         builder.Property(s => s.Type).HasMaxLength(20).IsRequired().HasDefaultValue(ScenarioTypes.WhatIf);
-        builder.Property(s => s.ExtraData).HasColumnType("jsonb");
+        // SHRD-012: JsonElement? için ValueComparer. Default raw-text equality her
+        // istekte gereksiz UPDATE üretiyordu (aynı obje, farklı whitespace/ordering →
+        // farklı raw text). ValueComparer JSON normalized text üzerinden karşılaştırır.
+        builder.Property(s => s.ExtraData)
+            .HasColumnType("jsonb")
+            .Metadata.SetValueComparer(new ValueComparer<JsonElement?>(
+                (a, b) => CompareJson(a, b),
+                v => v.HasValue ? v.Value.GetRawText().GetHashCode() : 0,
+                v => v));
 
         // F2.5-3 ([C-E-10]): DB DEFAULT NOW() ile init-only CreatedAt arasındaki kayma
         // EF'in farkındalığına alınır. Caller explicit DateTimeOffset.UtcNow geçerse
@@ -47,5 +57,17 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
 
         builder.HasIndex(s => new { s.UserId, s.CreatedAt })
             .HasDatabaseName("idx_saved_scenarios_user");
+    }
+
+    /// <summary>
+    /// SHRD-012: İki <c>JsonElement?</c>'i normalized text üzerinden karşılaştır.
+    /// Whitespace farkları ve property order'ı etkilemez; null vs HasValue=false
+    /// = true olarak değerlendirilir.
+    /// </summary>
+    private static bool CompareJson(JsonElement? a, JsonElement? b)
+    {
+        if (!a.HasValue && !b.HasValue) return true;
+        if (!a.HasValue || !b.HasValue) return false;
+        return string.Equals(a.Value.GetRawText(), b.Value.GetRawText(), StringComparison.Ordinal);
     }
 }

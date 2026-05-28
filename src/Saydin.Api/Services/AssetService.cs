@@ -1,5 +1,6 @@
-using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.Extensions.Localization;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
@@ -12,17 +13,11 @@ namespace Saydin.Api.Services;
 public sealed class AssetService(
     IPriceRepository repository,
     IRedisCacheHelper cache,
+    IAssetSymbolIndex symbolIndex,
     IAssetNameLocalizer assetNameLocalizer,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<AssetService> logger) : IAssetService
 {
-    // F2.2-20 ([C-B-CC-7]): process-local sembol → asset cache. Asset listesi her
-    // istekten yeniden FirstOrDefault tarama yapmak yerine ilk istekte dictionary
-    // projeksiyonuna alınır; sonraki istekler O(1) lookup yapar. Sözlük cache asset
-    // listesi imzasıyla (count) versiyonlanır — yeni asset eklenince sıfırlanır.
-    private static int _symbolCacheVersion;
-    private static ConcurrentDictionary<string, Asset>? _symbolCache;
-
     public async Task<IReadOnlyList<Asset>> GetAllAsync(CancellationToken ct)
     {
         // Signature = aktif asset sayısı. 5 dakikada bir DB'den taze okunur.
@@ -49,24 +44,12 @@ public sealed class AssetService(
 
     public async Task<Asset?> GetBySymbolAsync(string symbol, CancellationToken ct)
     {
-        var upper = symbol.ToUpperInvariant();
+        // F2.2-20: O(1) sembol lookup. SVCR-001/002/003 follow-up: static field
+        // yerine `IAssetSymbolIndex` singleton; immutable record snapshot ile
+        // atomik swap; cache key listenin **içerik hash**'ine bağlı (sadece count
+        // değil, DisplayName/Category/IsActive değişimleri de invalidate eder).
         var all = await GetAllAsync(ct);
-
-        // F2.2-20: process-local sözlük lookup'ı O(N) FirstOrDefault'u O(1)'e indirir.
-        // Versioning: asset listesinin hash code'unu sentinel olarak kullanmak yerine
-        // count'a yaklaşık dayanırız; sayı değişince DB'den taze gelir ve cache invalidate olur.
-        var snapshot = _symbolCache;
-        if (snapshot is null || _symbolCacheVersion != all.Count)
-        {
-            var built = new ConcurrentDictionary<string, Asset>(StringComparer.Ordinal);
-            foreach (var a in all)
-                built[a.Symbol] = a;
-            _symbolCache = built;
-            _symbolCacheVersion = all.Count;
-            snapshot = built;
-        }
-
-        return snapshot.TryGetValue(upper, out var found) ? found : null;
+        return symbolIndex.Lookup(all, symbol);
     }
 
     public async Task<IReadOnlyList<AssetResponse>> GetAllAssetInfoAsync(CancellationToken ct)
@@ -102,24 +85,13 @@ public sealed class AssetService(
     }
 
     /// <summary>
-    /// F2.3-7: PascalCase enum adını snake_case JSON değerine çevirir
-    /// (<c>PreciousMetal → precious_metal</c>). <see cref="JsonNamingPolicy.SnakeCaseLower"/>
-    /// ile aynı algoritmaya uyumlu.
+    /// F2.3-7 / SVCR-017: PascalCase enum adını snake_case JSON değerine çevirir
+    /// (<c>PreciousMetal → precious_metal</c>). .NET built-in
+    /// <see cref="JsonNamingPolicy.SnakeCaseLower"/> ile birebir tutarlı — önceki
+    /// elle yazılmış StringBuilder loop'u kalktı.
     /// </summary>
-    private static string ToSnakeCase(AssetCategory category)
-    {
-        var name = category.ToString();
-        // PreciousMetal → precious_metal; Crypto → crypto.
-        var sb = new System.Text.StringBuilder(name.Length + 4);
-        for (var i = 0; i < name.Length; i++)
-        {
-            var c = name[i];
-            if (i > 0 && char.IsUpper(c))
-                sb.Append('_');
-            sb.Append(char.ToLowerInvariant(c));
-        }
-        return sb.ToString();
-    }
+    private static string ToSnakeCase(AssetCategory category) =>
+        JsonNamingPolicy.SnakeCaseLower.ConvertName(category.ToString());
 
     public async Task<PricePoint> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct)
     {

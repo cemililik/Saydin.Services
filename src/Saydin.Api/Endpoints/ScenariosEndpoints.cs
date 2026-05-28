@@ -21,6 +21,8 @@ public static class ScenariosEndpoints
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .RequireDeviceId();
 
+        // APIR-002: 422 (ScenarioLimitExceeded) ve 409 (Conflict) açıkça beyan
+        // edilir → Flutter codegen 422'yi typed handle edebilir.
         group.MapPost("", SaveScenarioAsync)
             .WithName("SaveScenario")
             .WithSummary("Yeni bir senaryo kaydeder")
@@ -28,6 +30,7 @@ public static class ScenariosEndpoints
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status409Conflict)
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
             .RequireDeviceId();
 
         group.MapDelete("/{id:guid}", DeleteScenarioAsync)

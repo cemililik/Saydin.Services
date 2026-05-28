@@ -107,6 +107,12 @@ public sealed class SavedScenarioService(
                 string.Format(localizer["FieldTooLong"], nameof(request.Label), MaxLabelLength),
                 field: nameof(request.Label));
 
+        // SVCR-012: Quantity ≤ 0 DB'ye yazılmasın — semantic anlamsız.
+        // (request.Amount → SavedScenario.Quantity'ye map ediliyor.)
+        if (request.Amount <= 0m)
+            throw new ValidationException(
+                localizer["AmountMustBePositive"], field: nameof(request.Amount));
+
         // F2.3-6 ([C-C-29]): client-tarafı AssetDisplayName artık güven kaynağı değil —
         // server-side resolve. what_if/dca için Asset tablosundan kanonik isim okunur;
         // comparison/portfolio için label varsa label, yoksa sembolün kendisi kullanılır.

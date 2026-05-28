@@ -88,9 +88,14 @@ public sealed class OpenExchangeRatesAdapter(
     {
         // F2.4-4: TTL kontrolü ile cache lookup. Süresi dolmuşsa cache'i bypass et,
         // taze yanıtla yenile.
-        if (_dayCache.TryGetValue(date, out var cached)
-            && DateTimeOffset.UtcNow - cached.CachedAt < EntryTtl)
-            return cached.Json;
+        if (_dayCache.TryGetValue(date, out var cached))
+        {
+            if (DateTimeOffset.UtcNow - cached.CachedAt < EntryTtl)
+                return cached.Json;
+            // INGR-009: TTL miss — stale entry'yi sil; MaxEntries threshold'una
+            // stale entry'lerin katkıda bulunmaması için.
+            _dayCache.TryRemove(date, out _);
+        }
 
         // XAU, XAG ve TRY'yi tek istekte çek
         var url = $"historical/{date:yyyy-MM-dd}.json?app_id={appId}&symbols=XAU,XAG,TRY";
@@ -115,11 +120,24 @@ public sealed class OpenExchangeRatesAdapter(
         _dayCache[date] = new CachedJson(json, DateTimeOffset.UtcNow);
 
         // F2.4-4: sınırı aştığımızda en eski yarıyı atarak temel LRU-benzeri davranış.
-        // Bellek tüketimi sabit kalır, hot-set canlı kalır.
-        if (_dayCache.Count > MaxEntries)
-            EvictOldestHalf();
+        // INGR-008: paralel iki Fetch eviction'ı tetiklerse Interlocked flag ile
+        // yalnız bir tanesi geçer; diğeri no-op.
+        if (_dayCache.Count > MaxEntries
+            && Interlocked.CompareExchange(ref _evicting, 1, 0) == 0)
+        {
+            try
+            {
+                EvictOldestHalf();
+            }
+            finally
+            {
+                Volatile.Write(ref _evicting, 0);
+            }
+        }
         return json;
     }
+
+    private int _evicting;
 
     private void EvictOldestHalf()
     {

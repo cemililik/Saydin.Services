@@ -5,7 +5,8 @@ services:
   # ============================================================
 
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    # INFR-006: tag pin (latest yerine semantic version + patch).
+    image: timescale/timescaledb:2.16.1-pg16
     container_name: saydin-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-saydin}
@@ -33,7 +34,8 @@ services:
     restart: unless-stopped
 
   pgadmin:
-    image: dpage/pgadmin4:latest
+    # INFR-006: semantic version pin.
+    image: dpage/pgadmin4:9.1.0
     container_name: saydin-pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@saydin.dev}
@@ -43,7 +45,8 @@ services:
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
     ports:
-      - "5050:80"
+      # INFR-015: tutarlılık için 127.0.0.1 bind (postgres/redis pattern'i).
+      - "127.0.0.1:5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
       - ./infrastructure/pgadmin/servers.json:/pgadmin4/servers.json:ro
@@ -51,10 +54,17 @@ services:
       # Gerçek dosya .gitignored — geliştirici bir kerelik setup:
       #   cp infrastructure/pgadmin/pgpassfile.sample infrastructure/pgadmin/pgpassfile
       #   chmod 600 infrastructure/pgadmin/pgpassfile  # libpq passfile şart koşar
-      # Dosya yoksa pgAdmin auto-connect başarısız olur (UI'dan manuel girilir),
-      # geri kalan stack etkilenmez. Mount uyarısı: dosya olmadan compose up dizin
-      # yaratır — sample'ı kopyalamak unutulmamalı.
-      - ./infrastructure/pgadmin/pgpassfile:/tmp/pgpassfile:ro
+      #
+      # INFR-003 / CFGR-019: Long-form mount + create_host_path:false. Sample
+      # kopyalanmadıysa compose host'ta klasör yaratmak yerine fail eder; sebep
+      # belirgin olur. (Önceki short-form syntax sessizce dizin yaratıyor ve
+      # pgAdmin "passfile bir directory" warning'i loglıyordu.)
+      - type: bind
+        source: ./infrastructure/pgadmin/pgpassfile
+        target: /tmp/pgpassfile
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,7 +75,8 @@ services:
   # ============================================================
 
   redis:
-    image: redis:alpine
+    # INFR-006: semantic version pin.
+    image: redis:7.4.1-alpine
     container_name: saydin-redis
     # F2.8-5 ([C-H-DC-6]): Redis requirepass — REDIS_PASSWORD env zorunlu.
     # Boş şifre kabul edilmez (fail-fast). Compose içi servisler ConnectionString
@@ -92,10 +103,12 @@ services:
     restart: unless-stopped
 
   redis-insight:
-    image: redis/redisinsight:latest
+    # INFR-006: semantic version pin.
+    image: redis/redisinsight:2.62
     container_name: saydin-redis-insight
     ports:
-      - "5540:5540"
+      # INFR-015: 127.0.0.1 bind.
+      - "127.0.0.1:5540:5540"
     volumes:
       - redis_insight_data:/data
     depends_on:
@@ -111,7 +124,8 @@ services:
   # OTLP endpoint: localhost:4317 (gRPC)
   # Dashboard UI:  http://localhost:18888
   aspire-dashboard:
-    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    # INFR-006: semantic version pin.
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:9.0
     container_name: saydin-aspire-dashboard
     # F2.8-4 ([C-H-DC-5]): AuthMode env'den okunur. Dev için default Unsecured,
     # prod için DASHBOARD__FRONTEND__AUTHMODE=BrowserToken zorunlu set edilmeli.
@@ -119,17 +133,20 @@ services:
       DASHBOARD__FRONTEND__AUTHMODE: ${ASPIRE_FRONTEND_AUTHMODE:-Unsecured}
       DASHBOARD__OTLP__AUTHMODE: ${ASPIRE_OTLP_AUTHMODE:-Unsecured}
     ports:
-      - "18888:18888"   # Dashboard UI
-      - "4317:18889"    # OTLP/gRPC → .NET servisler buraya export eder
+      # INFR-014: 127.0.0.1 bind — AUTHMODE Unsecured default'u için LAN expose kapalı.
+      - "127.0.0.1:18888:18888"   # Dashboard UI
+      - "127.0.0.1:4317:18889"    # OTLP/gRPC → .NET servisler buraya export eder
     restart: unless-stopped
 
   # Prometheus: metrik kazıma ve saklama.
   # UI: http://localhost:9090
   prometheus:
-    image: prom/prometheus:latest
+    # INFR-006: semantic version pin.
+    image: prom/prometheus:v3.0.1
     container_name: saydin-prometheus
     ports:
-      - "9090:9090"
+      # INFR-015: 127.0.0.1 bind.
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -189,13 +206,14 @@ services:
       ExternalApis__OpenExchangeRates__AppId: ${OPENEXCHANGERATES_APP_ID:-}
       ExternalApis__TwelveData__ApiKey: ${TWELVEDATA_API_KEY:-}
       ExternalApis__Evds__ApiKey: ${EVDS_API_KEY:-}
-      # F2.8-6 ([C-H-DC-8]): Seçici Worker Kontrolü — env üzerinden override edilir.
-      # Varsayılan: TCMB + EVDS açık, diğerleri kapalı (free-tier external API limitleri).
-      IngestionWorkers__Tcmb__Enabled: ${WORKER_TCMB_ENABLED:-true}
+      # F2.8-6 ([C-H-DC-8]) / INFR-017: Seçici Worker Kontrolü — env üzerinden override.
+      # Yeni dev `.env` ile başlangıçta tüm dış API'lere gürültü yapmasın diye
+      # tüm worker'ların default'u false; geliştirici bilinçli olarak true yapar.
+      IngestionWorkers__Tcmb__Enabled: ${WORKER_TCMB_ENABLED:-false}
       IngestionWorkers__CoinGecko__Enabled: ${WORKER_COINGECKO_ENABLED:-false}
       IngestionWorkers__OpenExchangeRates__Enabled: ${WORKER_OXR_ENABLED:-false}
       IngestionWorkers__TwelveData__Enabled: ${WORKER_TWELVEDATA_ENABLED:-false}
-      IngestionWorkers__EvdsInflation__Enabled: ${WORKER_EVDS_ENABLED:-true}
+      IngestionWorkers__EvdsInflation__Enabled: ${WORKER_EVDS_ENABLED:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -212,21 +230,32 @@ services:
     restart: unless-stopped
 
   # F2.7-11 ([C-G-Prom-2]): PostgreSQL exporter — Prometheus için DB metrikleri.
-  # docker-compose ile kompakt: PG_EXPORTER_AUTO_DISCOVER_DATABASES=true ile tüm
-  # DB'ler taranır. DATA_SOURCE_NAME read-only `saydin` user'ı ile çağrılır.
+  # NOT (INFR-005): Şu an `saydin` (CRUD-yetkili) user kullanılıyor.
+  # Production'da least-privilege ihlali; Faz 3 migration 012'de
+  # `saydin_exporter` (pg_monitor role) ayrı user yaratılıp ayrı POSTGRES_EXPORTER_PASSWORD
+  # env'i ile bağlanmalı.
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:latest
+    # INFR-006: semantic version pin.
+    image: prometheuscommunity/postgres-exporter:v0.16.0
     container_name: saydin-postgres-exporter
     environment:
       DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-saydin}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-saydin}?sslmode=disable"
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      # INFR-007: exporter ölü kalırsa Prometheus scrape sessizce başarısız olur;
+      # healthcheck bunu görünür kılar (compose ps unhealthy gösterir).
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9187/metrics > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
   # F2.7-11: Redis exporter — Prometheus için cache metrikleri.
   redis-exporter:
-    image: oliver006/redis_exporter:latest
+    # INFR-006: semantic version pin.
+    image: oliver006/redis_exporter:v1.66.0
     container_name: saydin-redis-exporter
     environment:
       REDIS_ADDR: "redis://redis:6379"
@@ -234,6 +263,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      # INFR-007: aynı pattern.
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9121/metrics > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
 volumes:

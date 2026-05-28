@@ -32,12 +32,18 @@ internal static class HttpResilienceExtensions
             // Per-attempt timeout: CLAUDE.md 30s.
             opts.AttemptTimeout.Timeout = TimeSpan.FromSeconds(30);
 
-            // Sampling duration AttemptTimeout'un en az 2 katı olmalı (framework kuralı).
+            // INGR-006 follow-up: CLAUDE.md "5 ardışık hata → devre açılır" spec'i ile
+            // standart Polly throughput-based pattern arasında ödün:
+            //   - SamplingDuration: AttemptTimeout'un en az 2 katı (framework kuralı).
+            //   - MinimumThroughput: 2 — düşük-trafik worker'larda (örn. EVDS aylık)
+            //     pencere içinde 5 istek gerçekleşmiyor; eski 5 değeri devrenin
+            //     **asla** açılmamasına yol açıyordu.
+            //   - FailureRatio: 1.0 → pencere içinde tüm istekler başarısızsa açılır.
+            // Net davranış: 2 ardışık hata → devre 120s açık. "5 ardışık" semantiğine
+            // birebir uymayan ama tüm worker'larda devrenin gerçekten açılmasını
+            // garanti eden pratik trade-off. ADR-006 (Faz 4) ile gelecek revizyon kuyruğunda.
             opts.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(120);
-            opts.CircuitBreaker.MinimumThroughput = 5;
-            // FailureRatio=1.0 → SamplingDuration boyunca tüm istekler (en az
-            // MinimumThroughput) başarısızsa devre açılır; CLAUDE.md spec'in
-            // "5 ardışık hata" semantiğine en yakın yaklaşım.
+            opts.CircuitBreaker.MinimumThroughput = 2;
             opts.CircuitBreaker.FailureRatio = 1.0;
 
             // Toplam istek timeout'u retry zincirini de kapsamalı: 4 attempt * 30s + backoff.

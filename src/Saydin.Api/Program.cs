@@ -171,15 +171,36 @@ try
     var redisOptions = ConfigurationOptions.Parse(redisConnection);
     redisOptions.AbortOnConnectFail = false;
 
-    builder.Services.AddSingleton<IConnectionMultiplexer>(
-        ConnectionMultiplexer.Connect(redisOptions));
+    // APIR-027 ([C-A-1]): Connect (blocking) → ConnectAsync + Lazy. Startup'ta
+    // ana thread bloğu kalktı; cache miss riski yine yok (AbortOnConnectFail=false
+    // sayesinde Redis down olsa bile API ayağa kalkar, ilk istek cache-aside).
+    // Task<ConnectionMultiplexer> kovaryant değil → açıkça IConnectionMultiplexer cast.
+    var redisLazy = new Lazy<Task<IConnectionMultiplexer>>(
+        async () => await ConnectionMultiplexer.ConnectAsync(redisOptions),
+        LazyThreadSafetyMode.ExecutionAndPublication);
+    builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
+    {
+        // GetAwaiter().GetResult() startup'ta tek seferlik; sonraki çağrılarda
+        // cached Task instance'ı tamamlanmış olur → sync hot-path yok.
+        return redisLazy.Value.GetAwaiter().GetResult();
+    });
 
     // ─── Response Compression ────────────────────────────────────────────────
     builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
 
     // ─── Options ─────────────────────────────────────────────────────────────
-    builder.Services.Configure<PlanOptions>(
-        builder.Configuration.GetSection(PlanOptions.SectionName));
+    // SVCR-008: PlanOptions startup'ta validate edilir — negatif limit/feature
+    // sızıntısı fail-fast.
+    builder.Services.AddOptions<PlanOptions>()
+        .Bind(builder.Configuration.GetSection(PlanOptions.SectionName))
+        .ValidateDataAnnotations()
+        .Validate(o =>
+        {
+            var ctx = new System.ComponentModel.DataAnnotations.ValidationContext(o);
+            var results = new List<System.ComponentModel.DataAnnotations.ValidationResult>();
+            return System.ComponentModel.DataAnnotations.Validator.TryValidateObject(o, ctx, results, true);
+        }, "PlanOptions geçersiz; bkz. application logs")
+        .ValidateOnStart();
 
     // ─── Repositories & Services ─────────────────────────────────────────────
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
@@ -197,6 +218,9 @@ try
     // sticky session olmadan deploy edilse bile pencere ihlali kullanıcı için
     // semantik kayıp yaratmaz — yalnız UPDATE sıklığı artar.
     builder.Services.AddSingleton<ILastSeenThrottle, LastSeenThrottle>();
+    // SVCR-001/002/003 follow-up: AssetService'in static field cache'i kalktı.
+    // IAssetSymbolIndex singleton — içerik hash imzasıyla snapshot; atomik swap.
+    builder.Services.AddSingleton<IAssetSymbolIndex, AssetSymbolIndex>();
 
     // ─── GeoIP (IP → ülke/şehir çözümleme) ────────────────────────────────────
     builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();

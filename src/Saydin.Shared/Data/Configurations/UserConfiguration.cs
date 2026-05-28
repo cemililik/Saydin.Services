@@ -10,7 +10,11 @@ public sealed class UserConfiguration : IEntityTypeConfiguration<User>
     public void Configure(EntityTypeBuilder<User> builder)
     {
         // F2.5-4 ([C-E-13]): users.tier CHECK constraint kod tarafında modellenir.
-        // UserTiers.All ile birebir aynı kalmalı.
+        // SHRD-010 follow-up: DB CHECK case-sensitive ('free' | 'premium'); `UserTiers.All`
+        // C# tarafında `OrdinalIgnoreCase`'tir ama DB'ye yazma aşamasında daima
+        // `UserTiers.Free` / `UserTiers.Premium` literal sabitleri kullanılır
+        // (Repository.CreateAsync ve user create path'leri). HasDefaultValue da
+        // lowercase sabittir; mixed-case sızıntısı engellenir.
         builder.ToTable("users", t => t.HasCheckConstraint(
             "chk_users_tier",
             $"tier IN ({string.Join(", ", UserTiers.All.Select(v => $"'{v}'"))})"));
@@ -23,7 +27,8 @@ public sealed class UserConfiguration : IEntityTypeConfiguration<User>
         // F2.5-5 / F2.7-2 ([C-E-14], [C-G-001-5]): Email ve DeviceId UNIQUE constraint'leri
         // partial olmalı — aksi halde PostgreSQL aynı NULL'u iki kez kabul etmez ve
         // anonim kullanıcı oluşturulamaz. Kod tarafı HasFilter ile partial unique
-        // index modelliyor; karşılık gelen migration 011_partial_unique_users.sql.
+        // index modelliyor.
+        // SHRD-018 follow-up: karşılık gelen migration dosyası `011_phase2_schema_hardening.sql`.
         builder.HasIndex(u => u.DeviceId)
             .IsUnique()
             .HasDatabaseName("uq_users_device_id")

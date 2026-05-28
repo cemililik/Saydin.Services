@@ -22,7 +22,10 @@ public sealed class DailyLimitExceededExceptionHandler(
 
         logger.LogWarning("Günlük hesaplama/sorgu limiti aşıldı: limit={Limit}", ex.Limit);
 
-        var resetAt = DateTime.UtcNow.Date.AddDays(1).ToString("O");
+        // APIR-038: UTC offset taşıyan DateTimeOffset — istemci ISO 8601 timezone-aware
+        // parse edebilir. Önceki sürüm `DateTime.Date.ToString("O")` "2026-05-29T00:00:00.0000000"
+        // (Kind=Unspecified) üretiyordu; "Z" ya da "+00:00" suffix yoktu.
+        var resetAt = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(1), TimeSpan.Zero).ToString("O");
 
         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
 
