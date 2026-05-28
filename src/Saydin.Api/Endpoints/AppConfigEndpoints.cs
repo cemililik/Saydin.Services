@@ -1,7 +1,5 @@
-using Microsoft.Extensions.Options;
-using Saydin.Api.Models.Responses;
-using Saydin.Api.Options;
-using Saydin.Api.Repositories;
+using Saydin.Api.Middleware;
+using Saydin.Api.Services;
 
 namespace Saydin.Api.Endpoints;
 
@@ -21,26 +19,15 @@ public static class AppConfigEndpoints
 
     private static async Task<IResult> GetConfigAsync(
         HttpContext httpContext,
-        ISavedScenarioRepository repository,
-        IOptions<PlanOptions> options,
+        IAppConfigService configService,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var deviceId = httpContext.GetRequiredDeviceId();
+        var log = httpContext.GetOrCreateActivityLog("config_fetch");
 
-        var user        = await repository.GetUserByDeviceIdAsync(deviceId, ct);
-        var tier        = user?.Tier ?? "free";
-        var tierOptions = options.Value.GetTierOptions(tier);
+        var config = await configService.GetConfigAsync(deviceId, ct);
 
-        return Results.Ok(new AppConfigResponse(
-            Tier:                   tier,
-            DailyCalculationLimit:  tierOptions.DailyCalculationLimit,
-            MaxSavedScenarios:      tierOptions.MaxSavedScenarios,
-            Features: new AppFeatureFlags(
-                Comparison:          tierOptions.Features.Comparison,
-                InflationAdjustment: tierOptions.Features.InflationAdjustment,
-                Share:               tierOptions.Features.Share,
-                Dca:                 tierOptions.Features.Dca,
-                PriceHistoryMonths:  tierOptions.Features.PriceHistoryMonths)));
+        log.WithData(new { tier = config.Tier });
+        return Results.Ok(config);
     }
 }

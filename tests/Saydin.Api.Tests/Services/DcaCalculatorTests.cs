@@ -11,7 +11,6 @@ using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
-using StackExchange.Redis;
 
 namespace Saydin.Api.Tests.Services;
 
@@ -20,8 +19,9 @@ public class DcaCalculatorTests
     private readonly IAssetService                   _assetService        = Substitute.For<IAssetService>();
     private readonly ISavedScenarioRepository        _scenarioRepository  = Substitute.For<ISavedScenarioRepository>();
     private readonly IInflationRepository            _inflationRepository = Substitute.For<IInflationRepository>();
-    private readonly IConnectionMultiplexer          _redis               = Substitute.For<IConnectionMultiplexer>();
-    private readonly IDatabase                       _db                  = Substitute.For<IDatabase>();
+    private readonly IDailyLimitGuard                _dailyLimitGuard     = Substitute.For<IDailyLimitGuard>();
+    private readonly IRedisCacheHelper               _cache               = Substitute.For<IRedisCacheHelper>();
+    private readonly IAssetNameLocalizer             _assetNameLocalizer  = Substitute.For<IAssetNameLocalizer>();
     private readonly IStringLocalizer<ErrorMessages> _localizer           = Substitute.For<IStringLocalizer<ErrorMessages>>();
     private readonly DcaCalculator                   _sut;
 
@@ -60,48 +60,33 @@ public class DcaCalculatorTests
 
     public DcaCalculatorTests()
     {
-        _redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(_db);
+        _cache.TryGetAsync<DcaResponse>(Arg.Any<string>(), Arg.Any<CancellationToken>())
+              .Returns((DcaResponse?)null);
 
-        // Varsayılan: cache miss
-        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
-           .Returns(RedisValue.Null);
-        _db.ScriptEvaluateAsync(
-                Arg.Any<string>(),
-                Arg.Any<RedisKey[]>(),
-                Arg.Any<RedisValue[]>(),
-                Arg.Any<CommandFlags>())
-           .Returns(RedisResult.Create(1L));
-
-        // Kullanıcılar
         _scenarioRepository.GetUserByDeviceIdAsync(FreeDeviceId, Arg.Any<CancellationToken>())
                            .Returns(FreeUser);
         _scenarioRepository.GetUserByDeviceIdAsync(PremiumDeviceId, Arg.Any<CancellationToken>())
                            .Returns(PremiumUser);
 
-        // Asset listesi
-        _assetService.GetAllAsync(Arg.Any<CancellationToken>())
-                     .Returns(new List<Asset> { UsdTry }.AsReadOnly());
+        _assetService.GetBySymbolAsync("USDTRY", Arg.Any<CancellationToken>()).Returns(UsdTry);
 
-        // Enflasyon verisi yok (default)
         _inflationRepository
             .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
             .Returns((null, (DateOnly?)null, null, (DateOnly?)null));
 
-        // Localizer — key'i olduğu gibi döndür
         _localizer[Arg.Any<string>()]
             .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
         _localizer[Arg.Any<string>(), Arg.Any<object[]>()]
             .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
 
+        _assetNameLocalizer.Localize(Arg.Any<string>(), Arg.Any<string?>())
+                           .Returns(ci => (string?)ci[1] ?? (string)ci[0]);
+
         var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions());
         _sut = new DcaCalculator(
-            _assetService,
-            _scenarioRepository,
-            _inflationRepository,
-            _redis,
-            options,
-            _localizer,
-            NullLogger<DcaCalculator>.Instance);
+            _assetService, _scenarioRepository, _inflationRepository,
+            _dailyLimitGuard, _cache, _assetNameLocalizer,
+            options, _localizer, NullLogger<DcaCalculator>.Instance);
     }
 
     // ── Hesaplama ────────────────────────────────────────────────────────────
@@ -109,7 +94,6 @@ public class DcaCalculatorTests
     [Fact]
     public async Task CalculateAsync_MonthlyPeriod_ComputesCorrectResult()
     {
-        // 2023-01-01 → 2023-06-01, aylık 1000 TL, fiyat sabit 20 TL
         SetupConstantPrice(20m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
@@ -118,24 +102,17 @@ public class DcaCalculatorTests
         result.AssetSymbol.Should().Be("USDTRY");
         result.Period.Should().Be("monthly");
         result.PeriodicAmount.Should().Be(1000m);
-
-        // Ocak, Şubat, Mart, Nisan, Mayıs, Haziran = 6 alım
         result.TotalPurchases.Should().Be(6);
         result.TotalInvestedTry.Should().Be(6000m);
-
-        // Her alımda 1000/20 = 50 birim → toplam 300 birim
         result.TotalUnitsAcquired.Should().Be(300m);
-
-        // Fiyat değişmedi → değer = 300 * 20 = 6000
         result.CurrentValueTry.Should().Be(6000m);
         result.ProfitLossTry.Should().Be(0m);
-        result.IsProfit.Should().BeTrue(); // 0 → IsProfit
+        result.IsProfit.Should().BeTrue();
     }
 
     [Fact]
     public async Task CalculateAsync_WeeklyPeriod_GeneratesCorrectPurchaseCount()
     {
-        // 4 hafta → 5 alım noktası (gün 0, 7, 14, 21, 28)
         var start = new DateOnly(2023, 1, 1);
         var end   = new DateOnly(2023, 1, 29);
         SetupConstantPrice(10m);
@@ -144,13 +121,12 @@ public class DcaCalculatorTests
         var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         result.Period.Should().Be("weekly");
-        result.TotalPurchases.Should().Be(5); // gün 1, 8, 15, 22, 29
+        result.TotalPurchases.Should().Be(5);
     }
 
     [Fact]
     public async Task CalculateAsync_PriceIncreases_ShowsProfit()
     {
-        // Her alımda farklı fiyat: 10, 12, 14, 16, 18, 20
         SetupIncreasingPrices(10m, 2m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
@@ -160,13 +136,12 @@ public class DcaCalculatorTests
         result.TotalInvestedTry.Should().Be(6000m);
         result.IsProfit.Should().BeTrue();
         result.ProfitLossTry.Should().BePositive();
-        result.CurrentUnitPrice.Should().Be(22m); // son fiyat (7. çağrı: 10 + 2*6)
+        result.CurrentUnitPrice.Should().Be(22m);
     }
 
     [Fact]
     public async Task CalculateAsync_PriceDecreases_ShowsLoss()
     {
-        // Fiyat düşüşü: son fiyat başlangıçtan düşük
         SetupDecreasingPrices(20m, 3m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
@@ -184,7 +159,6 @@ public class DcaCalculatorTests
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
         var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
-        // 6000 TL / 240 birim = 25 TL
         result.AverageCostPerUnit.Should().Be(25m);
     }
 
@@ -202,7 +176,6 @@ public class DcaCalculatorTests
     [Fact]
     public async Task CalculateAsync_ChartDataOver60_SampledTo60()
     {
-        // 2 yıl haftalık = ~104 alım → chart 60'a sample'lanmalı
         var start = new DateOnly(2021, 1, 1);
         var end   = new DateOnly(2023, 1, 1);
         SetupConstantPrice(10m);
@@ -227,17 +200,18 @@ public class DcaCalculatorTests
     }
 
     [Fact]
-    public async Task CalculateAsync_StartDateAfterEndDate_ThrowsArgumentException()
+    public async Task CalculateAsync_StartDateAfterEndDate_ThrowsValidationException()
     {
+        SetupConstantPrice(10m);
         var request = MakeRequest("USDTRY", EndDate, StartDate, 1000m, "monthly");
 
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ArgumentException>();
+        await act.Should().ThrowAsync<ValidationException>();
     }
 
     [Fact]
-    public async Task CalculateAsync_InvalidPeriod_ThrowsArgumentException()
+    public async Task CalculateAsync_InvalidPeriod_ThrowsValidationException()
     {
         SetupConstantPrice(10m);
 
@@ -245,11 +219,11 @@ public class DcaCalculatorTests
 
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ArgumentException>();
+        await act.Should().ThrowAsync<ValidationException>();
     }
 
     [Fact]
-    public async Task CalculateAsync_InvalidAmountType_ThrowsArgumentException()
+    public async Task CalculateAsync_InvalidAmountType_ThrowsValidationException()
     {
         SetupConstantPrice(10m);
 
@@ -257,15 +231,38 @@ public class DcaCalculatorTests
 
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ArgumentException>();
+        await act.Should().ThrowAsync<ValidationException>();
     }
 
     [Fact]
-    public async Task CalculateAsync_UnknownAsset_ThrowsPriceNotFoundException()
+    public async Task CalculateAsync_UnknownAsset_ThrowsAssetNotFoundException()
     {
-        _assetService.GetAllAsync(Arg.Any<CancellationToken>())
-                     .Returns(new List<Asset>().AsReadOnly());
+        _assetService.GetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns((Asset?)null);
         SetupConstantPrice(10m);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
+
+        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<AssetNotFoundException>();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_ZeroPriceMidStream_ThrowsPriceNotFoundException()
+    {
+        // 3. çağrıdan sonra fiyat 0 dönerse divide-by-zero değil PriceNotFoundException
+        // çıkmalı (review C-2 / DCA path).
+        var callCount = 0;
+        _assetService.GetNearestPriceAsync(Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                callCount++;
+                var price = callCount == 3 ? 0m : 10m;
+                return new PricePoint { AssetId = AssetId, PriceDate = (DateOnly)ci[1], Close = price };
+            });
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(EndDate);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
@@ -274,39 +271,69 @@ public class DcaCalculatorTests
         await act.Should().ThrowAsync<PriceNotFoundException>();
     }
 
-    // ── Günlük Limit ─────────────────────────────────────────────────────────
+    [Fact]
+    public async Task CalculateAsync_TooManyPurchasePoints_ThrowsValidationException()
+    {
+        // 20 yıl haftalık ≈ 1040 nokta → MaxPurchasePoints (600) üstü → reddedilmeli.
+        var start = new DateOnly(2003, 1, 1);
+        var end   = new DateOnly(2023, 12, 31);
+        SetupConstantPrice(10m);
+
+        var request = MakeRequest("USDTRY", start, end, 100m, "weekly");
+
+        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>();
+    }
+
+    // ── Günlük Limit (TryAcquire + Release) ──────────────────────────────────
 
     [Fact]
-    public async Task CalculateAsync_PremiumUser_SkipsDailyLimitCheck()
+    public async Task CalculateAsync_PremiumUser_CallsTryAcquireOnce()
     {
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
         await _sut.CalculateAsync(PremiumDeviceId, request, CancellationToken.None);
 
-        // Premium: Redis'e limit sorulmaz, Lua script çalışmaz
-        await _db.DidNotReceive()
-                 .ScriptEvaluateAsync(
-                     Arg.Any<string>(),
-                     Arg.Any<RedisKey[]>(),
-                     Arg.Any<RedisValue[]>(),
-                     Arg.Any<CommandFlags>());
+        await _dailyLimitGuard.Received(1)
+            .TryAcquireAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
+        await _dailyLimitGuard.DidNotReceive()
+            .ReleaseAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task CalculateAsync_FreeUserAtLimit_ThrowsDailyLimitExceededException()
+    public async Task CalculateAsync_FreeUserAtLimit_TryAcquireThrows()
     {
         SetupConstantPrice(10m);
 
-        // Check aşamasında limit aşılmış
-        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
-           .Returns(new RedisValue("20")); // limit = 20
+        _dailyLimitGuard.TryAcquireAsync(FreeUser, FreeDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>())
+            .ThrowsAsync(new DailyLimitExceededException(20));
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<DailyLimitExceededException>();
+        // Quota rejection sonrası release çağırılmamalı (acquire fail oldu, geri verilecek bir şey yok)
+        await _dailyLimitGuard.DidNotReceive()
+            .ReleaseAsync(FreeUser, FreeDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateAsync_HesapBaşarısız_QuotaReleaseEdilir()
+    {
+        _assetService.GetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns((Asset?)null);
+        SetupConstantPrice(10m);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
+
+        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<AssetNotFoundException>();
+        await _dailyLimitGuard.Received(1)
+            .ReleaseAsync(FreeUser, FreeDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -314,11 +341,7 @@ public class DcaCalculatorTests
     {
         SetupConstantPrice(10m);
 
-        _db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
-           .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.UnableToConnect, "test"));
-
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
@@ -372,8 +395,6 @@ public class DcaCalculatorTests
         result.EndDate.Should().Be(latestDate);
     }
 
-    // ── Symbol Normalizasyon ─────────────────────────────────────────────────
-
     [Fact]
     public async Task CalculateAsync_LowercaseSymbol_NormalizesToUpperCase()
     {
@@ -385,8 +406,6 @@ public class DcaCalculatorTests
         result.AssetSymbol.Should().Be("USDTRY");
     }
 
-    // ── Purchases Detayları ──────────────────────────────────────────────────
-
     [Fact]
     public async Task CalculateAsync_Purchases_HaveCumulativeValues()
     {
@@ -396,13 +415,76 @@ public class DcaCalculatorTests
         var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         result.Purchases.Should().NotBeEmpty();
-
-        // İlk alım
         result.Purchases[0].CumulativeCostTry.Should().Be(1000m);
-        result.Purchases[0].UnitsAcquired.Should().Be(100m); // 1000/10
-
-        // Son alım — kümülatif maliyet toplam yatırıma eşit olmalı
+        result.Purchases[0].UnitsAcquired.Should().Be(100m);
         result.Purchases[^1].CumulativeCostTry.Should().Be(result.TotalInvestedTry);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_CacheHit_ReturnsCachedAndSkipsExpensiveCalls()
+    {
+        var cached = new DcaResponse(
+            AssetSymbol: "USDTRY", AssetDisplayName: "Dolar/TL",
+            StartDate: StartDate, EndDate: EndDate,
+            Period: "monthly", PeriodicAmount: 1000m,
+            TotalPurchases: 6, TotalInvestedTry: 6000m, CurrentValueTry: 7200m,
+            ProfitLossTry: 1200m, ProfitLossPercent: 20m, IsProfit: true,
+            AverageCostPerUnit: 10m, TotalUnitsAcquired: 600m, CurrentUnitPrice: 12m,
+            CumulativeInflationPercent: null, RealProfitLossPercent: null,
+            InflationDataAsOf: null, Purchases: [], ChartData: []);
+
+        _cache.TryGetAsync<DcaResponse>(Arg.Any<string>(), Arg.Any<CancellationToken>())
+              .Returns(cached);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        result.TotalPurchases.Should().Be(6);
+        result.ProfitLossPercent.Should().Be(20m);
+        result.CurrentUnitPrice.Should().Be(12m);
+
+        await _assetService.DidNotReceive()
+            .GetNearestPriceAsync(Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateAsync_DcaFeatureDisabled_ThrowsFeatureDisabled()
+    {
+        var planOptions = new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { Dca = false } }
+        };
+        var sut = new DcaCalculator(
+            _assetService, _scenarioRepository, _inflationRepository,
+            _dailyLimitGuard, _cache, _assetNameLocalizer,
+            Microsoft.Extensions.Options.Options.Create(planOptions),
+            _localizer, NullLogger<DcaCalculator>.Instance);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
+
+        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<FeatureDisabledException>();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_InflationRequestedButFeatureDisabled_ThrowsFeatureDisabled()
+    {
+        var planOptions = new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { InflationAdjustment = false } }
+        };
+        var sut = new DcaCalculator(
+            _assetService, _scenarioRepository, _inflationRepository,
+            _dailyLimitGuard, _cache, _assetNameLocalizer,
+            Microsoft.Extensions.Options.Options.Create(planOptions),
+            _localizer, NullLogger<DcaCalculator>.Instance);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly", includeInflation: true);
+
+        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<FeatureDisabledException>();
     }
 
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────
@@ -416,7 +498,6 @@ public class DcaCalculatorTests
                          PriceDate = (DateOnly)ci[1],
                          Close     = price
                      });
-
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(EndDate);
     }
@@ -436,7 +517,6 @@ public class DcaCalculatorTests
                              Close     = currentPrice
                          };
                      });
-
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(EndDate);
     }
@@ -456,7 +536,6 @@ public class DcaCalculatorTests
                              Close     = currentPrice
                          };
                      });
-
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(EndDate);
     }

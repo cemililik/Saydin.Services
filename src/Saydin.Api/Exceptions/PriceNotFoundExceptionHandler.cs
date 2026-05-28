@@ -32,7 +32,8 @@ public sealed class PriceNotFoundExceptionHandler(
             Type = "https://saydin.app/errors/price-not-found",
             Title = localizer["PriceNotFound"],
             Status = StatusCodes.Status404NotFound,
-            Detail = ex.Message,
+            Detail = string.Format(localizer["PriceNotFoundDetail"],
+                ex.Date.ToString("yyyy-MM-dd"), ex.AssetSymbol),
             Extensions =
             {
                 ["traceId"] = Activity.Current?.TraceId.ToString(),

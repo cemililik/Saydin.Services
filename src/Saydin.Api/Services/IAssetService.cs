@@ -7,6 +7,13 @@ public interface IAssetService
 {
     Task<IReadOnlyList<Asset>> GetAllAsync(CancellationToken ct);
     Task<IReadOnlyList<AssetResponse>> GetAllAssetInfoAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Aktif asset listesini sembol → Asset map'i olarak döner (cache'lidir).
+    /// Calculator'lar tek sembol lookup için tüm listeyi tarayıp <c>FirstOrDefault</c>
+    /// yapmak yerine bu metodu kullanır (O(1) lookup).
+    /// </summary>
+    Task<Asset?> GetBySymbolAsync(string symbol, CancellationToken ct);
     Task<PricePoint> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct);
 
     /// <summary>

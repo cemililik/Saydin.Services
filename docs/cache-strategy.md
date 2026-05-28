@@ -27,7 +27,9 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
 | Fiyat aralığı | `prices:{symbol}:{from}:{to}` | 1 saat | `AssetService` |
 | En son fiyat tarihi | `latest_date:{symbol}` | 1 saat | `AssetService` |
-| Günlük kullanım sayacı | `usage:whatif:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `WhatIfCalculator` |
+| DCA hesaplama | `dca:v1:{symbol}:{startDate}:{endDate}:{amount}:{period}:{amountType}{:inf?}:{lang}` | 1 saat | `DcaCalculator` |
+| Günlük kullanım sayacı (What-If) | `usage:whatif:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `DailyLimitGuard` |
+| Günlük kullanım sayacı (DCA) | `usage:dca:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `DailyLimitGuard` |
 
 ### Key Versiyonlama
 
@@ -73,6 +75,17 @@ Yeni asset eklendiğinde manuel olarak bu key silinebilir:
 redis-cli DEL assets:list
 ```
 
+### DCA Hesaplama (`dca:v1:...`)
+
+**Neden cache'leniyor:** DCA hesaplaması geniş tarih aralığında fiyat verisi çeker (haftalık/aylık).
+Aynı parametrelerle gelen istek aynı sonucu verir.
+
+**Key formatı:** `dca:v1:{SYMBOL}:{START}:{END}:{AMOUNT}:{PERIOD}:{AMOUNT_TYPE}{:inf?}:{LANG}`
+- `:inf` suffix'i yalnızca `IncludeInflation == true` olduğunda eklenir
+- `PERIOD`: `weekly` veya `monthly`
+
+**TTL seçimi:** 1 saat — What-If ile aynı mantık.
+
 ### Fiyat Noktaları (`price:{symbol}:{date}`)
 
 **TTL seçimi:** 24 saat — Tarihi fiyatlar değişmez. Bugünün fiyatı için TTL daha kısa
@@ -94,11 +107,14 @@ cache'inden bağımsız olduğundan ayrım yapılmıyor. Kabul edilebilir.
 
 ## Kullanım Sayacı
 
-### Key: `usage:whatif:{userId}:{yyyy-MM-dd}`
+### Key: `usage:{prefix}:{userId}:{yyyy-MM-dd}`
+
+**Prefix'ler:** `usage:whatif:` (WhatIfCalculator), `usage:dca:` (DcaCalculator)
 
 **Nasıl çalışır:**
-1. `CheckDailyLimitAsync` — key'i okur (INCR yapmaz), eşik aşıldıysa 429 döner
-2. `IncrementDailyUsageAsync` — Lua script ile atomik INCR yapar, ilk artışta TTL set eder
+Her iki prefix de `DailyLimitGuard` servisi tarafından yönetilir:
+1. `CheckAsync` — key'i okur (INCR yapmaz), eşik aşıldıysa 429 döner
+2. `IncrementAsync` — Lua script ile atomik INCR yapar, ilk artışta TTL set eder
 
 **TTL:** Gece yarısına kalan milisaniye (`DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow`)
 Türkiye saati UTC+3; "günlük limit" UTC bazlı sıfırlanıyor. İleride timezone-aware yapılabilir.

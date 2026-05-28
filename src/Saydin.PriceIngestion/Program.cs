@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using OpenTelemetry.Exporter;
+using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Serilog;
@@ -57,6 +58,17 @@ try
             {
                 opts.Endpoint = otlpEndpointUri;
                 opts.Protocol = OtlpExportProtocol.Grpc;
+            }))
+        .WithMetrics(metrics => metrics
+            // EVDS ingestion failure metric'i + future business counter'lar burada toplanır.
+            // Shared meter adı SaydinMetrics.MeterName'den geliyor — copy/paste hatası riski yok.
+            .AddMeter(SaydinMetrics.MeterName)
+            .AddHttpClientInstrumentation()
+            .AddRuntimeInstrumentation()
+            .AddOtlpExporter(opts =>
+            {
+                opts.Endpoint = otlpEndpointUri;
+                opts.Protocol = OtlpExportProtocol.Grpc;
             }));
 
     // ─── HTTP Clients ────────────────────────────────────────────────────────
@@ -79,18 +91,6 @@ try
                 client.DefaultRequestHeaders.Add("x-cg-demo-api-key", apiKey);
         })
         .AddStandardResilienceHandler();
-
-    // GoldAPI pasif — OpenExchangeRates ile değiştirildi. Key geçersizliği nedeniyle devre dışı.
-    // builder.Services
-    //     .AddHttpClient("goldapi", client =>
-    //     {
-    //         client.BaseAddress = new Uri("https://www.goldapi.io/api/");
-    //         client.Timeout = TimeSpan.FromSeconds(30);
-    //         var apiKey = builder.Configuration["ExternalApis:GoldApi:ApiKey"];
-    //         if (!string.IsNullOrWhiteSpace(apiKey))
-    //             client.DefaultRequestHeaders.Add("x-access-token", apiKey);
-    //     })
-    //     .AddStandardResilienceHandler();
 
     builder.Services
         .AddHttpClient("openexchangerates", client =>
@@ -129,17 +129,16 @@ try
     // ─── Adapters & Repositories ──────────────────────────────────────────────
     builder.Services.AddSingleton<IPriceIngestionRepository, PriceIngestionRepository>();
     builder.Services.AddSingleton<IInflationIngestionRepository, InflationIngestionRepository>();
+    builder.Services.AddSingleton<IIngestionJobRepository, IngestionJobRepository>();
     builder.Services.AddSingleton<TcmbAdapter>();
     builder.Services.AddSingleton<CoinGeckoAdapter>();
-    // builder.Services.AddSingleton<GoldApiAdapter>();  // Pasif
     builder.Services.AddSingleton<OpenExchangeRatesAdapter>();
     builder.Services.AddSingleton<TwelveDataAdapter>();
-    builder.Services.AddSingleton<EvdsInflationAdapter>();
+    builder.Services.AddSingleton<IInflationAdapter, EvdsInflationAdapter>();
 
     // ─── Workers ─────────────────────────────────────────────────────────────
     builder.Services.AddSingleton<TcmbWorker>();
     builder.Services.AddSingleton<CoinGeckoWorker>();
-    // builder.Services.AddSingleton<GoldApiWorker>();  // Pasif
     builder.Services.AddSingleton<OpenExchangeRatesWorker>();
     builder.Services.AddSingleton<TwelveDataWorker>();
     builder.Services.AddSingleton<EvdsInflationWorker>();

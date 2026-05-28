@@ -19,10 +19,15 @@
   <data name="ServerError"><value>Sunucu hatas&#x131;</value></data>
   <data name="UnexpectedError"><value>Beklenmeyen bir hata olu&#x15F;tu. L&#x00FC;tfen tekrar deneyin.</value></data>
   <data name="PriceNotFound"><value>Fiyat bulunamad&#x131;</value></data>
+  <data name="PriceNotFoundDetail"><value>{0} tarihinde {1} fiyat&#x131; bulunamad&#x131;.</value></data>
   <data name="AssetNotFound"><value>Varl&#x131;k bulunamad&#x131;</value></data>
+  <data name="AssetNotFoundDetail"><value>'{0}' sembol&#x00FC;ne sahip aktif bir varl&#x131;k bulunamad&#x131;.</value></data>
   <data name="ScenarioNotFound"><value>Senaryo bulunamad&#x131;</value></data>
+  <data name="ScenarioNotFoundDetail"><value>'{0}' id'li senaryo bulunamad&#x131; veya bu kullan&#x131;c&#x131;ya ait de&#x11F;il.</value></data>
   <data name="ScenarioLimitExceeded"><value>Senaryo limiti a&#x15F;&#x131;ld&#x131;</value></data>
+  <data name="ScenarioLimitExceededDetail"><value>&#x00DC;cretsiz kullan&#x131;c&#x131;lar en fazla {0} senaryo kaydedebilir.</value></data>
   <data name="DailyLimitExceeded"><value>G&#x00FC;nl&#x00FC;k hesaplama limitine ula&#x15F;&#x131;ld&#x131;</value></data>
+  <data name="DailyLimitExceededDetail"><value>G&#x00FC;nl&#x00FC;k {0} hesaplama limitine ula&#x15F;t&#x131;n&#x131;z. Yar&#x131;n tekrar deneyin.</value></data>
   <data name="DeviceIdRequired"><value>X-Device-ID gerekli</value></data>
   <data name="DeviceIdRequiredDetail"><value>Bu endpoint'e eri&#x15F;mek i&#x00E7;in X-Device-ID header'&#x131; tek, bo&#x15F; olmayan bir de&#x11F;erle g&#x00F6;nderilmelidir.</value></data>
   <data name="DeviceIdInvalid"><value>X-Device-ID ge&#x00E7;ersiz</value></data>
@@ -33,6 +38,15 @@
   <data name="InvalidPeriod"><value>Ge&#x00E7;ersiz periyod: '{0}'. Beklenen: weekly, monthly</value></data>
   <data name="InvalidDcaAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. DCA hesaplamas&#x131; yaln&#x131;zca 'try' destekler.</value></data>
   <data name="InvalidScenarioType"><value>Ge&#x00E7;ersiz senaryo tipi: '{0}'. &#x130;zin verilen de&#x11F;erler: {1}</value></data>
+  <data name="FeatureDisabled"><value>Bu &#x00F6;zellik mevcut plan&#x131;n&#x131;zda kullan&#x131;lam&#x131;yor.</value></data>
+  <data name="FeatureDisabledTitle"><value>&#x00D6;zellik mevcut plan&#x131;n&#x131;zda kapal&#x131;</value></data>
+  <data name="ValidationFailed"><value>&#x130;stek do&#x11F;rulama hatas&#x131;</value></data>
+  <data name="InvalidInterval"><value>Ge&#x00E7;ersiz interval: '{0}'. Yaln&#x131;zca 'daily' destekleniyor.</value></data>
+  <data name="DcaRangeTooWide"><value>DCA tarih aral&#x131;&#x11F;&#x131; &#x00E7;ok geni&#x15F;: tek istekte en fazla {0} alma noktas&#x131; oluyor.</value></data>
+  <data name="RequestPayloadMissing"><value>&#x130;stek g&#x00F6;vdesindeki '{0}' alan&#x131; zorunludur.</value></data>
+  <data name="FieldTooLong"><value>'{0}' alan&#x131; en fazla {1} karakter olabilir.</value></data>
+  <data name="PriceRangeTooWide"><value>Fiyat aral&#x131;&#x11F;&#x131; &#x00E7;ok geni&#x15F;</value></data>
+  <data name="PriceRangeTooWideDetail"><value>Tek istekte en fazla {0} g&#x00FC;nl&#x00FC;k fiyat aral&#x131;&#x11F;&#x131; sorgulanabilir.</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dolar/TL</value></data>
   <data name="Asset_EURTRY"><value>Euro/TL</value></data>

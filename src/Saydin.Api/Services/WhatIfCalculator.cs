@@ -1,4 +1,4 @@
-using System.Text.Json;
+using System.Globalization;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
@@ -8,7 +8,6 @@ using Saydin.Api.Repositories;
 
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
-using StackExchange.Redis;
 
 namespace Saydin.Api.Services;
 
@@ -16,93 +15,147 @@ public sealed class WhatIfCalculator(
     IAssetService assetService,
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
-    IConnectionMultiplexer redis,
+    IDailyLimitGuard dailyLimitGuard,
+    IRedisCacheHelper cache,
+    IAssetNameLocalizer assetNameLocalizer,
     IOptions<PlanOptions> options,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<WhatIfCalculator> logger) : IWhatIfCalculator
 {
-    private const string PremiumTier          = "premium";
     private const string WhatIfUsageKeyPrefix = "usage:whatif:";
     private const int    MaxPriceHistoryPoints = 60;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
-
     public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
+        EnsureRequired(request.AmountType, nameof(request.AmountType));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
 
-        var response = await CalculateCoreAsync(request, ct);
+        if (request.IncludeInflation && !features.InflationAdjustment)
+            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
 
-        // Atomik check+increment: başarılı hesaplamalar kotadan düşülür
-        await IncrementAndEnforceLimitAsync(user, deviceId);
-        return response;
+        // Önce atomik reserve — TOCTOU race kapatıldı. Pahalı hesap öncesi limit dayatılır.
+        await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
+        try
+        {
+            return await CalculateCoreAsync(request, ct);
+        }
+        catch
+        {
+            // Hesap başarısız → kotayı iade et ("başarısız hesap kotadan düşmesin").
+            // Release fırlatırsa orijinal exception'ı maskelemesin: best-effort + log.
+            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
+            throw;
+        }
     }
 
     public async Task<CompareResponse> CompareAsync(string deviceId, CompareRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
 
-        if (request.AssetSymbols.Count is < 2 or > 5)
-            throw new ArgumentException(localizer["CompareSymbolCount"]);
+        if (request.AssetSymbols is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbols)),
+                field: nameof(request.AssetSymbols));
+        EnsureRequired(request.AmountType, nameof(request.AmountType));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
 
-        // DbContext scoped olduğu için paralel çalıştırılamaz; sıralı çalıştırılır.
-        // Redis cache'i sayesinde tekrar eden semboller hızla yanıtlanır.
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
+        if (!features.Comparison)
+            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "comparison");
+
+        // CompareAsync 5 sembolü tek kullanım sayar; ancak inflation tier kuralı CalculateAsync
+        // ile aynı: özellik kapalıysa request bayrağını sessizce yok say.
+        var includeInflation = request.IncludeInflation && features.InflationAdjustment;
+
+        // Tekrarlanan semboller kaldırıldıktan sonra 2-5 arasında unique sembol gerekli
         var symbols = request.AssetSymbols
+            .Where(s => !string.IsNullOrWhiteSpace(s))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var resultList = new List<WhatIfResponse>(symbols.Count);
-        foreach (var symbol in symbols)
+        if (symbols.Count is < 2 or > 5)
+            throw new ValidationException(localizer["CompareSymbolCount"], field: nameof(request.AssetSymbols));
+
+        await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
+
+        try
         {
-            var item = await CalculateCoreAsync(new WhatIfRequest(
+            // Paralel hesap — DB/cache erişimleri bağımsız, 5 sembol için ~5x hızlanma.
+            // Kota Lua script ile atomik tutulduğu için single Acquire yeterli (fair-use:
+            // compare = 1 işlem; docs/architecture'da belgelenmeli).
+            var tasks = symbols.Select(symbol => CalculateCoreAsync(new WhatIfRequest(
                 AssetSymbol:       symbol,
                 BuyDate:           request.BuyDate,
                 SellDate:          request.SellDate,
                 Amount:            request.Amount,
                 AmountType:        request.AmountType,
-                IncludeInflation:  request.IncludeInflation), ct);
-            resultList.Add(item);
+                IncludeInflation:  includeInflation), ct)).ToArray();
+
+            var results = await Task.WhenAll(tasks);
+
+            // Karlılığa göre sırala (en yüksek ProfitLossPercent → Rank 1)
+            var ranked = results
+                .OrderByDescending(r => r.ProfitLossPercent)
+                .Select((r, i) => new CompareResultItem(Rank: i + 1, Calculation: r))
+                .ToList();
+
+            logger.LogInformation(
+                "Karşılaştırma hesaplandı: {Symbols} {BuyDate}→{SellDate}",
+                string.Join(",", symbols), request.BuyDate, request.SellDate);
+
+            return new CompareResponse(ranked);
         }
-
-        var results = resultList.ToArray();
-
-        // Karlılığa göre sırala (en yüksek ProfitLossPercent → Rank 1)
-        var ranked = results
-            .OrderByDescending(r => r.ProfitLossPercent)
-            .Select((r, i) => new CompareResultItem(Rank: i + 1, Calculation: r))
-            .ToList();
-
-        // Karşılaştırma da 1 hak olarak sayılır (atomik check+increment)
-        await IncrementAndEnforceLimitAsync(user, deviceId);
-
-        logger.LogInformation(
-            "Karşılaştırma hesaplandı: {Symbols} {BuyDate}→{SellDate}",
-            string.Join(",", request.AssetSymbols), request.BuyDate, request.SellDate);
-
-        return new CompareResponse(ranked);
+        catch
+        {
+            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
+            throw;
+        }
     }
 
     public async Task<ReverseWhatIfResponse> CalculateReverseAsync(
         string deviceId, ReverseWhatIfRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
+        EnsureRequired(request.TargetAmountType, nameof(request.TargetAmountType));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
 
-        var response = await CalculateReverseCoreAsync(request, ct);
+        if (request.IncludeInflation && !features.InflationAdjustment)
+            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
 
-        await IncrementAndEnforceLimitAsync(user, deviceId);
-        return response;
+        await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
+        try
+        {
+            return await CalculateReverseCoreAsync(request, ct);
+        }
+        catch
+        {
+            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
+            throw;
+        }
+    }
+
+    private async Task TryReleaseAsync(User? user, string deviceId, string usageKeyPrefix)
+    {
+        try
+        {
+            await dailyLimitGuard.ReleaseAsync(user, deviceId, usageKeyPrefix, ct: CancellationToken.None);
+        }
+        catch (Exception releaseEx)
+        {
+            // Release best-effort: orijinal exception kullanıcıya yansımalı, release hatası loglanır.
+            logger.LogWarning(releaseEx, "Daily limit release başarısız: {Prefix}", usageKeyPrefix);
+        }
     }
 
     private async Task<ReverseWhatIfResponse> CalculateReverseCoreAsync(
@@ -114,13 +167,14 @@ public sealed class WhatIfCalculator(
         var targetAmountType = request.TargetAmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
-            throw new ArgumentException(localizer["BuyDateAfterSellDate"]);
+            throw new ValidationException(localizer["BuyDateAfterSellDate"], field: nameof(request.BuyDate));
 
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
-        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
-        var cacheKey = $"whatif:reverse:v1:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.TargetAmount}:{targetAmountType}{inflationSuffix}:{lang}";
+        var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        var amountStr = request.TargetAmount.ToString("G", CultureInfo.InvariantCulture);
+        var cacheKey = $"whatif:reverse:v1:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{targetAmountType}{inflationSuffix}:{lang}";
 
-        var cached = await TryGetCachedAsync<ReverseWhatIfResponse>(cacheKey);
+        var cached = await cache.TryGetAsync<ReverseWhatIfResponse>(cacheKey, ct);
         if (cached is not null)
             return cached;
 
@@ -130,9 +184,8 @@ public sealed class WhatIfCalculator(
         var actualBuyDate  = buyPricePoint.PriceDate  != request.BuyDate ? buyPricePoint.PriceDate  : (DateOnly?)null;
         var actualSellDate = sellPricePoint.PriceDate != sellDate         ? sellPricePoint.PriceDate : (DateOnly?)null;
 
-        var assets = await assetService.GetAllAsync(ct);
-        var asset  = assets.FirstOrDefault(a => a.Symbol == symbol)
-            ?? throw new PriceNotFoundException(symbol, request.BuyDate);
+        var asset = await assetService.GetBySymbolAsync(symbol, ct)
+            ?? throw new AssetNotFoundException(symbol);
 
         var buyPrice  = buyPricePoint.Close;
         var sellPrice = sellPricePoint.Close;
@@ -161,8 +214,9 @@ public sealed class WhatIfCalculator(
                 requiredInvestmentTry = Math.Round(request.TargetAmount * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
             default:
-                throw new ArgumentException(
-                    string.Format(localizer["InvalidAmountType"], request.TargetAmountType));
+                throw new ValidationException(
+                    string.Format(localizer["InvalidAmountType"], request.TargetAmountType),
+                    field: nameof(request.TargetAmountType));
         }
 
         var profitLossTry     = targetValueTry - requiredInvestmentTry;
@@ -191,7 +245,7 @@ public sealed class WhatIfCalculator(
         {
             try
             {
-                var (buyIdx, buyIdxDate, sellIdx, sellIdxDate) =
+                var (buyIdx, _, sellIdx, sellIdxDate) =
                     await inflationRepository.GetIndexValuesAsync(request.BuyDate, sellDate, ct);
 
                 if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
@@ -222,7 +276,7 @@ public sealed class WhatIfCalculator(
 
         var response = new ReverseWhatIfResponse(
             AssetSymbol:                symbol,
-            AssetDisplayName:           LocalizeAssetName(symbol, asset.DisplayName),
+            AssetDisplayName:           assetNameLocalizer.Localize(symbol, asset.DisplayName),
             BuyDate:                    request.BuyDate,
             SellDate:                   sellDate,
             BuyPrice:                   buyPrice,
@@ -241,7 +295,7 @@ public sealed class WhatIfCalculator(
             ActualSellDate:             actualSellDate
         );
 
-        await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
+        await cache.TrySetAsync(cacheKey, response, TimeSpan.FromHours(1), ct);
 
         logger.LogInformation(
             "Reverse WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} hedef:{TargetAmountType}:{TargetAmount} → gereken: ₺{RequiredInvestment} %{ProfitLossPercent}",
@@ -259,13 +313,15 @@ public sealed class WhatIfCalculator(
         var amountType = request.AmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
-            throw new ArgumentException(localizer["BuyDateAfterSellDate"]);
+            throw new ValidationException(localizer["BuyDateAfterSellDate"], field: nameof(request.BuyDate));
 
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
-        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
-        var cacheKey = $"whatif:v3:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{request.Amount}:{amountType}{inflationSuffix}:{lang}";
+        var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        // Decimal formatlamasını kültür-bağımsız tutuyoruz (tr-TR'de virgül üretmesin → cache key fragmentation).
+        var amountStr = request.Amount.ToString("G", CultureInfo.InvariantCulture);
+        var cacheKey = $"whatif:v3:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{amountType}{inflationSuffix}:{lang}";
 
-        var cached = await TryGetCachedAsync<WhatIfResponse>(cacheKey);
+        var cached = await cache.TryGetAsync<WhatIfResponse>(cacheKey, ct);
         if (cached is not null)
             return cached;
 
@@ -278,12 +334,15 @@ public sealed class WhatIfCalculator(
         var actualBuyDate  = buyPricePoint.PriceDate  != request.BuyDate ? buyPricePoint.PriceDate  : (DateOnly?)null;
         var actualSellDate = sellPricePoint.PriceDate != sellDate         ? sellPricePoint.PriceDate : (DateOnly?)null;
 
-        var assets = await assetService.GetAllAsync(ct);
-        var asset  = assets.FirstOrDefault(a => a.Symbol == symbol)
-            ?? throw new PriceNotFoundException(symbol, request.BuyDate);
+        var asset = await assetService.GetBySymbolAsync(symbol, ct)
+            ?? throw new AssetNotFoundException(symbol);
 
         var buyPrice  = buyPricePoint.Close;
         var sellPrice = sellPricePoint.Close;
+
+        // Bozuk veri / sıfır fiyat: divide-by-zero yerine PriceNotFound → 404 (review C-2).
+        if (buyPrice == 0)
+            throw new PriceNotFoundException(symbol, request.BuyDate);
 
         decimal initialValueTry;
         decimal unitsAcquired;
@@ -300,8 +359,9 @@ public sealed class WhatIfCalculator(
                 initialValueTry = Math.Round(request.Amount * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
             default:
-                throw new ArgumentException(
-                    string.Format(localizer["InvalidAmountType"], request.AmountType));
+                throw new ValidationException(
+                    string.Format(localizer["InvalidAmountType"], request.AmountType),
+                    field: nameof(request.AmountType));
         }
 
         var finalValueTry     = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
@@ -331,7 +391,7 @@ public sealed class WhatIfCalculator(
         {
             try
             {
-                var (buyIdx, buyIdxDate, sellIdx, sellIdxDate) =
+                var (buyIdx, _, sellIdx, sellIdxDate) =
                     await inflationRepository.GetIndexValuesAsync(request.BuyDate, sellDate, ct);
 
                 if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
@@ -365,7 +425,7 @@ public sealed class WhatIfCalculator(
 
         var response = new WhatIfResponse(
             AssetSymbol:                symbol,
-            AssetDisplayName:           LocalizeAssetName(symbol, asset.DisplayName),
+            AssetDisplayName:           assetNameLocalizer.Localize(symbol, asset.DisplayName),
             BuyDate:                    request.BuyDate,
             SellDate:                   sellDate,
             BuyPrice:                   buyPrice,
@@ -384,20 +444,22 @@ public sealed class WhatIfCalculator(
             ActualSellDate:             actualSellDate
         );
 
-        await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
+        await cache.TrySetAsync(cacheKey, response, TimeSpan.FromHours(1), ct);
 
+        // Nullable decimal'i doğrudan structured field olarak geç — null tutarlı yansır.
         logger.LogInformation(
             "WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} {AmountType}:{Amount} → %{ProfitLossPercent} (reel: %{RealProfitLossPercent})",
             symbol, request.BuyDate, sellDate, amountType, request.Amount,
-            profitLossPercent, realProfitLossPercent?.ToString() ?? "-");
+            profitLossPercent, realProfitLossPercent);
 
         return response;
     }
 
-    private string LocalizeAssetName(string symbol, string fallbackDisplayName)
+    private void EnsureRequired(string? value, string field)
     {
-        var localized = localizer[$"Asset_{symbol}"];
-        return localized.ResourceNotFound ? fallbackDisplayName : localized.Value;
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], field), field: field);
     }
 
     private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(
@@ -414,102 +476,5 @@ public sealed class WhatIfCalculator(
             result.Add(new PriceHistoryPoint(points[idx].PriceDate, points[idx].Close));
         }
         return result;
-    }
-
-    private async Task<T?> TryGetCachedAsync<T>(string key) where T : class
-    {
-        try
-        {
-            var db    = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            if (!value.HasValue) return null;
-            return JsonSerializer.Deserialize<T>(value.ToString(), JsonOptions);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Redis okuma hatası: {Key}", key);
-            return null;
-        }
-    }
-
-    private async Task TrySetCacheAsync<T>(string key, T value, TimeSpan ttl)
-    {
-        try
-        {
-            var db = redis.GetDatabase();
-            await db.StringSetAsync(key, JsonSerializer.Serialize(value, JsonOptions), ttl);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Redis yazma hatası: {Key}", key);
-        }
-    }
-
-    private async Task CheckDailyLimitAsync(User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key = BuildUsageKey(user, deviceId);
-        try
-        {
-            var db    = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            var count = value.HasValue ? (long)value : 0;
-
-            if (count >= limit)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
-        }
-    }
-
-    /// <summary>
-    /// Atomik olarak sayacı artırır ve limiti aşıyorsa -1 döner.
-    /// Check + increment tek Lua script'te yapılarak race condition önlenir.
-    /// </summary>
-    private async Task IncrementAndEnforceLimitAsync(User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key   = BuildUsageKey(user, deviceId);
-        var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
-        try
-        {
-            const string script = """
-                local count = redis.call('INCR', KEYS[1])
-                if count == 1 then
-                  redis.call('PEXPIRE', KEYS[1], ARGV[1])
-                end
-                if tonumber(count) > tonumber(ARGV[2]) then
-                  redis.call('DECR', KEYS[1])
-                  return -1
-                end
-                return count
-                """;
-            var result = (long)await redis.GetDatabase()
-                .ScriptEvaluateAsync(script, keys: [key], values: [ttlMs, limit]);
-
-            if (result == -1)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
-        }
-    }
-
-    private static string BuildUsageKey(User? user, string deviceId)
-    {
-        var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        return $"{WhatIfUsageKeyPrefix}{userId}:{dateKey}";
     }
 }

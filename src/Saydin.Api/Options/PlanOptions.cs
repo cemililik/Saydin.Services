@@ -17,6 +17,9 @@ public sealed class TierOptions
     /// <summary>Günlük hesaplama limiti. 0 = sınırsız.</summary>
     public int DailyCalculationLimit { get; init; } = 20;
 
+    /// <summary>Günlük asset listeleme + fiyat sorgulama limiti. 0 = sınırsız.</summary>
+    public int DailyAssetQueryLimit { get; init; } = 500;
+
     /// <summary>Kaydedilebilecek maksimum senaryo sayısı. 0 = sınırsız.</summary>
     public int MaxSavedScenarios { get; init; } = 10;
 

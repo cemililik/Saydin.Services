@@ -1,3 +1,4 @@
+using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
 
@@ -5,6 +6,9 @@ namespace Saydin.Api.Endpoints;
 
 public static class WhatIfEndpoints
 {
+    /// <summary>ISO-8601 tarih formatı; tüm activity log payload'larında tutarlı kullanılır.</summary>
+    private const string IsoDate = "yyyy-MM-dd";
+
     public static IEndpointRouteBuilder MapWhatIfEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/what-if")
@@ -34,9 +38,30 @@ public static class WhatIfEndpoints
         IWhatIfCalculator calculator,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var log = httpContext.GetOrCreateActivityLog("what_if_calculate");
+        var deviceId = httpContext.GetRequiredDeviceId();
+
         var result = await calculator.CalculateAsync(deviceId, request, ct);
+
+        log.WithData(new
+        {
+            request.AssetSymbol,
+            buyDate = request.BuyDate.ToString(IsoDate),
+            sellDate = request.SellDate?.ToString(IsoDate),
+            request.Amount,
+            request.AmountType,
+            request.IncludeInflation,
+            result = new
+            {
+                result.ProfitLossPercent,
+                result.ProfitLossTry,
+                result.IsProfit,
+                result.RealProfitLossPercent,
+                actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
+                actualSellDate = result.ActualSellDate?.ToString(IsoDate),
+            }
+        });
+
         return Results.Ok(result);
     }
 
@@ -46,9 +71,31 @@ public static class WhatIfEndpoints
         IWhatIfCalculator calculator,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var log = httpContext.GetOrCreateActivityLog("what_if_compare");
+        var deviceId = httpContext.GetRequiredDeviceId();
+
         var result = await calculator.CompareAsync(deviceId, request, ct);
+
+        log.WithData(new
+        {
+            request.AssetSymbols,
+            buyDate = request.BuyDate.ToString(IsoDate),
+            sellDate = request.SellDate?.ToString(IsoDate),
+            request.Amount,
+            request.AmountType,
+            request.IncludeInflation,
+            result = new
+            {
+                winner = result.Results.FirstOrDefault()?.Calculation.AssetSymbol,
+                rankings = result.Results.Select(r => new
+                {
+                    r.Rank,
+                    symbol = r.Calculation.AssetSymbol,
+                    r.Calculation.ProfitLossPercent
+                })
+            }
+        });
+
         return Results.Ok(result);
     }
 
@@ -58,9 +105,30 @@ public static class WhatIfEndpoints
         IWhatIfCalculator calculator,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var log = httpContext.GetOrCreateActivityLog("what_if_reverse");
+        var deviceId = httpContext.GetRequiredDeviceId();
+
         var result = await calculator.CalculateReverseAsync(deviceId, request, ct);
+
+        log.WithData(new
+        {
+            request.AssetSymbol,
+            buyDate = request.BuyDate.ToString(IsoDate),
+            sellDate = request.SellDate?.ToString(IsoDate),
+            request.TargetAmount,
+            request.TargetAmountType,
+            request.IncludeInflation,
+            result = new
+            {
+                result.RequiredInvestmentTry,
+                result.ProfitLossPercent,
+                result.IsProfit,
+                result.RealProfitLossPercent,
+                actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
+                actualSellDate = result.ActualSellDate?.ToString(IsoDate),
+            }
+        });
+
         return Results.Ok(result);
     }
 }

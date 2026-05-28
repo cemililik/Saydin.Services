@@ -9,9 +9,13 @@ namespace Saydin.PriceIngestion.Workers;
 /// Başlangıçta eksik ayları 2003-01-01'den backfill eder.
 /// Ardından her ayın {MonthlyRunDay}. günü saat {DailyRunUtcHour}:00 UTC'de çalışır.
 /// appsettings.json → IngestionWorkers:EvdsInflation ile tüm parametreler override edilebilir.
+///
+/// NOT: <c>ingestion_jobs</c> tablosu asset_id NOT NULL FK ile asset bazlı tasarlandı;
+/// EVDS bir asset değil aylık endeks serisidir. Bu nedenle EVDS worker job kaydı YAZMAZ.
+/// Faz 1'de "inflation_jobs" benzeri ayrı bir tablo değerlendirilmelidir.
 /// </summary>
 public sealed class EvdsInflationWorker(
-    EvdsInflationAdapter adapter,
+    IInflationAdapter adapter,
     IInflationIngestionRepository repository,
     IConfiguration configuration,
     ILogger<EvdsInflationWorker> logger)

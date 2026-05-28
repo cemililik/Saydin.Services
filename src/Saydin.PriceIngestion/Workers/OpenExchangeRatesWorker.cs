@@ -7,9 +7,10 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class OpenExchangeRatesWorker(
     OpenExchangeRatesAdapter adapter,
     IPriceIngestionRepository repository,
+    IIngestionJobRepository jobs,
     IConfiguration configuration,
     ILogger<OpenExchangeRatesWorker> logger)
-    : BaseAssetWorker(adapter, repository, configuration, logger)
+    : BaseAssetWorker(adapter, repository, jobs, configuration, logger)
 {
     // Free plan: 1.000 istek/ay.
     // Backfill: ~365 gün × 2 metal = 730 istek (cache sayesinde yarıya iner → ~365 HTTP isteği).

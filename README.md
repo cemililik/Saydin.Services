@@ -41,7 +41,7 @@ docker-compose up -d  # Saydin.Api
 cd src/Saydin.Services
 
 # User secrets ile bağlantı dizelerini ayarla
-dotnet user-secrets set "ConnectionStrings:Postgres" "Host=localhost;Database=saydin;Username=saydin;Password=saydin_pass" \
+dotnet user-secrets set "ConnectionStrings:Postgres" "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   --project src/Saydin.Api
 
 dotnet run --project src/Saydin.Api

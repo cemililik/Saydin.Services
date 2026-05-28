@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
+using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Workers;
 
@@ -8,10 +9,14 @@ namespace Saydin.PriceIngestion.Workers;
 /// Tüm asset worker'larının ortak backfill + zamanlama mantığı.
 /// Her worker BackfillStartDate, ChunkDays ve DailyRunUtcTime'ı override eder.
 /// appsettings.json → IngestionWorkers:{WorkerConfigKey}:DailyRunUtcHour/Minute ile saatler override edilebilir.
+///
+/// Her veri çekme operasyonu `ingestion_jobs` tablosuna start/finish kaydı yazar
+/// (CLAUDE.md "ingestion_jobs tablosuna başarı ve hata durumları yazılır" zorunluluğu).
 /// </summary>
 public abstract class BaseAssetWorker(
     IExternalPriceAdapter adapter,
     IPriceIngestionRepository repository,
+    IIngestionJobRepository jobs,
     IConfiguration configuration,
     ILogger logger)
 {
@@ -74,7 +79,7 @@ public abstract class BaseAssetWorker(
         {
             var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
             var effectiveStart = BackfillStartDate;
-        var from = latestDate?.AddDays(1) ?? effectiveStart;
+            var from = latestDate?.AddDays(1) ?? effectiveStart;
             var to = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-1));
 
             if (from > to)
@@ -92,7 +97,8 @@ public abstract class BaseAssetWorker(
                 var chunkTo = chunkFrom.AddDays(ChunkDays - 1);
                 if (chunkTo > to) chunkTo = to;
 
-                await FetchAndUpsertAsync(asset, chunkFrom, chunkTo, ct);
+                await FetchAndUpsertAsync(asset, chunkFrom, chunkTo,
+                    IngestionJobTypes.HistoricalBackfill, ct);
                 chunkFrom = chunkTo.AddDays(1);
 
                 if (ChunkDelay > TimeSpan.Zero && chunkFrom <= to)
@@ -106,29 +112,98 @@ public abstract class BaseAssetWorker(
         var today = DateOnly.FromDateTime(DateTime.UtcNow.Date);
         var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
         foreach (var asset in assets)
-            await FetchAndUpsertAsync(asset, today, today, ct);
+            await FetchAndUpsertAsync(asset, today, today,
+                IngestionJobTypes.DailyUpdate, ct);
     }
 
-    private async Task FetchAndUpsertAsync(Shared.Entities.Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
+    private async Task FetchAndUpsertAsync(
+        Asset asset, DateOnly from, DateOnly to, string jobType, CancellationToken ct)
     {
+        // ingestion_jobs.StartAsync DB hatası fırlatırsa caller (RunAsync) içinde
+        // OperationCanceledException dışındaki exception'ları yakalamadığı için
+        // tüm worker düşerdi. Bu yüzden StartAsync de try kapsamında; başarısız olursa
+        // log + skip ile asset döngüsü devam eder.
+        IngestionJob? job = null;
         try
         {
-            var points = await adapter.FetchRangeAsync(
-                asset.Id, asset.Symbol, asset.SourceId ?? string.Empty, from, to, ct);
+            job = await TryStartJobAsync(asset, jobType, from, to, ct);
+            if (job is null) return;
 
-            if (points.Count == 0)
-            {
-                logger.LogInformation("{Symbol}: {From}–{To} arasında alınacak veri yok", asset.Symbol, from, to);
-                return;
-            }
-
-            await repository.UpsertPricePointsAsync(points, ct);
-            logger.LogInformation("{Symbol}: {Count} fiyat noktası kaydedildi ({From}–{To})",
-                asset.Symbol, points.Count, from, to);
+            var points = await FetchPointsAsync(asset, from, to, ct);
+            await CompleteJobAsync(asset, job.Id, points, from, to, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            // Shutdown — job'ı failed olarak işaretlemek anlamlı değil; running kalır,
+            // bir sonraki başlatmada operasyon ekibi görür.
+            throw;
+        }
+        catch (Exception ex)
         {
             logger.LogError(ex, "{Symbol} veri çekimi başarısız ({From}–{To})", asset.Symbol, from, to);
+            if (job is not null)
+                await MarkFailedSafelyAsync(asset, job.Id, ex, ct);
+        }
+    }
+
+    private async Task<IngestionJob?> TryStartJobAsync(
+        Asset asset, string jobType, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        // job kaydı açılamazsa (DB flap, network) ingestion'ı atla — bir sonraki
+        // cycle'da tekrar denenir. Loglanır, ama worker'ın tamamen düşmesini engeller.
+        try
+        {
+            return await jobs.StartAsync(asset.Id, jobType, from, to, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "{Symbol} ingestion_jobs.StartAsync başarısız ({From}–{To}) — ingestion atlandı",
+                asset.Symbol, from, to);
+            return null;
+        }
+    }
+
+    private async Task<IReadOnlyList<PricePoint>> FetchPointsAsync(
+        Asset asset, DateOnly from, DateOnly to, CancellationToken ct) =>
+        await adapter.FetchRangeAsync(
+            asset.Id, asset.Symbol, asset.SourceId ?? string.Empty, from, to, ct);
+
+    private async Task CompleteJobAsync(
+        Asset asset, Guid jobId, IReadOnlyList<PricePoint> points, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        if (points.Count == 0)
+        {
+            logger.LogInformation("{Symbol}: {From}–{To} arasında alınacak veri yok", asset.Symbol, from, to);
+            await jobs.MarkSuccessAsync(jobId, recordsUpserted: 0, ct);
+            return;
+        }
+
+        await repository.UpsertPricePointsAsync(points, ct);
+        await jobs.MarkSuccessAsync(jobId, points.Count, ct);
+
+        logger.LogInformation("{Symbol}: {Count} fiyat noktası kaydedildi ({From}–{To})",
+            asset.Symbol, points.Count, from, to);
+    }
+
+    private async Task MarkFailedSafelyAsync(Asset asset, Guid jobId, Exception cause, CancellationToken ct)
+    {
+        // job tamamlama best-effort — DB de erişilemez ise ek noise yok.
+        // GetBaseException(): AggregateException / TaskCanceledException sarmalayıcılarının
+        // altındaki gerçek nedeni alır → ingestion_jobs.error_message daha tanı koymaya
+        // elverişli olur.
+        try
+        {
+            await jobs.MarkFailedAsync(jobId, cause.GetBaseException().Message, ct);
+        }
+        catch (Exception jobEx)
+        {
+            logger.LogError(jobEx, "{Symbol} job failed-status yazılamadı (jobId={JobId})",
+                asset.Symbol, jobId);
         }
     }
 

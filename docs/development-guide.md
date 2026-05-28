@@ -87,7 +87,7 @@ dotnet ef migrations list \
 cd src/Saydin.Services
 docker build -f src/Saydin.Api/Dockerfile -t saydin-api .
 docker run -p 5080:8080 \
-  -e ConnectionStrings__Postgres="Host=host.docker.internal;Database=saydin;Username=saydin;Password=saydin_pass" \
+  -e ConnectionStrings__Postgres="Host=host.docker.internal;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   -e ConnectionStrings__Redis="host.docker.internal:6379" \
   -e Otlp__Endpoint="http://host.docker.internal:4317" \
   saydin-api
@@ -101,7 +101,7 @@ cd src/Saydin.Services
 # User secrets kurulumu (ilk seferinde)
 dotnet user-secrets init --project src/Saydin.Api
 dotnet user-secrets set "ConnectionStrings:Postgres" \
-  "Host=localhost;Database=saydin;Username=saydin;Password=saydin_pass" \
+  "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   --project src/Saydin.Api
 dotnet user-secrets set "ConnectionStrings:Redis" "localhost:6379" \
   --project src/Saydin.Api
@@ -117,7 +117,7 @@ dotnet run --project src/Saydin.Api
 # .NET ile
 dotnet user-secrets init --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ConnectionStrings:Postgres" \
-  "Host=localhost;Database=saydin;Username=saydin;Password=saydin_pass" \
+  "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ExternalApis:CoinGecko:ApiKey" "<your-key>" \
   --project src/Saydin.PriceIngestion
@@ -195,6 +195,63 @@ curl -X POST http://localhost:5080/v1/what-if/calculate \
     "amount": 10000,
     "amountType": "TRY"
   }' | jq
+
+# Karşılaştırma (Compare)
+curl -X POST http://localhost:5080/v1/what-if/compare \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "assetSymbols": ["USDTRY", "BTCTRY"],
+    "buyDate": "2020-01-01",
+    "sellDate": "2024-01-01",
+    "amount": 10000,
+    "amountType": "TRY"
+  }' | jq
+
+# Ters senaryo (Reverse What-If)
+curl -X POST http://localhost:5080/v1/what-if/reverse \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "assetSymbol": "USDTRY",
+    "buyDate": "2020-01-01",
+    "sellDate": "2024-01-01",
+    "targetAmount": 50000,
+    "targetAmountType": "TRY"
+  }' | jq
+
+# DCA hesaplama
+curl -X POST http://localhost:5080/v1/what-if/dca \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "assetSymbol": "USDTRY",
+    "startDate": "2020-01-01",
+    "endDate": "2024-01-01",
+    "periodicAmount": 1000,
+    "amountType": "TRY",
+    "period": "monthly",
+    "includeInflation": false
+  }' | jq
+
+# Senaryo kaydet
+curl -X POST http://localhost:5080/v1/scenarios \
+  -H "Content-Type: application/json" \
+  -H "X-Device-ID: dev-test-001" \
+  -d '{
+    "type": "what_if",
+    "assetSymbol": "USDTRY",
+    "title": "USD Test",
+    "parameters": {"buyDate": "2020-01-01", "amount": 10000}
+  }' | jq
+
+# Senaryoları listele
+curl http://localhost:5080/v1/scenarios \
+  -H "X-Device-ID: dev-test-001" | jq
+
+# Uygulama konfigürasyonu
+curl http://localhost:5080/v1/config \
+  -H "X-Device-ID: dev-test-001" | jq
 
 # Prometheus metrikleri
 curl http://localhost:5080/metrics

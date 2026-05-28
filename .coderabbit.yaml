@@ -10,7 +10,8 @@ reviews:
     enabled: true
     drafts: false
     base_branches:
-      - master
+      - main
+      - development
 
   path_filters:
     - "!**/obj/**"

@@ -7,9 +7,10 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class TwelveDataWorker(
     TwelveDataAdapter adapter,
     IPriceIngestionRepository repository,
+    IIngestionJobRepository jobs,
     IConfiguration configuration,
     ILogger<TwelveDataWorker> logger)
-    : BaseAssetWorker(adapter, repository, configuration, logger)
+    : BaseAssetWorker(adapter, repository, jobs, configuration, logger)
 {
     // MVP: son 2 yıl. Free plan 8 istek/dakika — chunk'lar arası 8 sn bekleme.
     protected override DateOnly BackfillStartDate =>

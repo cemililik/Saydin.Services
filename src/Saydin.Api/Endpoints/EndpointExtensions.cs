@@ -9,6 +9,17 @@ internal static class EndpointExtensions
     private const string DeviceIdHeader   = "X-Device-ID";
     private const int    MaxDeviceIdLength = 128;
 
+    /// <summary>
+    /// <c>RequireDeviceId()</c> filter'ı <see cref="DeviceIdItemKey"/> öğesini set ettiği için
+    /// burada normalde null dönmez. Filter atlanırsa InvalidOperationException → 500;
+    /// bu noktayı görünür kılmak için <see cref="GlobalExceptionHandler"/> tarafından
+    /// loglanır. (Tüm endpoint'lerde tekrarlanan boilerplate'i bu helper'a topladık.)
+    /// </summary>
+    internal static string GetRequiredDeviceId(this HttpContext context) =>
+        context.Items[DeviceIdItemKey] as string
+            ?? throw new InvalidOperationException(
+                "DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+
     internal static RouteHandlerBuilder RequireDeviceId(this RouteHandlerBuilder builder)
         => builder.AddEndpointFilter(async (ctx, next) =>
         {

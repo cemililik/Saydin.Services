@@ -1,3 +1,4 @@
+using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
 
@@ -24,9 +25,32 @@ public static class DcaEndpoints
         IDcaCalculator calculator,
         CancellationToken ct)
     {
-        var deviceId = httpContext.Items[EndpointExtensions.DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException("DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
+        var log = httpContext.GetOrCreateActivityLog("what_if_dca");
+        var deviceId = httpContext.GetRequiredDeviceId();
+
         var result = await calculator.CalculateAsync(deviceId, request, ct);
+
+        log.WithData(new
+        {
+            request.AssetSymbol,
+            startDate = request.StartDate.ToString("yyyy-MM-dd"),
+            endDate = request.EndDate?.ToString("yyyy-MM-dd"),
+            request.PeriodicAmount,
+            request.Period,
+            request.AmountType,
+            request.IncludeInflation,
+            result = new
+            {
+                result.TotalInvestedTry,
+                result.CurrentValueTry,
+                result.ProfitLossPercent,
+                result.ProfitLossTry,
+                result.AverageCostPerUnit,
+                result.TotalPurchases,
+                result.RealProfitLossPercent,
+            }
+        });
+
         return Results.Ok(result);
     }
 }

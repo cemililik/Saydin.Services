@@ -11,9 +11,10 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class TcmbWorker(
     TcmbAdapter adapter,
     IPriceIngestionRepository repository,
+    IIngestionJobRepository jobs,
     IConfiguration configuration,
     ILogger<TcmbWorker> logger)
-    : BaseAssetWorker(adapter, repository, configuration, logger)
+    : BaseAssetWorker(adapter, repository, jobs, configuration, logger)
 {
     // Son 20 yıl (TCMB arşivi çok daha eskilere gidiyor)
     protected override DateOnly BackfillStartDate =>

@@ -29,7 +29,7 @@ public sealed class ScenarioLimitExceededExceptionHandler(
             Type = "https://saydin.app/errors/scenario-limit-exceeded",
             Title = localizer["ScenarioLimitExceeded"],
             Status = StatusCodes.Status422UnprocessableEntity,
-            Detail = ex.Message,
+            Detail = string.Format(localizer["ScenarioLimitExceededDetail"], ex.Limit),
             Extensions =
             {
                 ["traceId"] = Activity.Current?.TraceId.ToString(),

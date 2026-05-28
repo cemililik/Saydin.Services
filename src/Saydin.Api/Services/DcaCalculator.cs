@@ -1,12 +1,12 @@
-using System.Text.Json;
+using System.Globalization;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
+using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
-using StackExchange.Redis;
 
 namespace Saydin.Api.Services;
 
@@ -14,31 +14,61 @@ public sealed class DcaCalculator(
     IAssetService assetService,
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
-    IConnectionMultiplexer redis,
+    IDailyLimitGuard dailyLimitGuard,
+    IRedisCacheHelper cache,
+    IAssetNameLocalizer assetNameLocalizer,
     IOptions<PlanOptions> options,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<DcaCalculator> logger) : IDcaCalculator
 {
-    private const string PremiumTier         = "premium";
     private const string DcaUsageKeyPrefix   = "usage:dca:";
     private const int    MaxChartPoints      = 60;
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
+    // DoS koruması: 10 yıl haftalık ≈ 520 alma noktası. Bunun üzeri ya yanlış
+    // tarih aralığı ya da malicious — anonim free kullanıcının tek istekle
+    // 6500 nokta üretmesini engelle (review M-16).
+    private const int    MaxPurchasePoints   = 600;
 
     public async Task<DcaResponse> CalculateAsync(string deviceId, DcaRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
+        EnsureRequired(request.AmountType, nameof(request.AmountType));
+        EnsureRequired(request.Period, nameof(request.Period));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        await CheckDailyLimitAsync(user, deviceId);
+        var features = options.Value.GetTierOptions(user?.Tier).Features;
 
-        var response = await CalculateCoreAsync(request, ct);
+        if (!features.Dca)
+            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "dca");
 
-        await IncrementAndEnforceLimitAsync(user, deviceId);
-        return response;
+        if (request.IncludeInflation && !features.InflationAdjustment)
+            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
+
+        await dailyLimitGuard.TryAcquireAsync(user, deviceId, DcaUsageKeyPrefix, ct: ct);
+
+        try
+        {
+            return await CalculateCoreAsync(request, ct);
+        }
+        catch
+        {
+            await TryReleaseAsync(user, deviceId);
+            throw;
+        }
+    }
+
+    private async Task TryReleaseAsync(User? user, string deviceId)
+    {
+        try
+        {
+            await dailyLimitGuard.ReleaseAsync(user, deviceId, DcaUsageKeyPrefix, ct: CancellationToken.None);
+        }
+        catch (Exception releaseEx)
+        {
+            // Release best-effort: orijinal calculator exception'ı maskelemesin.
+            logger.LogWarning(releaseEx, "Daily limit release başarısız (DCA)");
+        }
     }
 
     private async Task<DcaResponse> CalculateCoreAsync(DcaRequest request, CancellationToken ct)
@@ -50,32 +80,38 @@ public sealed class DcaCalculator(
         var period     = request.Period.ToLowerInvariant();
 
         if (request.StartDate > endDate)
-            throw new ArgumentException(localizer["BuyDateAfterSellDate"]);
+            throw new ValidationException(localizer["BuyDateAfterSellDate"], field: nameof(request.StartDate));
 
         if (period is not ("weekly" or "monthly"))
-            throw new ArgumentException(
-                string.Format(localizer["InvalidPeriod"], request.Period));
+            throw new ValidationException(
+                string.Format(localizer["InvalidPeriod"], request.Period),
+                field: nameof(request.Period));
 
         if (amountType is not "try")
-            throw new ArgumentException(
-                string.Format(localizer["InvalidDcaAmountType"], request.AmountType));
+            throw new ValidationException(
+                string.Format(localizer["InvalidDcaAmountType"], request.AmountType),
+                field: nameof(request.AmountType));
 
         // ── Cache kontrolü ──────────────────────────────────────────────────
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
-        var lang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
-        var cacheKey = $"dca:v1:{symbol}:{request.StartDate:yyyy-MM-dd}:{endDate:yyyy-MM-dd}:{request.PeriodicAmount}:{period}:{amountType}{inflationSuffix}:{lang}";
+        var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+        var amountStr = request.PeriodicAmount.ToString("G", CultureInfo.InvariantCulture);
+        var cacheKey = $"dca:v1:{symbol}:{request.StartDate:yyyy-MM-dd}:{endDate:yyyy-MM-dd}:{amountStr}:{period}:{amountType}{inflationSuffix}:{lang}";
 
-        var cached = await TryGetCachedAsync<DcaResponse>(cacheKey);
+        var cached = await cache.TryGetAsync<DcaResponse>(cacheKey, ct);
         if (cached is not null)
             return cached;
 
         // ── Asset bilgisi ───────────────────────────────────────────────────
-        var assets = await assetService.GetAllAsync(ct);
-        var asset  = assets.FirstOrDefault(a => a.Symbol == symbol)
-            ?? throw new PriceNotFoundException(symbol, request.StartDate);
+        var asset = await assetService.GetBySymbolAsync(symbol, ct)
+            ?? throw new AssetNotFoundException(symbol);
 
         // ── Alım tarihlerini oluştur ────────────────────────────────────────
         var purchaseDates = GeneratePurchaseDates(request.StartDate, endDate, period);
+        if (purchaseDates.Count > MaxPurchasePoints)
+            throw new ValidationException(
+                string.Format(localizer["DcaRangeTooWide"], MaxPurchasePoints),
+                field: nameof(request.StartDate));
 
         // ── Her alım tarihi için hesaplama ──────────────────────────────────
         var purchases      = new List<DcaPurchase>(purchaseDates.Count);
@@ -86,6 +122,9 @@ public sealed class DcaCalculator(
         {
             var pricePoint    = await assetService.GetNearestPriceAsync(symbol, purchaseDate, ct);
             var price         = pricePoint.Close;
+            if (price == 0)
+                throw new PriceNotFoundException(symbol, purchaseDate);
+
             var unitsAcquired = Math.Round(request.PeriodicAmount / price, 6, MidpointRounding.AwayFromZero);
 
             cumulativeUnits += unitsAcquired;
@@ -105,6 +144,10 @@ public sealed class DcaCalculator(
         // ── Güncel değer ve kâr/zarar ───────────────────────────────────────
         var latestPricePoint = await assetService.GetNearestPriceAsync(symbol, endDate, ct);
         var currentUnitPrice = latestPricePoint.Close;
+        // Purchase-side zero-price guard ile aynı kontrat — yoksa "0 TL şu an" diye
+        // uydurulmuş bir response döner. Terminal fiyatı bulunamadıysa 404.
+        if (currentUnitPrice == 0)
+            throw new PriceNotFoundException(symbol, endDate);
 
         var totalUnitsAcquired = Math.Round(cumulativeUnits, 6, MidpointRounding.AwayFromZero);
         var totalInvestedTry   = Math.Round(cumulativeCost, 2, MidpointRounding.AwayFromZero);
@@ -127,7 +170,7 @@ public sealed class DcaCalculator(
         {
             try
             {
-                var (buyIdx, buyIdxDate, sellIdx, sellIdxDate) =
+                var (buyIdx, _, sellIdx, sellIdxDate) =
                     await inflationRepository.GetIndexValuesAsync(request.StartDate, endDate, ct);
 
                 if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
@@ -162,7 +205,7 @@ public sealed class DcaCalculator(
 
         var response = new DcaResponse(
             AssetSymbol:                symbol,
-            AssetDisplayName:           LocalizeAssetName(symbol, asset.DisplayName),
+            AssetDisplayName:           assetNameLocalizer.Localize(symbol, asset.DisplayName),
             StartDate:                  request.StartDate,
             EndDate:                    endDate,
             Period:                     period,
@@ -182,14 +225,21 @@ public sealed class DcaCalculator(
             Purchases:                  purchases,
             ChartData:                  chartData);
 
-        await TrySetCacheAsync(cacheKey, response, TimeSpan.FromHours(1));
+        await cache.TrySetAsync(cacheKey, response, TimeSpan.FromHours(1), ct);
 
         logger.LogInformation(
             "DCA hesaplandı: {Symbol} {StartDate}→{EndDate} {Period} {Amount} → %{ProfitLossPercent} (reel: %{RealProfitLossPercent})",
             symbol, request.StartDate, endDate, period, request.PeriodicAmount,
-            profitLossPercent, realProfitLossPercent?.ToString() ?? "-");
+            profitLossPercent, realProfitLossPercent);
 
         return response;
+    }
+
+    private void EnsureRequired(string? value, string field)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], field), field: field);
     }
 
     private static List<DateOnly> GeneratePurchaseDates(DateOnly startDate, DateOnly endDate, string period)
@@ -229,108 +279,5 @@ public sealed class DcaCalculator(
         }
 
         return result;
-    }
-
-    private string LocalizeAssetName(string symbol, string fallbackDisplayName)
-    {
-        var localized = localizer[$"Asset_{symbol}"];
-        return localized.ResourceNotFound ? fallbackDisplayName : localized.Value;
-    }
-
-    // ── Redis yardımcıları ────────────────────────────────────────────────────
-
-    private async Task<T?> TryGetCachedAsync<T>(string key) where T : class
-    {
-        try
-        {
-            var db    = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            if (!value.HasValue) return null;
-            return JsonSerializer.Deserialize<T>(value.ToString(), JsonOptions);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Redis okuma hatası: {Key}", key);
-            return null;
-        }
-    }
-
-    private async Task TrySetCacheAsync<T>(string key, T value, TimeSpan ttl)
-    {
-        try
-        {
-            var db = redis.GetDatabase();
-            await db.StringSetAsync(key, JsonSerializer.Serialize(value, JsonOptions), ttl);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Redis yazma hatası: {Key}", key);
-        }
-    }
-
-    // ── Günlük limit yönetimi (WhatIfCalculator ile aynı pattern) ─────────
-
-    private async Task CheckDailyLimitAsync(Saydin.Shared.Entities.User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key = BuildUsageKey(user, deviceId);
-        try
-        {
-            var db    = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            var count = value.HasValue ? (long)value : 0;
-
-            if (count >= limit)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
-        }
-    }
-
-    private async Task IncrementAndEnforceLimitAsync(Saydin.Shared.Entities.User? user, string deviceId)
-    {
-        if (user?.Tier == PremiumTier) return;
-
-        var limit = options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-        if (limit <= 0) return;
-
-        var key   = BuildUsageKey(user, deviceId);
-        var ttlMs = (long)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalMilliseconds;
-        try
-        {
-            const string script = """
-                local count = redis.call('INCR', KEYS[1])
-                if count == 1 then
-                  redis.call('PEXPIRE', KEYS[1], ARGV[1])
-                end
-                if tonumber(count) > tonumber(ARGV[2]) then
-                  redis.call('DECR', KEYS[1])
-                  return -1
-                end
-                return count
-                """;
-            var result = (long)await redis.GetDatabase()
-                .ScriptEvaluateAsync(script, keys: [key], values: [ttlMs, limit]);
-
-            if (result == -1)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
-        }
-    }
-
-    private static string BuildUsageKey(Saydin.Shared.Entities.User? user, string deviceId)
-    {
-        var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        return $"{DcaUsageKeyPrefix}{userId}:{dateKey}";
     }
 }

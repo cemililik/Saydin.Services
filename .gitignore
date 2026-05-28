@@ -52,3 +52,9 @@ secrets.json
 # Logs
 *.log
 logs/
+
+# GeoIP database (büyük binary — repo'ya dahil edilmez)
+*.mmdb
+
+# Code review artefaktları (lokal — paylaşılmaz)
+docs/code-reviews/
