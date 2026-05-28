@@ -1,7 +1,9 @@
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Mappers;
 using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
+using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Adapters;
 
@@ -44,34 +46,33 @@ public sealed class EvdsInflationAdapter(
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("key", apiKey);
 
+        HttpResponseMessage? response = null;
         try
         {
-            var response = await client.SendAsync(request, ct);
+            response = await client.SendAsync(request, ct);
 
-            // 4xx hataları kalıcıdır — sessizce yutmak yerine yukarı fırlat
-            if ((int)response.StatusCode >= 400 && (int)response.StatusCode < 500)
+            if (!response.IsSuccessStatusCode)
             {
+                var statusCode = (int)response.StatusCode;
                 var body = await response.Content.ReadAsStringAsync(ct);
-                logger.LogError(
-                    "EVDS TÜFE kalıcı API hatası {StatusCode}: {Body} ({From}–{To})",
-                    (int)response.StatusCode, body, from, to);
-                // Operasyon ekibinin alarm kurabilmesi için outcome tag'i ayır
-                // (401/403 vs 400 vs diğer 4xx). EVDS worker job kaydı yazmıyor (asset bazlı şema),
-                // bu metric eksikliği telafi eder (review H-7).
                 var outcome = response.StatusCode switch
                 {
                     System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden => "auth",
                     System.Net.HttpStatusCode.TooManyRequests => "rate_limit",
+                    var s when (int)s >= 500 => "http_5xx",
                     _ => "http_4xx",
                 };
+                logger.LogError(
+                    "EVDS TÜFE API hatası {StatusCode} ({Outcome}): {Body} ({From}–{To})",
+                    statusCode, outcome, body, from, to);
                 SaydinMetrics.InflationIngestionFailures.Add(1,
                     new KeyValuePair<string, object?>("source", Source),
                     new KeyValuePair<string, object?>("outcome", outcome));
-                throw new HttpRequestException(
-                    $"EVDS API kalıcı hata: {(int)response.StatusCode}", null, response.StatusCode);
+                // F1.1-7: 5xx + 4xx tek noktada — sessizce return [] YASAK; worker
+                // ingestion_jobs failed yazsın diye ExternalApiException ile fırlat.
+                throw new ExternalApiException(Source,
+                    $"EVDS HTTP hatası {statusCode} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})");
             }
-
-            response.EnsureSuccessStatusCode();
 
             var json = await response.Content.ReadAsStringAsync(ct);
             var rates = EvdsInflationMapper.Map(json);
@@ -82,23 +83,32 @@ public sealed class EvdsInflationAdapter(
 
             return rates;
         }
-        catch (OperationCanceledException)
+        catch (HttpRequestException ex)
         {
-            throw;
-        }
-        catch (HttpRequestException)
-        {
-            // 4xx hataları zaten loglandı, yukarı fırlat (caller'a bildir)
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // Geçici hatalar (network, deserialization vb.) — boş liste dön
-            logger.LogError(ex, "EVDS TÜFE geçici hata ({From}–{To})", from, to);
+            // Polly retry tükenmiş network hatası.
+            // PR #11 follow-up: metric'in yanı sıra exception stack'i de logla;
+            // ExternalApiException sarmalaması inner stack'i sızdırmaz.
+            logger.LogError(ex,
+                "EVDS network hatası: {Source} ({From}–{To})", Source, from, to);
             SaydinMetrics.InflationIngestionFailures.Add(1,
                 new KeyValuePair<string, object?>("source", Source),
                 new KeyValuePair<string, object?>("outcome", "transient"));
-            return [];
+            throw new ExternalApiException(Source,
+                $"EVDS network hatası ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
+        }
+        catch (JsonException ex)
+        {
+            logger.LogError(ex,
+                "EVDS yanıtı çözümlenemedi: {Source} ({From}–{To})", Source, from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "parse"));
+            throw new ExternalApiException(Source,
+                $"EVDS yanıtı çözümlenemedi ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
+        }
+        finally
+        {
+            response?.Dispose();
         }
     }
 }

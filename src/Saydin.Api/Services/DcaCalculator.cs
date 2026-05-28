@@ -30,11 +30,23 @@ public sealed class DcaCalculator(
 
     public async Task<DcaResponse> CalculateAsync(string deviceId, DcaRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        // P1R-003: domain ValidationException ile guard — handler'ın ArgumentException
+        // catch'i altyapı/framework hatalarını yutmasın diye request/deviceId null check'i
+        // burada explicit yapılır.
+        if (request is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+        if (string.IsNullOrWhiteSpace(deviceId))
+            throw new ValidationException(localizer["DeviceIdRequiredDetail"], field: "deviceId");
+
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsureRequired(request.Period, nameof(request.Period));
+
+        // F1.9-4 ([C-F-14]): Negatif / sıfır periyodik tutar geçersiz — pozitif zorunlu.
+        if (request.PeriodicAmount <= 0m)
+            throw new ValidationException(
+                localizer["AmountMustBePositive"], field: nameof(request.PeriodicAmount));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         var features = options.Value.GetTierOptions(user?.Tier).Features;
@@ -131,6 +143,23 @@ public sealed class DcaCalculator(
             cumulativeCost  += request.PeriodicAmount;
 
             var cumulativeValue = Math.Round(cumulativeUnits * price, 2, MidpointRounding.AwayFromZero);
+
+            // F1.3-4 ([C-B-Dca-3]): Hafta sonu / tatil clip ile aynı PriceDate'e iki
+            // alım düşerse ikinci kaydı önceki ile birleştir — purchases listesinde
+            // her satır benzersiz bir piyasa günüdür. Cumulative değerler en güncel
+            // satıra yazılır (toplam doğru kalır).
+            if (purchases.Count > 0 && purchases[^1].Date == pricePoint.PriceDate)
+            {
+                var prev = purchases[^1];
+                purchases[^1] = prev with
+                {
+                    UnitsAcquired      = Math.Round(prev.UnitsAcquired + unitsAcquired, 6, MidpointRounding.AwayFromZero),
+                    CumulativeUnits    = Math.Round(cumulativeUnits, 6, MidpointRounding.AwayFromZero),
+                    CumulativeCostTry  = Math.Round(cumulativeCost, 2, MidpointRounding.AwayFromZero),
+                    CumulativeValueTry = cumulativeValue,
+                };
+                continue;
+            }
 
             purchases.Add(new DcaPurchase(
                 Date:              pricePoint.PriceDate,
@@ -244,15 +273,30 @@ public sealed class DcaCalculator(
 
     private static List<DateOnly> GeneratePurchaseDates(DateOnly startDate, DateOnly endDate, string period)
     {
-        var dates   = new List<DateOnly>();
-        var current = startDate;
+        var dates = new List<DateOnly>();
 
-        while (current <= endDate)
+        // F1.3-3 ([C-B-Dca-2]): Monthly serilerde `current.AddMonths(1)` kullanmak
+        // anchor day kaymasına yol açar (örn. 31 Ocak → 28 Şubat → 28 Mart …).
+        // Tüm tarihler `startDate`'e göre indeks-bazlı hesaplanır; `AddMonths` ay
+        // sonu clamp'ini hâlâ uygular ama bir sonraki ay startDate'in gününden devam eder.
+        if (period == "weekly")
         {
-            dates.Add(current);
-            current = period == "weekly"
-                ? current.AddDays(7)
-                : current.AddMonths(1);
+            for (var current = startDate; current <= endDate; current = current.AddDays(7))
+                dates.Add(current);
+        }
+        else
+        {
+            // Sınırlı iterasyon: AddMonths()'a yalnızca [0, monthsDiff] aralığında çağrı
+            // yapılır — `endDate` patolojik biçimde DateOnly.MaxValue'ye yakınsa bile
+            // ArgumentOutOfRangeException üretmez.
+            var monthsDiff = (endDate.Year - startDate.Year) * 12 + (endDate.Month - startDate.Month);
+            if (monthsDiff < 0) monthsDiff = 0;
+            for (var i = 0; i <= monthsDiff; i++)
+            {
+                var candidate = startDate.AddMonths(i);
+                if (candidate > endDate) break;
+                dates.Add(candidate);
+            }
         }
 
         return dates;

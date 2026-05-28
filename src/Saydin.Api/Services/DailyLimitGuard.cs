@@ -91,21 +91,35 @@ public sealed class DailyLimitGuard(
         try
         {
             ct.ThrowIfCancellationRequested();
+            // F1.3-7: Check-then-INCR pattern — önceki INCR-then-DECR sayacı geçici
+            // olarak limit'in üzerine şişiriyordu (cosmetic) ve telemetry / metric
+            // okumalarında yanıltıcı oluyordu. Lua script atomic olduğu için race yok;
+            // bu varyant niyeti daha net açıklıyor (review F1.3-7).
+            // Dönüş: 1 = allow, 0 = reject (limit reached).
+            //
+            // PR #11 follow-up: PEXPIRE yalnızca yeni key'in ilk INCR'ında çağrılır
+            // (`count == 1`). Önceki revizyon her başarılı istekte PEXPIRE atıyordu,
+            // bu hem (a) gereksiz Redis yazma yükü oluşturuyor hem de (b) sliding-window
+            // gibi yanlış bir izlenim veriyordu. Semantik calendar-day: key adı zaten
+            // `usage:{prefix}:{userId}:{yyyy-MM-dd}` formatında tarih içeriyor (gece
+            // yarısı geçince yeni key 0'dan başlar) ve TTL caller tarafından
+            // "gece yarısına kalan ms" olarak hesaplanır. İlk INCR'da TTL set
+            // edildiğinde aynı günün geri kalanı için aynı pencere geçerli olur.
             const string script = """
+                local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+                if current >= tonumber(ARGV[1]) then
+                  return 0
+                end
                 local count = redis.call('INCR', KEYS[1])
                 if count == 1 then
-                  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+                  redis.call('PEXPIRE', KEYS[1], ARGV[2])
                 end
-                if tonumber(count) > tonumber(ARGV[2]) then
-                  redis.call('DECR', KEYS[1])
-                  return -1
-                end
-                return count
+                return 1
                 """;
             var result = (long)await redis.GetDatabase()
-                .ScriptEvaluateAsync(script, keys: [key], values: [ttlMs, limit]);
+                .ScriptEvaluateAsync(script, keys: [key], values: [limit, ttlMs]);
 
-            if (result == -1)
+            if (result == 0)
                 throw new DailyLimitExceededException(limit);
         }
         catch (OperationCanceledException)

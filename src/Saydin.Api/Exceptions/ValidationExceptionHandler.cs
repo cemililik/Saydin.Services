@@ -16,12 +16,22 @@ public sealed class ValidationExceptionHandler(
         Exception exception,
         CancellationToken cancellationToken)
     {
+        // F1.2-6 / P1R-003: Yalnızca domain `ValidationException` handle edilir.
+        // Önceki sürümde `ArgumentException` da yakalanıyordu, ancak base tip
+        // framework ve altyapı katmanlarından (Redis/EF Core/Npgsql) da fırlatılır;
+        // bu hatalar 400 olarak yansıtıldığında kök sebep 5xx alarm/dashboard'lardan
+        // gizlenir. Servis katmanı artık deviceId/null/whitespace guard'larını
+        // doğrudan `ValidationException` ile yapıyor — handler de yalnızca domain
+        // exception'ı işliyor, jenerik `ArgumentException` GlobalExceptionHandler'a
+        // bırakılıp 500 üretiyor.
         if (exception is not ValidationException ex)
             return false;
 
-        logger.LogInformation(
+        var detailMessage = ex.Detail;
+        var field = ex.Field;
+        logger.LogWarning(
             "Geçersiz istek alanı: {Field} — {Detail}",
-            ex.Field ?? "(none)", ex.Detail);
+            field ?? "(none)", detailMessage);
 
         httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
 
@@ -32,15 +42,15 @@ public sealed class ValidationExceptionHandler(
         {
             ["traceId"] = traceId
         };
-        if (ex.Field is not null)
-            extensions["field"] = ex.Field;
+        if (field is not null)
+            extensions["field"] = field;
 
         await httpContext.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type   = "https://saydin.app/errors/validation",
             Title  = localizer["ValidationFailed"],
             Status = StatusCodes.Status400BadRequest,
-            Detail = ex.Detail,
+            Detail = detailMessage,
             Extensions = extensions,
         }, cancellationToken);
 

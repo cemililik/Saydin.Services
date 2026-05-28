@@ -1,0 +1,44 @@
+# Build çıktıları ve cache klasörleri image'a sızmasın
+**/bin/
+**/obj/
+**/.vs/
+**/node_modules/
+
+# IDE / OS
+**/.idea/
+**/.vscode/
+**/*.user
+**/*.suo
+.DS_Store
+Thumbs.db
+
+# Geliştirme ortamı configleri (production image'ında olmamalı)
+**/appsettings.Development.json
+**/appsettings.Local.json
+**/.env
+**/.env.*
+!**/.env.example
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI / sürüm kontrol
+.github/
+.coderabbit.yaml
+.sourcery.yaml
+*.md
+docs/
+infrastructure/
+!infrastructure/postgres/migrations/
+
+# Testler runtime image'da gereksiz
+tests/
+**/*.Tests/
+
+# Sertifika ve credential dosyaları (defansif)
+**/*.pfx
+**/*.pem
+**/*.key
+**/aspnetapp.pfx

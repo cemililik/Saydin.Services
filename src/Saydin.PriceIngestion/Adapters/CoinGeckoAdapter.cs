@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Saydin.PriceIngestion.Mappers;
 using Saydin.Shared.Entities;
+using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Adapters;
 
@@ -25,13 +26,19 @@ public sealed class CoinGeckoAdapter(
         {
             using var response = await client.GetAsync(url, ct);
 
-            if (response.StatusCode == System.Net.HttpStatusCode.Forbidden ||
-                response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            // F1.1-4: 429 ve 403'ü sessizce yutmak yerine ExternalApiException ile
+            // yukarı bildir. Polly StandardResilienceHandler 429 için zaten retry yapar;
+            // bu noktaya geldiyse retry zinciri tükenmiştir (kalıcı hata gibi davran).
+            if (response.StatusCode is System.Net.HttpStatusCode.TooManyRequests
+                                    or System.Net.HttpStatusCode.Forbidden)
             {
+                var retryAfter = response.Headers.RetryAfter?.Delta?.TotalSeconds
+                              ?? response.Headers.RetryAfter?.Date?.Subtract(DateTimeOffset.UtcNow).TotalSeconds;
                 logger.LogWarning(
-                    "CoinGecko {StatusCode}: {Symbol} atlandı. API key gerekiyor olabilir (ExternalApis:CoinGecko:ApiKey).",
-                    (int)response.StatusCode, assetSymbol);
-                return [];
+                    "CoinGecko {StatusCode} ({Symbol}) Retry-After={RetryAfter}s — Polly retry tükendi.",
+                    (int)response.StatusCode, assetSymbol, retryAfter);
+                throw new ExternalApiException(Source,
+                    $"Rate limit / forbidden ({(int)response.StatusCode}) symbol={assetSymbol}");
             }
 
             response.EnsureSuccessStatusCode();
@@ -45,11 +52,28 @@ public sealed class CoinGeckoAdapter(
 
             return points;
         }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
+        catch (JsonException ex)
         {
-            logger.LogWarning(ex, "CoinGecko veri alınamadı: {Symbol} ({From}–{To})", assetSymbol, from, to);
-            return [];
+            // Bozuk payload "veri yok" olarak yumuşatıldığında ingestion_jobs success
+            // olarak işaretlenir ve aynı pencere bir daha denenmez — upstream contract
+            // değişiklikleri sessizce kaybolur. EVDS adaptörüyle paritede LogError +
+            // ExternalApiException ile yukarı bildir; ingestion runner fail olarak
+            // işaretler ve operasyon ekibi haberdar olur.
+            logger.LogError(ex, "CoinGecko JSON çözümlenemedi: {Symbol} ({From}–{To})",
+                assetSymbol, from, to);
+            throw new ExternalApiException(Source,
+                $"CoinGecko payload malformed: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
+        }
+        catch (HttpRequestException ex)
+        {
+            // PR #11 follow-up: Polly retry tükendiğinde orijinal exception stack
+            // log'a düşmeden ExternalApiException sarmalanıyordu. Operasyon ekibinin
+            // root-cause analizi için inner stack ve adapter context'i loglanır.
+            logger.LogError(ex,
+                "CoinGecko veri alınamadı: {Source} {Symbol} ({From}–{To})",
+                Source, assetSymbol, from, to);
+            throw new ExternalApiException(Source,
+                $"CoinGecko veri alınamadı: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
         }
     }
 }

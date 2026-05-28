@@ -1,35 +1,36 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Saydin.Api-018ec718-f94c-4c3b-8a70-61b9ca660c18</UserSecretsId>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Saydin.Shared\Saydin.Shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="*" />
-    <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="*" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="*" />
-    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="*" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="*" />
-    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="*-*" />
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="*" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="*" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="*" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="*" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="*" />
-    <PackageReference Include="Scalar.AspNetCore" Version="*" />
-    <PackageReference Include="Serilog.AspNetCore" Version="*" />
-    <PackageReference Include="Serilog.Enrichers.Environment" Version="*" />
-    <PackageReference Include="Serilog.Sinks.Console" Version="*" />
-    <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="*" />
-    <PackageReference Include="MaxMind.GeoIP2" Version="*" />
-    <PackageReference Include="StackExchange.Redis" Version="*" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" />
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Scalar.AspNetCore" />
+    <PackageReference Include="Serilog.AspNetCore" />
+    <PackageReference Include="Serilog.Enrichers.Environment" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+    <PackageReference Include="Serilog.Sinks.OpenTelemetry" />
+    <PackageReference Include="MaxMind.GeoIP2" />
+    <PackageReference Include="StackExchange.Redis" />
   </ItemGroup>
-
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Saydin.Api.Tests" />

@@ -15,7 +15,9 @@ public sealed class PricePointConfiguration : IEntityTypeConfiguration<PricePoin
         builder.Property(pp => pp.Open).HasPrecision(18, 6);
         builder.Property(pp => pp.High).HasPrecision(18, 6);
         builder.Property(pp => pp.Low).HasPrecision(18, 6);
-        builder.Property(pp => pp.Volume).HasPrecision(18, 6);
+        // Volume kolonu DB tarafında NUMERIC(24,4) — kripto işlem hacimleri için 18,6
+        // taşmaya yol açıyordu. EF Core precision'ı DB ile birebir hizala (review F1.5-2).
+        builder.Property(pp => pp.Volume).HasPrecision(24, 4);
 
         builder.HasOne(pp => pp.Asset)
                .WithMany(a => a.PricePoints)

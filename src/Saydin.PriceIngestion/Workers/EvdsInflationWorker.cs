@@ -12,7 +12,14 @@ namespace Saydin.PriceIngestion.Workers;
 ///
 /// NOT: <c>ingestion_jobs</c> tablosu asset_id NOT NULL FK ile asset bazlı tasarlandı;
 /// EVDS bir asset değil aylık endeks serisidir. Bu nedenle EVDS worker job kaydı YAZMAZ.
-/// Faz 1'de "inflation_jobs" benzeri ayrı bir tablo değerlendirilmelidir.
+/// Faz 2'de "inflation_jobs" benzeri ayrı bir tablo değerlendirilmelidir.
+///
+/// F1.4-2 / [C-D-37]: Generic <c>IBaseWorker&lt;TPayload&gt;</c> abstraction'ı Faz 3'e
+/// ertelendi — `BaseAssetWorker` asset_id bazlı (price_points), bu worker aylık endeks
+/// (inflation_rates) yazıyor; ortak abstraction inflation_jobs şeması karara bağlandıktan
+/// sonra anlamlı (review F4-1 / migration strategy ADR ile birlikte).
+/// targetMonth hesaplaması ([C-D-38]): `AddMonths(-1)` yıl-rollover'ı doğru ele alır;
+/// Aralık 3'ünde Kasım, Ocak 3'ünde önceki yılın Aralık verisi çekilir.
 /// </summary>
 public sealed class EvdsInflationWorker(
     IInflationAdapter adapter,

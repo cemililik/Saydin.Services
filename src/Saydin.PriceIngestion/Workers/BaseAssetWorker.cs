@@ -49,9 +49,40 @@ public abstract class BaseAssetWorker(
     /// </summary>
     protected virtual TimeSpan ChunkDelay => TimeSpan.Zero;
 
+    /// <summary>
+    /// "Today" anlamı kaynağa göre değişebilir (review F1.1-10).
+    /// TCMB / TwelveData / OpenExchangeRates: UTC bugün — son yayın gün-içi gelir.
+    /// CoinGecko: UTC kapanışı 00:00 UTC iken; 02:00 UTC çekimde "yesterday"
+    /// son kapanmış kripto gününü verir. Adapter-specific worker bu metodu override eder.
+    /// </summary>
+    protected virtual DateOnly TargetDate(DateTime utcNow) =>
+        DateOnly.FromDateTime(utcNow.Date);
+
     public async Task RunAsync(CancellationToken ct)
     {
         await BackfillAsync(ct);
+
+        // F1.1-11 / P1R-005: Backfill bittiğinde TargetDate'in verisi henüz yoksa
+        // derhal çek. Önceki kod yalnızca `IsScheduledTimePassedToday()` kontrolü
+        // yapıyordu; uzun bir backfill gece yarısını aşarsa (örn. 23:00→04:00 ertesi
+        // gün) scheduled time hâlâ bugün gelmemiş gibi görünür ve günlük veri 24 saate
+        // kadar eksik kalırdı. Persisted-state tabanlı kontrol (latestStored < target)
+        // saat-bağımsız ve idempotent.
+        if (!ct.IsCancellationRequested && await IsImmediateFetchNeededAsync(ct))
+        {
+            try
+            {
+                await FetchTodayAsync(ct);
+            }
+            // PR #11 follow-up: yalnızca shutdown token tetiklenmişse worker'ı durdur.
+            // Non-shutdown OperationCanceledException (örn. internal HttpClient/Polly
+            // timeout) burada yutulursa worker kalıcı olarak durur ve ertesi günler
+            // hiç veri akmaz; transient cancel sebeplerini orchestrator'a sızdır.
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+        }
 
         while (!ct.IsCancellationRequested)
         {
@@ -64,11 +95,40 @@ public abstract class BaseAssetWorker(
                 await Task.Delay(delay, ct);
                 await FetchTodayAsync(ct);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
         }
+    }
+
+    private bool IsScheduledTimePassedToday()
+    {
+        var now = DateTime.UtcNow;
+        var scheduledToday = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
+        return now >= scheduledToday;
+    }
+
+    /// <summary>
+    /// FetchToday'ı backfill sonrası tetikleyip tetiklememeyi kararlaştırır.
+    /// İki koşul: (1) bugünün scheduled saati geçmiş; (2) herhangi bir aktif
+    /// asset için en son saklanan tarih TargetDate'in gerisinde — yani backfill
+    /// gece yarısını aşmış ve dünün günlük çekimi atlanmış olabilir (review P1R-005).
+    /// </summary>
+    private async Task<bool> IsImmediateFetchNeededAsync(CancellationToken ct)
+    {
+        if (IsScheduledTimePassedToday())
+            return true;
+
+        var target = TargetDate(DateTime.UtcNow);
+        var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
+        foreach (var asset in assets)
+        {
+            var latest = await repository.GetLatestPriceDateAsync(asset.Id, ct);
+            if (latest is null || latest.Value < target)
+                return true;
+        }
+        return false;
     }
 
     private async Task BackfillAsync(CancellationToken ct)
@@ -109,10 +169,10 @@ public abstract class BaseAssetWorker(
 
     private async Task FetchTodayAsync(CancellationToken ct)
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow.Date);
+        var target = TargetDate(DateTime.UtcNow);
         var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
         foreach (var asset in assets)
-            await FetchAndUpsertAsync(asset, today, today,
+            await FetchAndUpsertAsync(asset, target, target,
                 IngestionJobTypes.DailyUpdate, ct);
     }
 

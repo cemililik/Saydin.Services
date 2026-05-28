@@ -1,0 +1,6 @@
+# pgAdmin passfile (libpq passfile formatı)
+# Bu dosyayı `pgpassfile` olarak kopyala, gerçek password'u set et ve
+# chmod 0600 ile koru. Gerçek `pgpassfile` .gitignored'tır.
+#
+# Format: hostname:port:database:username:password
+postgres:5432:saydin:saydin:change_me_in_production

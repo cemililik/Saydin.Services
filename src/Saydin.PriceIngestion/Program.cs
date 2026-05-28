@@ -7,6 +7,7 @@ using Serilog;
 using Serilog.Events;
 using Serilog.Sinks.OpenTelemetry;
 using Saydin.PriceIngestion.Adapters;
+using Saydin.PriceIngestion.Extensions;
 using Saydin.PriceIngestion.Repositories;
 using Saydin.PriceIngestion.Workers;
 using Saydin.Shared.Data;
@@ -79,7 +80,7 @@ try
             client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Saydin/1.0 (+https://saydin.app)");
         })
-        .AddStandardResilienceHandler();
+        .AddSaydinResilience();
 
     builder.Services
         .AddHttpClient("coingecko", client =>
@@ -90,7 +91,7 @@ try
             if (!string.IsNullOrWhiteSpace(apiKey))
                 client.DefaultRequestHeaders.Add("x-cg-demo-api-key", apiKey);
         })
-        .AddStandardResilienceHandler();
+        .AddSaydinResilience();
 
     builder.Services
         .AddHttpClient("openexchangerates", client =>
@@ -98,7 +99,7 @@ try
             client.BaseAddress = new Uri("https://openexchangerates.org/api/");
             client.Timeout = TimeSpan.FromSeconds(30);
         })
-        .AddStandardResilienceHandler();
+        .AddSaydinResilience();
 
     builder.Services
         .AddHttpClient("twelvedata", client =>
@@ -106,7 +107,7 @@ try
             client.BaseAddress = new Uri("https://api.twelvedata.com/");
             client.Timeout = TimeSpan.FromSeconds(30);
         })
-        .AddStandardResilienceHandler();
+        .AddSaydinResilience();
 
     builder.Services
         .AddHttpClient("evds", client =>
@@ -115,7 +116,7 @@ try
             client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Saydin/1.0 (+https://saydin.app)");
         })
-        .AddStandardResilienceHandler();
+        .AddSaydinResilience();
 
     // ─── EF Core ─────────────────────────────────────────────────────────────
     var pgConnection = builder.Configuration.GetConnectionString("Postgres")
@@ -143,6 +144,7 @@ try
     builder.Services.AddSingleton<TwelveDataWorker>();
     builder.Services.AddSingleton<EvdsInflationWorker>();
     builder.Services.AddHostedService<IngestionOrchestrator>();
+    builder.Services.AddHostedService<Saydin.PriceIngestion.BackgroundServices.LivenessHeartbeatService>();
 
     var host = builder.Build();
 

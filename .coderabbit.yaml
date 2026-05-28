@@ -18,36 +18,80 @@ reviews:
     - "!**/bin/**"
     - "!**/publish/**"
     - "!**/*.Designer.cs"
-    - "!**/migrations/**"
-    - "!docs/**"
+    # F1.8-2 / [C-I-16]: SQL migration'lar yüksek riskli — review kapsamından çıkarılmıyor.
+    # F1.8-2 / [C-I-17]: `docs/**` filter'ı da kaldırıldı; doc-as-code review tetiklenir.
 
   path_instructions:
     - path: "src/Saydin.Api/**"
       instructions: |
-        Bu proje .NET 10 Minimal API kullanır, Controller class YASAKTIR.
-        Tüm finansal değerler decimal tipinde olmalı, float/double YASAK.
-        Endpoint handler'lar doğrudan repository'e erişemez, Service katmanını kullanmalı.
-        DTO'lar record type olmalı.
-        Log mesajlarında string interpolation değil parametreli mesaj kullanılmalı.
-        API key'ler appsettings.json'a yazılmamalı.
+        Bu proje .NET 10 Minimal API kullanır, Controller class YASAKTIR
+        ([ApiController], ControllerBase referansı bulma).
+        Tüm finansal değerler decimal tipinde olmalı, float/double YASAK
+        (`price`, `amount`, `value`, `rate`, `profit`, `loss`, `quantity` adı geçen
+        değişkenler her zaman decimal).
+        Endpoint handler'lar doğrudan repository'e erişemez, Service katmanını kullanmalı
+        (`Endpoints/*.cs` → `Services/*.cs` → `Repositories/*.cs`).
+        DTO'lar record type olmalı (`Models/Requests/*.cs`, `Models/Responses/*.cs`).
+        Log mesajlarında string interpolation değil parametreli mesaj kullanılmalı
+        (`_logger.LogInformation("text {Param}", value)` — `$"{value}"` YASAK).
+        API key'ler appsettings.json'a yazılmamalı; env var veya user-secrets.
+        Endpoint'ler `RequireDeviceId()` filter'ı uygulamalı (anonim erişime kapalı).
+        OpenAPI typed result (`TypedResults.Ok<T>`) kullanımı önerilir.
+        IExceptionHandler zinciri: `Program.cs` AddExceptionHandler<...> kayıtlarının
+        gerçek sırası referans alınır; `GlobalExceptionHandler` her zaman zincirin
+        **sonunda** (catch-all) ve `traceId` üretmek zorunludur. Her domain exception
+        için ayrı handler vardır (PriceNotFound / AssetNotFound / Validation /
+        FeatureDisabled / ExternalApi / ScenarioNotFound / ScenarioLimitExceeded /
+        DailyLimitExceeded). ValidationExceptionHandler yalnızca domain
+        `ValidationException` yakalar — jenerik `ArgumentException` GlobalExceptionHandler'a
+        bırakılır (P1R-003).
+        Kullanıcıya dönecek tüm string'ler `IStringLocalizer<ErrorMessages>` ile lokalize.
+        Hardcoded Türkçe/İngilizce YASAK.
 
     - path: "src/Saydin.PriceIngestion/**"
       instructions: |
-        Bu servis hiçbir HTTP endpoint expose etmez.
+        Bu servis hiçbir HTTP endpoint expose etmez (Microsoft.AspNetCore referansı YASAK).
         Dış API çağrıları try/catch ile sarılmalı, exception sessizce yutulmamalı.
+        Generic `catch (Exception)` YASAK — spesifik tipler (HttpRequestException,
+        JsonException, XmlException) yakalanmalı; ExternalApiException ile rethrow.
         Tüm finansal değerler decimal/NUMERIC, float/double YASAK.
-        rate limit ve circuit breaker kontrolü yapılmalı.
+        Polly resilience: 3 retry + exponential backoff + jitter, 30s timeout,
+        5 ardışık hata circuit breaker (`AddSaydinResilience()` extension'ı kullanılır).
+        Her ingestion cycle `ingestion_jobs` tablosuna start/finish kaydı yazmalı
+        (BaseAssetWorker.FetchAndUpsertAsync pattern'i).
+        IDbContextFactory<SaydinDbContext> kullan (singleton-safe), `new HttpClient()` YASAK.
 
     - path: "src/Saydin.Shared/**"
       instructions: |
         Bu kütüphane hem Api hem PriceIngestion tarafından kullanılır.
         Tek yönlü bağımlılık: servisler Shared'e bağımlı, Shared servislere bağımlı değil.
+        Microsoft.AspNetCore.* referansı YASAK (Shared platform-agnostic).
+        Entity / Configuration / Exception sınıfları burada yaşar.
+        Exception sınıfları **veri** taşır (AssetSymbol, Date, Limit vb.); kullanıcı mesajı
+        handler tarafında IStringLocalizer ile formatlanır.
+
+    - path: "src/Saydin.Api/Endpoints/**"
+      instructions: |
+        Controller class YASAK. Extension method (`IEndpointRouteBuilder`) pattern.
+        Tüm route'lar `RequireDeviceId()` filter'ı uygulamalı.
+        Endpoint handler'lar iş mantığı YOK — sadece service çağrısı + activity log.
+        Activity log: `httpContext.GetOrCreateActivityLog("action_name")` ile alınır,
+        middleware otomatik gönderir (exception path'inde de yazılır).
 
     - path: "tests/**"
       instructions: |
         Test adlandırma: MethodName_Scenario_ExpectedResult.
-        Veritabanı testlerinde mock kullanılmaz, gerçek PostgreSQL kullanılır.
-        Her public service methodu için unit test zorunlu.
+        Service unit testlerde mock (NSubstitute) kabul edilir;
+        veritabanı integration testlerde mock YASAK — Testcontainers / real PostgreSQL.
+        Her public Service method'u için unit test zorunlu.
+        TimeProvider injection ile gün-dönümü flaky testlerden kaçınılır.
+
+    - path: "infrastructure/postgres/migrations/**"
+      instructions: |
+        Mevcut migration dosyaları ASLA değiştirilmez (geçmiş tüm ortamlarda apply edilmiştir).
+        Yeni migration eklenir (numaralandırılmış sıralı): 011_*.sql, 012_*.sql ...
+        UPSERT için ON CONFLICT pattern (price_points, inflation_rates).
+        SQL string interpolation YASAK — ExecuteSqlInterpolatedAsync veya parametreli.
 
 chat:
   auto_reply: true

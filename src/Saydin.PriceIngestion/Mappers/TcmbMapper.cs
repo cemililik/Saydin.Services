@@ -17,6 +17,13 @@ public static class TcmbMapper
     /// XML'deki &lt;Unit&gt; elementi bu çarpanı verir. Hesaplamalarda kullanıcıya
     /// "1 birim X kaç TL" göstermek için Unit'e bölerek normalize ediyoruz —
     /// böylece JPY/TL gibi düşük-değerli kurlar 100x büyütülmüş olarak saklanmaz.
+    ///
+    /// F1.4-1 (review C-D-23): TCMB intra-day OHLC yayımlamaz — sadece "ForexBuying"
+    /// (alış kuru) ve "ForexSelling" (satış kuru) bilgilerini günlük yayınlar.
+    /// Önceki kod Open=ForexBuying, Close=ForexSelling olarak yazıyordu; bu OHLC
+    /// semantiğine uymaz (Open "açılış", Close "kapanış" anlamındadır).
+    /// Yeni davranış: Close = ForexBuying / Unit (kanonik referans/bid kuru);
+    /// Open / High / Low alanları null bırakılır (gerçek değerleri yok).
     /// </summary>
     /// <param name="xml">TCMB'nin döndürdüğü ham XML string.</param>
     /// <param name="assetId">Veritabanındaki asset UUID'si.</param>
@@ -26,7 +33,42 @@ public static class TcmbMapper
     public static PricePoint? Map(string xml, Guid assetId, string currencyCode, DateOnly date)
     {
         var doc = XDocument.Parse(xml);
+        return MapInternal(doc, assetId, currencyCode, date);
+    }
 
+    /// <summary>
+    /// Önceden parse edilmiş XDocument üzerinden tek sembol için PricePoint üretir.
+    /// Adapter cache aynı günün XDocument'ini tek sefer parse edip N sembol için
+    /// yeniden kullanır (review F1.1-2: 20 yıl × 30 sembol senaryosunda
+    /// XDocument.Parse ~150k → ~5200).
+    /// </summary>
+    public static PricePoint? Map(XDocument doc, Guid assetId, string currencyCode, DateOnly date) =>
+        MapInternal(doc, assetId, currencyCode, date);
+
+    /// <summary>
+    /// XML'i bir kez parse edip aynı doc üzerinden N para birimi için PricePoint üretir
+    /// (review F1.1-2: TCMB tek günlük XML tüm sembolleri içerir; gün-bazlı dedup).
+    /// </summary>
+    public static IReadOnlyList<PricePoint> MapMany(
+        string xml,
+        IReadOnlyDictionary<string, Guid> currencyCodeToAssetId,
+        DateOnly date)
+    {
+        var doc = XDocument.Parse(xml);
+        var results = new List<PricePoint>(currencyCodeToAssetId.Count);
+
+        foreach (var (currencyCode, assetId) in currencyCodeToAssetId)
+        {
+            var point = MapInternal(doc, assetId, currencyCode, date);
+            if (point is not null)
+                results.Add(point);
+        }
+
+        return results;
+    }
+
+    private static PricePoint? MapInternal(XDocument doc, Guid assetId, string currencyCode, DateOnly date)
+    {
         var currency = doc.Descendants("Currency")
             .FirstOrDefault(c => c.Attribute("CurrencyCode")?.Value == currencyCode);
 
@@ -36,21 +78,15 @@ public static class TcmbMapper
         var unit = ParseDecimal(currency.Element("Unit")?.Value) ?? 1m;
         if (unit <= 0m) unit = 1m;
 
-        // TCMB: ForexSelling = döviz satış kuru (bankacılık/kurumsal referans fiyat)
-        // Close = ForexSelling / Unit (kanonik "1 birim X TL kaç eder" fiyatı)
-        // Open  = ForexBuying  / Unit (spread'in alt sınırı)
-        var forexBuying  = ParseDecimal(currency.Element("ForexBuying")?.Value);
-        var forexSelling = ParseDecimal(currency.Element("ForexSelling")?.Value);
-
-        // ForexSelling yoksa (tatil XML'i bozuksa) atla
-        if (forexSelling is null) return null;
+        var forexBuying = ParseDecimal(currency.Element("ForexBuying")?.Value);
+        if (forexBuying is null) return null;
 
         return new PricePoint
         {
             AssetId   = assetId,
             PriceDate = date,
-            Close     = Normalize(forexSelling.Value, unit),
-            Open      = forexBuying is null ? null : Normalize(forexBuying.Value, unit),
+            Close     = Normalize(forexBuying.Value, unit),
+            // Open / High / Low = null (TCMB intra-day OHLC yayınlamaz, sadece bid kuru).
         };
     }
 

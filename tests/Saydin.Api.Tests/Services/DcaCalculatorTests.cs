@@ -189,14 +189,63 @@ public class DcaCalculatorTests
 
     // ── Validasyon ───────────────────────────────────────────────────────────
 
+    // P1R-003: Servis katmanı artık deviceId boş/whitespace için `ValidationException`
+    // fırlatıyor (ArgumentException değil); jenerik `ArgumentException` (Redis/EF Core
+    // altyapı hataları) ValidationExceptionHandler tarafından 400'e dönmesin diye.
     [Fact]
-    public async Task CalculateAsync_EmptyDeviceId_ThrowsArgumentException()
+    public async Task CalculateAsync_EmptyDeviceId_ThrowsValidationException()
     {
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
         var act = () => _sut.CalculateAsync("", request, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ArgumentException>();
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == "deviceId");
+    }
+
+    // P1R-008 / P1R-017: Hafta sonu / tatil clip ile aynı PriceDate'e iki alım düşerse
+    // satır dedup edilir, toplam tutar ve birim cumulative değerler korunur.
+    // 6 niyetli alım → iki tanesi aynı clip tarihine düşer → `purchases.Count` = 5,
+    // ama `TotalInvestedTry` ve `TotalUnitsAcquired` 6 alımın toplamı kadar olmalı.
+    [Fact]
+    public async Task CalculateAsync_WeekendClipCausesSameDayPurchase_AggregatesIntoSingleRow()
+    {
+        // İlk 2 ay (Ocak, Şubat) ortak bir piyasa gününe (28 Şubat) clip olsun;
+        // Mart, Nisan, Mayıs, Haziran ayları kendi tarihleriyle gelsin → 6 niyetli
+        // alımdan sadece 1 dedup, beklenen `purchases.Count` = 5.
+        var sameClipDate = new DateOnly(2023, 2, 28);
+        var callCount    = 0;
+        _assetService.GetNearestPriceAsync(Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+                     .Returns(ci =>
+                     {
+                         callCount++;
+                         var date = callCount <= 2 ? sameClipDate : (DateOnly)ci[1];
+                         return new PricePoint
+                         {
+                             AssetId   = AssetId,
+                             PriceDate = date,
+                             Close     = 10m,
+                         };
+                     });
+        _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                     .Returns(EndDate);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
+        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        // 6 alım niyetlendi, 2 tanesi aynı güne çakıştı → satır sayısı 5.
+        result.Purchases.Should().HaveCount(5);
+
+        // Cumulative toplamlar 6 alımın değeriyle eşit kalmalı:
+        result.TotalInvestedTry.Should().Be(6000m);
+        result.TotalUnitsAcquired.Should().Be(600m);
+
+        // Dedup edilen ilk satırda iki alımın birikmiş UnitsAcquired'ı bulunmalı.
+        var clipped = result.Purchases[0];
+        clipped.Date.Should().Be(sameClipDate);
+        clipped.UnitsAcquired.Should().Be(200m);            // 2 × (1000 / 10)
+        clipped.CumulativeCostTry.Should().Be(2000m);       // 2 × 1000
+        clipped.CumulativeUnits.Should().Be(200m);
     }
 
     [Fact]
@@ -232,6 +281,23 @@ public class DcaCalculatorTests
         var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
+    }
+
+    // F1.9-4 ([C-F-14]): Negatif / sıfır periyodik tutar pozitif zorunlu.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-1000)]
+    public async Task CalculateAsync_NonPositivePeriodicAmount_ThrowsValidationException(decimal amount)
+    {
+        SetupConstantPrice(10m);
+
+        var request = MakeRequest("USDTRY", StartDate, EndDate, amount, "monthly");
+
+        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>()
+                 .Where(ex => ex.Field == nameof(request.PeriodicAmount));
     }
 
     [Fact]

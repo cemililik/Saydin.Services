@@ -27,10 +27,11 @@ public sealed class WhatIfCalculator(
 
     public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequest(request);
+        EnsureDeviceId(deviceId);
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
+        EnsurePositive(request.Amount, nameof(request.Amount));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         var features = options.Value.GetTierOptions(user?.Tier).Features;
@@ -55,14 +56,15 @@ public sealed class WhatIfCalculator(
 
     public async Task<CompareResponse> CompareAsync(string deviceId, CompareRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequest(request);
+        EnsureDeviceId(deviceId);
 
         if (request.AssetSymbols is null)
             throw new ValidationException(
                 string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbols)),
                 field: nameof(request.AssetSymbols));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
+        EnsurePositive(request.Amount, nameof(request.Amount));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
 
@@ -122,10 +124,11 @@ public sealed class WhatIfCalculator(
     public async Task<ReverseWhatIfResponse> CalculateReverseAsync(
         string deviceId, ReverseWhatIfRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        EnsureRequest(request);
+        EnsureDeviceId(deviceId);
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.TargetAmountType, nameof(request.TargetAmountType));
+        EnsurePositive(request.TargetAmount, nameof(request.TargetAmount));
 
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         var features = options.Value.GetTierOptions(user?.Tier).Features;
@@ -460,6 +463,32 @@ public sealed class WhatIfCalculator(
         if (string.IsNullOrWhiteSpace(value))
             throw new ValidationException(
                 string.Format(localizer["RequestPayloadMissing"], field), field: field);
+    }
+
+    // P1R-003: ArgumentException base type framework / altyapı tarafından da fırlatılır
+    // (Redis bağlantı yapılandırma, EF Core, Npgsql vs.). Endpoint katmanından gelen
+    // request/deviceId guard'larını domain ValidationException'a çevirerek
+    // ValidationExceptionHandler'ın ArgumentException case'ini kaldırabilir hale getirdik.
+    private void EnsureRequest(object? request)
+    {
+        if (request is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+    }
+
+    private void EnsureDeviceId(string? deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+            throw new ValidationException(localizer["DeviceIdRequiredDetail"], field: "deviceId");
+    }
+
+    // F1.9-4 ([C-F-14]): Negatif / sıfır amount semantik olarak anlamsız —
+    // "ya 0 TL alsaydım?" pratik bir hesap değil. Validation tüm calculator
+    // entry-point'lerinde aynı şekilde uygulanır.
+    private void EnsurePositive(decimal value, string field)
+    {
+        if (value <= 0m)
+            throw new ValidationException(localizer["AmountMustBePositive"], field: field);
     }
 
     private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(

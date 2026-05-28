@@ -71,10 +71,24 @@ PostgreSQL (price_points tablosu, UPSERT)
 | `CoinGeckoAdapter` | CoinGecko API | BTC, ETH, BNB, XRP | 06:00 UTC |
 | `OpenExchangeRatesAdapter` | Open Exchange Rates | XAU/TRY (altın), XAG/TRY (gümüş) — gram bazında | 22:00 UTC |
 | `TwelveDataAdapter` | Twelve Data | THYAO, GARAN | 19:00 Türkiye (BIST kapanışı) |
+| `EvdsInflationAdapter` | TCMB EVDS | TÜFE endeksi (TÜİK) | Aylık |
 
 **Not:** `OpenExchangeRatesAdapter` USD-base yanıtındaki XAU/XAG oranlarını
 `(1 / metalRate) * tryRate / 31.1034768` formülüyle gram/TRY'ye çevirir.
 Aynı tarih için XAU ve XAG tek HTTP isteğiyle alınır (day-level in-memory cache).
+
+**Not (TCMB parse-once):** `TcmbAdapter` aynı tarihin XML cevabını **parse edilmiş
+XDocument** olarak cache'ler (60 dk TTL, max 10k entry). Aynı tarihte N farklı sembol
+için `XDocument.Parse` 1 kez çalışır; 20 yıl × 30 sembol backfill senaryosunda parse
+sayısı ~150k → ~5200'e düşer (review P1R-002).
+
+**Not (EVDS ingestion job yazımı):** `EvdsInflationWorker` `BaseAssetWorker`'dan
+inherit **etmez** — TÜFE aylık skaler bir seriyi `inflation_rates` tablosuna yazar,
+`price_points` UPSERT pattern'i ile uyumsuzdur. Bu nedenle adapter başarısızlığı
+şu an `ingestion_jobs` tablosuna **yazılmaz**, yalnızca `InflationIngestionFailures`
+sayacı ve `LogError` ile telemetri edilir. Faz 2'de `inflation_jobs` benzeri ayrı bir
+job şeması veya `ingestion_jobs` tablosunun jenerikleştirilmesi değerlendirilecek
+(PHASE-1-DOC-UPDATE-NOTES Section 11, review P1R-011).
 
 ## Servis Sınırları (KESIN KURAL)
 

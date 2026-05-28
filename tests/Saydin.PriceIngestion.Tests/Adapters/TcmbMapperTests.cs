@@ -37,28 +37,31 @@ public class TcmbMapperTests
         </Tarih_Date>
         """;
 
-    // ── USD parse ─────────────────────────────────────────────────────────────
+    // ── F1.4-1: Close = ForexBuying / Unit; Open / High / Low = null ─────────
 
     [Fact]
-    public void Map_ValidXml_USD_ReturnsPricePoint()
+    public void Map_ValidXml_USD_ClosePopulatedFromForexBuyingOpenNull()
     {
         var result = TcmbMapper.Map(ValidXml, AssetId, "USD", SampleDate);
 
         result.Should().NotBeNull();
         result!.AssetId.Should().Be(AssetId);
         result.PriceDate.Should().Be(SampleDate);
-        result.Close.Should().Be(5.9518m);
-        result.Open.Should().Be(5.9416m);
+        // F1.4-1: TCMB intra-day OHLC yayımlamaz; Close = ForexBuying / Unit
+        result.Close.Should().Be(5.9416m);
+        result.Open.Should().BeNull();
+        result.High.Should().BeNull();
+        result.Low.Should().BeNull();
     }
 
     [Fact]
-    public void Map_ValidXml_EUR_ReturnsPricePoint()
+    public void Map_ValidXml_EUR_ClosePopulatedFromForexBuying()
     {
         var result = TcmbMapper.Map(ValidXml, AssetId, "EUR", SampleDate);
 
         result.Should().NotBeNull();
-        result!.Close.Should().Be(6.6660m);
-        result.Open.Should().Be(6.6530m);
+        result!.Close.Should().Be(6.6530m);
+        result.Open.Should().BeNull();
     }
 
     // ── Eksik para birimi ────────────────────────────────────────────────────
@@ -71,30 +74,10 @@ public class TcmbMapperTests
         result.Should().BeNull();
     }
 
-    // ── ForexSelling yoksa (bozuk XML) ──────────────────────────────────────
+    // ── ForexBuying yoksa (bozuk XML) ───────────────────────────────────────
 
     [Fact]
-    public void Map_MissingForexSelling_ReturnsNull()
-    {
-        const string xmlWithoutSelling = """
-            <?xml version="1.0" encoding="UTF-8"?>
-            <Tarih_Date>
-              <Currency CurrencyCode="USD">
-                <ForexBuying>5.9416</ForexBuying>
-                <ForexSelling></ForexSelling>
-              </Currency>
-            </Tarih_Date>
-            """;
-
-        var result = TcmbMapper.Map(xmlWithoutSelling, AssetId, "USD", SampleDate);
-
-        result.Should().BeNull();
-    }
-
-    // ── ForexBuying yoksa Open null olmalı ──────────────────────────────────
-
-    [Fact]
-    public void Map_MissingForexBuying_ClosePresentOpenNull()
+    public void Map_MissingForexBuying_ReturnsNull()
     {
         const string xmlWithoutBuying = """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -108,9 +91,7 @@ public class TcmbMapperTests
 
         var result = TcmbMapper.Map(xmlWithoutBuying, AssetId, "USD", SampleDate);
 
-        result.Should().NotBeNull();
-        result!.Close.Should().Be(5.9518m);
-        result.Open.Should().BeNull();
+        result.Should().BeNull();
     }
 
     // ── Doğru AssetId ve PriceDate ataması ──────────────────────────────────
@@ -152,10 +133,9 @@ public class TcmbMapperTests
         var result = TcmbMapper.Map(XmlWithJpyUnit100, AssetId, "JPY", SampleDate);
 
         result.Should().NotBeNull();
-        // ForexSelling 5.5121 / 100 = 0.055121 (1 JPY ≈ 0.055 TL)
-        result!.Close.Should().Be(0.055121m);
-        // ForexBuying  5.4730 / 100 = 0.054730
-        result.Open.Should().Be(0.054730m);
+        // ForexBuying 5.4730 / 100 = 0.054730 (1 JPY ≈ 0.055 TL)
+        result!.Close.Should().Be(0.054730m);
+        result.Open.Should().BeNull();
     }
 
     [Fact]
@@ -174,8 +154,7 @@ public class TcmbMapperTests
         var result = TcmbMapper.Map(xmlWithoutUnit, AssetId, "USD", SampleDate);
 
         result.Should().NotBeNull();
-        result!.Close.Should().Be(5.9518m);
-        result.Open.Should().Be(5.9416m);
+        result!.Close.Should().Be(5.9416m);
     }
 
     [Theory]
@@ -198,8 +177,36 @@ public class TcmbMapperTests
         var result = TcmbMapper.Map(xml, AssetId, "USD", SampleDate);
 
         result.Should().NotBeNull();
-        // Unit fallback 1m → hem Open (ForexBuying) hem Close (ForexSelling) normalize edilmeden saklanır
-        result!.Close.Should().Be(5.9518m);
-        result.Open.Should().Be(5.9416m);
+        // Unit fallback 1m → Close ForexBuying değerinden normalize edilmeden gelir
+        result!.Close.Should().Be(5.9416m);
+    }
+
+    // ── F1.1-2: MapMany — gün-bazlı dedup için tüm semboller tek XML'den ─────
+
+    [Fact]
+    public void MapMany_ValidXml_AllSymbolsParsedFromSameDoc()
+    {
+        var usdId = Guid.NewGuid();
+        var eurId = Guid.NewGuid();
+        var map = new Dictionary<string, Guid> { ["USD"] = usdId, ["EUR"] = eurId };
+
+        var result = TcmbMapper.MapMany(ValidXml, map, SampleDate);
+
+        result.Should().HaveCount(2);
+        result.Should().Contain(p => p.AssetId == usdId && p.Close == 5.9416m);
+        result.Should().Contain(p => p.AssetId == eurId && p.Close == 6.6530m);
+    }
+
+    [Fact]
+    public void MapMany_MissingCurrency_SkipsIt()
+    {
+        var usdId = Guid.NewGuid();
+        var unknownId = Guid.NewGuid();
+        var map = new Dictionary<string, Guid> { ["USD"] = usdId, ["XYZ"] = unknownId };
+
+        var result = TcmbMapper.MapMany(ValidXml, map, SampleDate);
+
+        result.Should().HaveCount(1);
+        result[0].AssetId.Should().Be(usdId);
     }
 }

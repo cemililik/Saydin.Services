@@ -1,5 +1,6 @@
 using FluentAssertions;
 using Saydin.PriceIngestion.Mappers;
+using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Tests.Adapters;
 
@@ -67,8 +68,10 @@ public class TwelveDataMapperTests
     // ── status != "ok" ────────────────────────────────────────────────────────
 
     [Fact]
-    public void Map_StatusError_ReturnsEmptyList()
+    public void Map_StatusError_ThrowsExternalApiException()
     {
+        // F1.1-6 ([G-D-03]): status="error" sessizce empty list dönmek yerine
+        // ExternalApiException fırlatır — caller ingestion_jobs failed kaydı oluşturur.
         const string json = """
             {
               "status": "error",
@@ -77,8 +80,19 @@ public class TwelveDataMapperTests
             }
             """;
 
-        var result = TwelveDataMapper.Map(json, AssetId);
-        result.Should().BeEmpty();
+        var act = () => TwelveDataMapper.Map(json, AssetId, "YOKHISSE", "twelvedata");
+        act.Should().Throw<ExternalApiException>()
+           .Where(ex => ex.ApiSource == "twelvedata")
+           .WithMessage("*YOKHISSE*");
+    }
+
+    [Fact]
+    public void Map_UnknownStatus_ThrowsExternalApiException()
+    {
+        const string json = """{"status": "rate_limited"}""";
+        var act = () => TwelveDataMapper.Map(json, AssetId, "AKBNK", "twelvedata");
+        act.Should().Throw<ExternalApiException>()
+           .Where(ex => ex.ApiSource == "twelvedata");
     }
 
     // ── Eksik values ──────────────────────────────────────────────────────────
