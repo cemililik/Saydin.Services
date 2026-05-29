@@ -899,6 +899,38 @@ public class WhatIfCalculatorTests
         result.Results[1].Rank.Should().Be(2);
     }
 
+    [Fact]
+    public async Task CompareAsync_ComputesSymbolsSequentially_NoConcurrentRepositoryAccess()
+    {
+        // CONC-001 guard: Önceki sürüm Task.WhenAll ile paralel hesaplıyordu; tüm task'lar aynı
+        // scoped SaydinDbContext'i paylaştığı için soğuk cache'te eşzamanlı EF sorguları
+        // "second operation on this context" (500) veriyordu. Mock'lar thread-safe olduğundan
+        // sonuç testleri bunu yakalamaz; bu test inflation repo'ya (cache'siz, her sembolde
+        // çağrılır) re-entrancy dedektörü koyarak hesabın ARDIŞIK yapıldığını (overlap yok) doğrular.
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        _assetService.GetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(UsdTry);
+
+        var inFlight = 0;
+        var overlapped = false;
+        _inflationRepository
+            .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns(async _ =>
+            {
+                if (Interlocked.Increment(ref inFlight) > 1) overlapped = true;
+                await Task.Delay(25);
+                Interlocked.Decrement(ref inFlight);
+                return ((decimal?)null, (DateOnly?)null, (decimal?)null, (DateOnly?)null);
+            });
+
+        var request = new CompareRequest(
+            ["USDTRY", "EURTRY", "GBPTRY"], BuyDate, SellDate, 1000m, "try", IncludeInflation: true);
+
+        await _sut.CompareAsync(request, CancellationToken.None);
+
+        overlapped.Should().BeFalse(
+            "CompareAsync sembolleri ardışık hesaplamalı — paralel hesap paylaşılan DbContext'i çökertir (CONC-001)");
+    }
+
     // P1R-014: Multi-symbol ranking — 3, 4, 5 sembol için Rank pozisyonları doğru;
     // aynı `ProfitLossPercent`'e sahip semboller arasında OrderByDescending stable
     // davranır (LINQ Enumerable.OrderByDescending kararlı bir sıralama uygular).

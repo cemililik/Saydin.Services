@@ -105,18 +105,25 @@ public sealed class WhatIfCalculator(
 
         try
         {
-            // Paralel hesap — DB/cache erişimleri bağımsız, 5 sembol için ~5x hızlanma.
-            // Kota Lua script ile atomik tutulduğu için single Acquire yeterli (fair-use:
-            // compare = 1 işlem; docs/architecture'da belgelenmeli).
-            var tasks = symbols.Select(symbol => CalculateCoreAsync(new WhatIfRequest(
-                AssetSymbol:       symbol,
-                BuyDate:           request.BuyDate,
-                SellDate:          request.SellDate,
-                Amount:            request.Amount,
-                AmountType:        request.AmountType,
-                IncludeInflation:  includeInflation), ct)).ToArray();
-
-            var results = await Task.WhenAll(tasks);
+            // CONC-001: Sembol başına hesap SIRAYLA yapılır. Önceki sürüm `Task.WhenAll` ile
+            // paralel hesaplıyordu; ancak tüm task'lar aynı scoped `SaydinDbContext`'i paylaşır
+            // (inflationRepository cache'siz; soğuk cache'te price okumaları da DbContext'e iner)
+            // → eşzamanlı EF sorguları "A second operation was started on this context instance"
+            // (InvalidOperationException → 500) verir. Compare ≤5 sembol; sıralı maliyet ihmal
+            // edilebilir, doğruluk sözde-paralellikten önemli. Gerçek paralellik istenirse her
+            // task için ayrı DbContext scope (IDbContextFactory / IServiceScopeFactory) gerekir.
+            // Kota Lua script ile atomik; single Acquire yeterli (fair-use: compare = 1 işlem).
+            var results = new List<WhatIfResponse>(symbols.Count);
+            foreach (var symbol in symbols)
+            {
+                results.Add(await CalculateCoreAsync(new WhatIfRequest(
+                    AssetSymbol:       symbol,
+                    BuyDate:           request.BuyDate,
+                    SellDate:          request.SellDate,
+                    Amount:            request.Amount,
+                    AmountType:        request.AmountType,
+                    IncludeInflation:  includeInflation), ct));
+            }
 
             // Karlılığa göre sırala (en yüksek ProfitLossPercent → Rank 1)
             var ranked = results
