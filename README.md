@@ -84,6 +84,9 @@ Saydin.Api (HTTP)          Saydin.PriceIngestion (Worker)
 
 Detaylı mimari: [docs/architecture.md](docs/architecture.md)
 
+Mimari karar kayıtları (ADR): [docs/decisions/](docs/decisions/README.md) ·
+Değişiklik geçmişi: [CHANGELOG.md](CHANGELOG.md)
+
 ## Geliştirme
 
 Yerel geliştirme kurulumu, user-secrets ve Docker iş akışı için: [docs/development-guide.md](docs/development-guide.md)

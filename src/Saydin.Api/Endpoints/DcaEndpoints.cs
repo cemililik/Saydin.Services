@@ -1,6 +1,7 @@
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
+using Saydin.Shared.Constants;
 
 namespace Saydin.Api.Endpoints;
 
@@ -35,22 +36,20 @@ public static class DcaEndpoints
 
         var result = await calculator.CalculateAsync(request, ct);
 
+        // F4-6 (KVKK): ham periyodik tutar yerine kaba aralık; sonuç TL tutarları
+        // (TotalInvestedTry, CurrentValueTry, ProfitLossTry, AverageCostPerUnit) loglanmaz.
         log.WithData(new
         {
             request.AssetSymbol,
             startDate = request.StartDate.ToString("yyyy-MM-dd"),
             endDate = request.EndDate?.ToString("yyyy-MM-dd"),
-            request.PeriodicAmount,
+            amountBucket = AmountBucket.Coarse(request.PeriodicAmount),
             request.Period,
             request.AmountType,
             request.IncludeInflation,
             result = new
             {
-                result.TotalInvestedTry,
-                result.CurrentValueTry,
                 result.ProfitLossPercent,
-                result.ProfitLossTry,
-                result.AverageCostPerUnit,
                 result.TotalPurchases,
                 result.RealProfitLossPercent,
             }

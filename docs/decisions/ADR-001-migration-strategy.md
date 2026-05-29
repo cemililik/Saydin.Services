@@ -1,9 +1,11 @@
 # ADR-001 — Migration & Schema Evolution Stratejisi
 
-- **Durum:** Önerilen (Faz 0'da klasör mount fix uygulandı; uzun vadeli tracker kararı bekliyor)
-- **Tarih:** 2026-05-27
+- **Durum:** Kabul edildi (revize — Faz 4). Önceki "Seçenek B (EF Core)" önerisi
+  **Seçenek C (Hybrid)** ile değiştirildi; gerekçe için aşağıdaki
+  "Karar Revizyonu (Faz 4 — F4-1/F4-8)" bölümüne bakın.
+- **Tarih:** 2026-05-27 (ilk taslak) · 2026-05-29 (Faz 4 revizyonu)
 - **Karar verenler:** Backend ekibi
-- **İlgili bulgular (code review):** Claude `[C-G-001/008/009/010]`, `[C-YAPISAL-1..4]`, `[C-H-DC-11]`; GPT-5 `[G-G-04]`, `[G-G-06]`
+- **İlgili bulgular (code review):** Claude `[C-G-001/008/009/010]`, `[C-YAPISAL-1..4]`, `[C-H-DC-11]`; GPT-5 `[G-G-04]`, `[G-G-06]`; Faz 4 `F4-1`, `F4-8`
 
 ---
 
@@ -143,6 +145,45 @@ ADR-B tam geçişe kadar:
   geçmiş baseline'ın referansıdır."
 
 ---
+
+## Karar Revizyonu (Faz 4 — F4-1/F4-8)
+
+> **Tarih:** 2026-05-29 · **Durum:** Kabul edildi
+>
+> İlk taslağın önerdiği **Seçenek B (EF Core Migrations)** Faz 1'de **uygulanmadı**;
+> ekip pratikte numaralandırılmış SQL akışını sürdürdü ve Faz 2/3'te 011/012/012b/013
+> migration'larını bu formatta ekledi. Üstelik 008b/013, TimescaleDB compression
+> penceresini (TS 2.16.1 `ALTER COLUMN TYPE` kısıtı) SQL düzeyinde çözdü — EF Core'un
+> modelleyemediği bir davranış. Bu nedenle Faz 4'te karar **bilinçli olarak revize**
+> edildi.
+
+### Yeni Karar: Seçenek C (Hybrid) — MVP için
+
+1. **Numaralandırılmış SQL init zinciri korunur** (001…013 + 008b/012b). Battle-tested;
+   compression penceresini doğru kodluyor. Fresh init `docker-entrypoint` ile
+   alfabetik + `ON_ERROR_STOP=1` çalışır.
+2. **Hafif izleme tablosu eklenir:** `014_schema_migrations.sql` →
+   `schema_migrations(version PK, applied_at, checksum)`. Additive ve idempotent:
+   - Fresh init: tüm önceki sürümler + kendisi `ON CONFLICT DO NOTHING` ile kaydedilir.
+   - Var olan (014 öncesi) DB: dosya elle uygulanınca 001..014 geçmişini DDL yeniden
+     çalıştırmadan back-register eder.
+   - `ALTER COLUMN TYPE` içermez → compression penceresini etkilemez; 013'ten sonra
+     (alfabetik 014 > 013) güvenle çalışır.
+3. **Production / var olan DB deploy mekanizması (F4-8):**
+   `infrastructure/postgres/apply-migrations.sh` — `schema_migrations`'a bakıp yalnız
+   KAYITLI OLMAYAN `.sql`/`.sh` dosyalarını alfabetik sırada `psql -v ON_ERROR_STOP=1`
+   ile uygular ve kaydeder. Bu script `migrations/` klasörünün **dışındadır** ve
+   initdb.d'ye mount edilmez → fresh init sırasında asla otomatik çalışmaz. Deploy adımı
+   (CI/Job) olarak elle çağrılır. Var olan 014-öncesi DB'lerde önce `014` elle uygulanır.
+
+### EF Core'a tam geçiş — neden ertelendi (post-MVP)
+
+- TimescaleDB `create_hypertable`/compression policy çağrıları EF Core tarafından
+  üretilmez; geçiş yine de raw `migrationBuilder.Sql(...)` + var olan DB'lerde riskli
+  retrospektif `__EFMigrationsHistory` seed gerektirir (L efor, düşük MVP getirisi).
+- Tek geliştirici, paralel branch-migration baskısı yok → EF'in rollback/drift
+  araçlarına henüz ihtiyaç yok. Şu pain'ler ortaya çıkınca yeniden değerlendirilecek.
+- **Seçenek B dokümante edilmiş gelecek yoludur**; bu ADR onu silmez, erteler.
 
 ## Sonuçlar / Risk
 

@@ -121,6 +121,13 @@ cache'inden bağımsız olduğundan ayrım yapılmıyor. Kabul edilebilir.
 
 **Prefix'ler:** `usage:whatif:` (WhatIfCalculator), `usage:dca:` (DcaCalculator)
 
+**Hangi işlem hangi sayaca düşer (ADR-002):** Tek What-If (`/calculate`), Reverse What-If
+(`/reverse`) ve Karşılaştırma (`/compare`) **aynı** `usage:whatif:` sayacını paylaşır;
+DCA (`/dca`) ayrı `usage:dca:` sayacını kullanır. **Compare**, sembol sayısından (2-5)
+bağımsız olarak sayaçtan **yalnız 1** düşer (tek atomik acquire). Per-feature alt-kotalar
+(roadmap'teki compare=5 / reverse=3 / dca=3) post-MVP'ye ertelendi — bkz.
+[ADR-002](decisions/ADR-002-compare-quota.md).
+
 **Nasıl çalışır:**
 Her iki prefix de `DailyLimitGuard` servisi tarafından yönetilir:
 1. `CheckAsync` — key'i okur (INCR yapmaz), eşik aşıldıysa 429 döner

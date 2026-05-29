@@ -4,8 +4,11 @@ namespace Saydin.PriceIngestion.Workers;
 
 /// <summary>
 /// Tüm veri çekme worker'larını başlatan ana orchestrator.
-/// Hangi worker'ların çalışacağı appsettings.json → IngestionWorkers:{Worker}:Enabled ile belirlenir.
-/// Varsayılan: tümü aktif.
+/// Hangi worker'ların çalışacağı <c>IngestionWorkers:{Worker}:Enabled</c> ile belirlenir.
+/// F4-11: Varsayılan <b>kapalı</b> (disabled-by-default) — config'te anahtar yoksa worker
+/// çalışmaz (<c>?? false</c>). Aktivasyon env (<c>WORKER_*_ENABLED</c> → compose/.env) ya da
+/// appsettings ile açıkça yapılır; böylece bare-binary çalıştırma kazara dış API/rate-limit
+/// tüketmez (fail-closed). Eksik/typo'lu config sessizce worker'ı açmak yerine kapalı bırakır.
 /// </summary>
 public sealed class IngestionOrchestrator(
     TcmbWorker tcmbWorker,
@@ -22,7 +25,8 @@ public sealed class IngestionOrchestrator(
 
         void AddIfEnabled(string key, Func<Task> runAsync)
         {
-            var enabled = configuration.GetValue<bool?>($"IngestionWorkers:{key}:Enabled") ?? true;
+            // F4-11: anahtar yoksa fail-closed (?? false) — worker kapalı kalır, loglanır.
+            var enabled = configuration.GetValue<bool?>($"IngestionWorkers:{key}:Enabled") ?? false;
             if (enabled)
                 tasks.Add(RunSafelyAsync(key, runAsync, stoppingToken));
             else

@@ -85,8 +85,9 @@ public sealed class WhatIfCalculator(
         if (!features.Comparison)
             throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "comparison");
 
-        // CompareAsync 5 sembolü tek kullanım sayar; ancak inflation tier kuralı CalculateAsync
-        // ile aynı: özellik kapalıysa request bayrağını sessizce yok say.
+        // Karar: ADR-002-compare-quota.md — Compare = 1 hesaplama (paylaşılan usage:whatif:
+        // havuzu, 2-5 sembol fark etmez). inflation tier kuralı CalculateAsync ile aynı:
+        // özellik kapalıysa request bayrağını sessizce yok say.
         var includeInflation = request.IncludeInflation && features.InflationAdjustment;
 
         // Tekrarlanan semboller kaldırıldıktan sonra 2-5 arasında unique sembol gerekli
@@ -112,7 +113,7 @@ public sealed class WhatIfCalculator(
             // (InvalidOperationException → 500) verir. Compare ≤5 sembol; sıralı maliyet ihmal
             // edilebilir, doğruluk sözde-paralellikten önemli. Gerçek paralellik istenirse her
             // task için ayrı DbContext scope (IDbContextFactory / IServiceScopeFactory) gerekir.
-            // Kota Lua script ile atomik; single Acquire yeterli (fair-use: compare = 1 işlem).
+            // Kota Lua script ile atomik; single Acquire yeterli (ADR-002: compare = 1 işlem).
             var results = new List<WhatIfResponse>(symbols.Count);
             foreach (var symbol in symbols)
             {
@@ -235,9 +236,15 @@ public sealed class WhatIfCalculator(
         switch (targetAmountType)
         {
             case QuantityUnits.Try:
-                // Hedef TL değeri → kaç birim lazım → kaç TL yatırmalıydın
-                targetValueTry      = request.TargetAmount;
-                unitsAcquired       = Math.Round(request.TargetAmount / sellPrice, 6, MidpointRounding.AwayFromZero);
+                // F1.3-2 / F4-3: hedef TL değeri → kaç birim → kaç TL yatırmalıydın.
+                // targetValueTry ham hedeften DEĞİL, birim granülasyonundan (6 hane)
+                // ileri-türetilir (forward-consistency): UnitsAcquired × SellPrice ==
+                // TargetValueTry UI'da birebir uyuşur. Ham hedeften sapma alt-kuruş
+                // mertebesindedir ve birim yuvarlamasının gerçek karşılığıdır (kullanıcının
+                // o birim adediyle fiilen elde edebileceği TL değeri). Bkz. ADR yok —
+                // api-contract.md/architecture.md "Yuvarlama politikası".
+                unitsAcquired         = Math.Round(request.TargetAmount / sellPrice, 6, MidpointRounding.AwayFromZero);
+                targetValueTry        = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
                 requiredInvestmentTry = Math.Round(unitsAcquired * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
             case QuantityUnits.Units:

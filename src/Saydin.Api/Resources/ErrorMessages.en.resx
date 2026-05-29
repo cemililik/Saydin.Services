@@ -48,6 +48,8 @@
   <data name="PriceRangeTooWide"><value>Price range too wide</value></data>
   <data name="PriceRangeTooWideDetail"><value>At most {0} days of price history can be queried in a single request.</value></data>
   <data name="AmountMustBePositive"><value>Amount must be greater than zero.</value></data>
+  <data name="RateLimited"><value>Too many requests</value></data>
+  <data name="RateLimitedDetail"><value>At most {1} requests per {0} seconds. Please try again shortly.</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dollar/TRY</value></data>
   <data name="Asset_EURTRY"><value>Euro/TRY</value></data>
