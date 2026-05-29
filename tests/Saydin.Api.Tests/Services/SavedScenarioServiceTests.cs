@@ -2,6 +2,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Options;
@@ -16,9 +17,12 @@ public class SavedScenarioServiceTests
 {
     private readonly ISavedScenarioRepository _repository = Substitute.For<ISavedScenarioRepository>();
     private readonly IStringLocalizer<ErrorMessages> _localizer = Substitute.For<IStringLocalizer<ErrorMessages>>();
+    private readonly IDeviceContext _deviceContext = Substitute.For<IDeviceContext>();
+    private readonly FakeTimeProvider _timeProvider = new();
     // F2.2-12: last_seen throttle gerçek implementasyonla beslenir (basit in-memory map).
-    // Throttle ilk çağrıda true döner; test'lerin çoğu tek çağrı ile çalışır.
-    private readonly ILastSeenThrottle _lastSeenThrottle = new LastSeenThrottle();
+    // Throttle ilk çağrıda true döner; test'lerin çoğu tek çağrı ile çalışır. F3.1-5:
+    // TimeProvider ile beslenir (ctor'da _timeProvider erişilebilir olduğu için orada kurulur).
+    private readonly ILastSeenThrottle _lastSeenThrottle;
     private readonly SavedScenarioService _sut;
 
     private const string DeviceId = "test-device-001";
@@ -64,7 +68,11 @@ public class SavedScenarioServiceTests
         _localizer[Arg.Any<string>(), Arg.Any<object[]>()]
             .Returns(ci => new LocalizedString((string)ci[0], (string)ci[0]));
 
-        _sut = new SavedScenarioService(_repository, _lastSeenThrottle, options, _localizer, NullLogger<SavedScenarioService>.Instance);
+        // F2.2-3: device id artık IDeviceContext'ten; varsayılan = test cihazı.
+        _deviceContext.DeviceId.Returns(DeviceId);
+        _lastSeenThrottle = new LastSeenThrottle(_timeProvider);
+
+        _sut = new SavedScenarioService(_repository, _lastSeenThrottle, _deviceContext, _timeProvider, options, _localizer, NullLogger<SavedScenarioService>.Instance);
     }
 
     // ── GetScenariosAsync ────────────────────────────────────────────────────
@@ -95,7 +103,7 @@ public class SavedScenarioServiceTests
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.GetByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(scenarios.AsReadOnly());
 
-        var result = await _sut.GetScenariosAsync(DeviceId, CancellationToken.None);
+        var result = await _sut.GetScenariosAsync(CancellationToken.None);
 
         result.Should().HaveCount(1);
         result[0].Id.Should().Be(scenarioId);
@@ -114,7 +122,7 @@ public class SavedScenarioServiceTests
         // Cihazın kaydı yoksa repository çağrısı kısa devre yapar ve boş liste döner.
         _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns((User?)null);
 
-        var result = await _sut.GetScenariosAsync(DeviceId, CancellationToken.None);
+        var result = await _sut.GetScenariosAsync(CancellationToken.None);
 
         result.Should().BeEmpty();
         await _repository.DidNotReceive().GetOrCreateUserAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
@@ -130,8 +138,8 @@ public class SavedScenarioServiceTests
         _repository.GetByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>())
                    .Returns(new List<SavedScenario>().AsReadOnly());
 
-        await _sut.GetScenariosAsync(DeviceId, CancellationToken.None);
-        await _sut.GetScenariosAsync(DeviceId, CancellationToken.None);
+        await _sut.GetScenariosAsync(CancellationToken.None);
+        await _sut.GetScenariosAsync(CancellationToken.None);
 
         await _repository.Received(1).UpdateUserLastSeenAsync(FreeUser, Arg.Any<CancellationToken>());
     }
@@ -150,7 +158,7 @@ public class SavedScenarioServiceTests
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
 
-        var result = await _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var result = await _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         result.AssetSymbol.Should().Be("BTC");
         result.AssetDisplayName.Should().Be("Bitcoin");
@@ -174,7 +182,7 @@ public class SavedScenarioServiceTests
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
 
-        var result = await _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var result = await _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         result.SellDate.Should().BeNull();
         result.Label.Should().BeNull();
@@ -191,7 +199,7 @@ public class SavedScenarioServiceTests
         _repository.GetActiveAssetBySymbolAsync("YOKASSET", Arg.Any<CancellationToken>())
                    .Returns((Asset?)null);
 
-        var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var act = () => _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<AssetNotFoundException>()
                  .Where(ex => ex.Symbol == "YOKASSET");
@@ -209,7 +217,7 @@ public class SavedScenarioServiceTests
         _repository.GetActiveAssetBySymbolAsync("UNKNOWN", Arg.Any<CancellationToken>())
                    .Returns((Asset?)null);
 
-        var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var act = () => _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<AssetNotFoundException>()
                  .Where(ex => ex.Symbol == "UNKNOWN");
@@ -225,7 +233,7 @@ public class SavedScenarioServiceTests
         _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(0);
 
-        var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var act = () => _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>()
                  .Where(ex => ex.Field == "Type");
@@ -248,7 +256,7 @@ public class SavedScenarioServiceTests
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
 
-        var result = await _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var result = await _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         result.Type.Should().Be("comparison");
         result.AssetSymbol.Should().Be("BTC,ETH");
@@ -273,7 +281,7 @@ public class SavedScenarioServiceTests
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
 
-        var result = await _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var result = await _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         result.Type.Should().Be("portfolio");
         result.AssetSymbol.Should().Be("PORTFOLIO");
@@ -294,7 +302,7 @@ public class SavedScenarioServiceTests
         _repository.GetOrCreateUserAsync(DeviceId, Arg.Any<CancellationToken>()).Returns(FreeUser);
         _repository.CountByUserIdAsync(FreeUser.Id, Arg.Any<CancellationToken>()).Returns(5);
 
-        var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var act = () => _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ScenarioLimitExceededException>()
                  .Where(ex => ex.Limit == 5);
@@ -312,7 +320,7 @@ public class SavedScenarioServiceTests
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
 
-        var act = () => _sut.SaveScenarioAsync(DeviceId, request, CancellationToken.None);
+        var act = () => _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
     }
@@ -328,7 +336,8 @@ public class SavedScenarioServiceTests
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
 
-        await _sut.SaveScenarioAsync("premium-device", request, CancellationToken.None);
+        _deviceContext.DeviceId.Returns("premium-device");
+        await _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         await _repository.DidNotReceive()
                          .CountByUserIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
@@ -348,7 +357,8 @@ public class SavedScenarioServiceTests
         _repository.CreateAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>())
                    .Returns(callInfo => callInfo.Arg<SavedScenario>());
 
-        await _sut.SaveScenarioAsync("new-device", request, CancellationToken.None);
+        _deviceContext.DeviceId.Returns("new-device");
+        await _sut.SaveScenarioAsync(request, CancellationToken.None);
 
         await _repository.Received(1).GetOrCreateUserAsync("new-device", Arg.Any<CancellationToken>());
     }
@@ -371,7 +381,7 @@ public class SavedScenarioServiceTests
         _repository.GetByIdAndUserIdAsync(scenarioId, FreeUser.Id, Arg.Any<CancellationToken>())
                    .Returns(scenario);
 
-        await _sut.DeleteScenarioAsync(DeviceId, scenarioId, CancellationToken.None);
+        await _sut.DeleteScenarioAsync(scenarioId, CancellationToken.None);
 
         await _repository.Received(1).DeleteAsync(scenario, Arg.Any<CancellationToken>());
     }
@@ -385,7 +395,7 @@ public class SavedScenarioServiceTests
         _repository.GetByIdAndUserIdAsync(scenarioId, FreeUser.Id, Arg.Any<CancellationToken>())
                    .Returns((SavedScenario?)null);
 
-        var act = () => _sut.DeleteScenarioAsync(DeviceId, scenarioId, CancellationToken.None);
+        var act = () => _sut.DeleteScenarioAsync(scenarioId, CancellationToken.None);
 
         await act.Should().ThrowAsync<ScenarioNotFoundException>()
                  .Where(ex => ex.ScenarioId == scenarioId);
@@ -401,7 +411,7 @@ public class SavedScenarioServiceTests
         _repository.GetByIdAndUserIdAsync(scenarioId, FreeUser.Id, Arg.Any<CancellationToken>())
                    .Returns((SavedScenario?)null);
 
-        var act = () => _sut.DeleteScenarioAsync(DeviceId, scenarioId, CancellationToken.None);
+        var act = () => _sut.DeleteScenarioAsync(scenarioId, CancellationToken.None);
 
         await act.Should().ThrowAsync<ScenarioNotFoundException>();
         await _repository.DidNotReceive().DeleteAsync(Arg.Any<SavedScenario>(), Arg.Any<CancellationToken>());
@@ -415,8 +425,9 @@ public class SavedScenarioServiceTests
         var scenarioId = Guid.NewGuid();
 
         _repository.GetUserByDeviceIdAsync("ghost-device", Arg.Any<CancellationToken>()).Returns((User?)null);
+        _deviceContext.DeviceId.Returns("ghost-device");
 
-        var act = () => _sut.DeleteScenarioAsync("ghost-device", scenarioId, CancellationToken.None);
+        var act = () => _sut.DeleteScenarioAsync(scenarioId, CancellationToken.None);
 
         await act.Should().ThrowAsync<ScenarioNotFoundException>();
         await _repository.DidNotReceive().GetOrCreateUserAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());

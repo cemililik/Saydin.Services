@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Saydin.Api.Options;
@@ -15,6 +16,7 @@ public class DailyLimitGuardTests
 {
     private readonly IConnectionMultiplexer _redis = Substitute.For<IConnectionMultiplexer>();
     private readonly IDatabase             _db    = Substitute.For<IDatabase>();
+    private readonly FakeTimeProvider      _timeProvider = new();
     private readonly DailyLimitGuard       _sut;
 
     private const string DeviceId = "test-device-001";
@@ -41,7 +43,7 @@ public class DailyLimitGuardTests
         _redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(_db);
 
         var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions());
-        _sut = new DailyLimitGuard(_redis, options, NullLogger<DailyLimitGuard>.Instance);
+        _sut = new DailyLimitGuard(_redis, options, _timeProvider, NullLogger<DailyLimitGuard>.Instance);
     }
 
     // ── CheckAsync ────────────────────────────────────────────────────────
@@ -186,7 +188,7 @@ public class DailyLimitGuardTests
         {
             Free = new TierOptions { DailyCalculationLimit = 0 }
         });
-        var sut = new DailyLimitGuard(_redis, options, NullLogger<DailyLimitGuard>.Instance);
+        var sut = new DailyLimitGuard(_redis, options, _timeProvider, NullLogger<DailyLimitGuard>.Instance);
 
         await sut.CheckAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
 
@@ -201,7 +203,7 @@ public class DailyLimitGuardTests
         {
             Free = new TierOptions { DailyCalculationLimit = 0 }
         });
-        var sut = new DailyLimitGuard(_redis, options, NullLogger<DailyLimitGuard>.Instance);
+        var sut = new DailyLimitGuard(_redis, options, _timeProvider, NullLogger<DailyLimitGuard>.Instance);
 
         await sut.IncrementAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
 

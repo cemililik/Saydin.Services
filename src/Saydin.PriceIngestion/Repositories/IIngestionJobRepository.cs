@@ -7,7 +7,7 @@ namespace Saydin.PriceIngestion.Repositories;
 ///
 /// Kullanım:
 /// <code>
-/// var job = await jobs.StartAsync(assetId, JobTypes.HistoricalBackfill, from, to, ct);
+/// var job = await jobs.StartAsync(assetId, JobTypes.HistoricalBackfill, from, to, source, ct);
 /// try
 /// {
 ///     int upserted = ...; // ingestion işi
@@ -24,12 +24,15 @@ public interface IIngestionJobRepository
 {
     /// <summary>
     /// Yeni bir ingestion job açar (status=running) ve DB'ye yazıp döner.
+    /// INGR-002: <paramref name="assetId"/> inflation (EVDS) job'larında <c>null</c> olur;
+    /// <paramref name="source"/> veri kaynağını (provenance) belirtir.
     /// </summary>
     Task<IngestionJob> StartAsync(
-        Guid assetId,
+        Guid? assetId,
         string jobType,
         DateOnly? rangeStart,
         DateOnly? rangeEnd,
+        string? source,
         CancellationToken ct);
 
     /// <summary>

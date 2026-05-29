@@ -9,6 +9,7 @@ namespace Saydin.Api.Services;
 public sealed class DailyLimitGuard(
     IConnectionMultiplexer redis,
     IOptions<PlanOptions> options,
+    TimeProvider timeProvider,
     ILogger<DailyLimitGuard> logger) : IDailyLimitGuard
 {
     private const string PremiumTier = "premium";
@@ -42,7 +43,7 @@ public sealed class DailyLimitGuard(
     {
         // Tek nokta UtcNow okuması — key date'i ile TTL'in farklı dakikalardan
         // (gece yarısı geçişinde) çıkmasını engeller.
-        var now = DateTime.UtcNow;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
@@ -83,7 +84,7 @@ public sealed class DailyLimitGuard(
     {
         // Aynı `now` değeri hem key date'i hem TTL hesabı için kullanılır;
         // BuildUsageKey'in bağımsız UtcNow okuması ile oluşan midnight race kapanır.
-        var now = DateTime.UtcNow;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
@@ -139,7 +140,7 @@ public sealed class DailyLimitGuard(
         int? limitOverride = null,
         CancellationToken ct = default)
     {
-        var now = DateTime.UtcNow;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var (hasLimit, _, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 

@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Saydin.Api.Models.Responses;
@@ -17,6 +18,7 @@ public class AssetServiceTests
     private readonly IRedisCacheHelper _cache = Substitute.For<IRedisCacheHelper>();
     private readonly IAssetNameLocalizer _assetNameLocalizer = Substitute.For<IAssetNameLocalizer>();
     private readonly IStringLocalizer<ErrorMessages> _localizer = Substitute.For<IStringLocalizer<ErrorMessages>>();
+    private readonly FakeTimeProvider _timeProvider = new();
     private readonly AssetService _sut;
 
     public AssetServiceTests()
@@ -45,7 +47,7 @@ public class AssetServiceTests
         // implementasyonla beslenir (instance scope test isolation'ı bozmaz).
         _sut = new AssetService(
             _repository, _cache, new AssetSymbolIndex(),
-            _assetNameLocalizer, _localizer, NullLogger<AssetService>.Instance);
+            _assetNameLocalizer, _timeProvider, _localizer, NullLogger<AssetService>.Instance);
     }
 
     // ── GetPriceAsync ────────────────────────────────────────────────────────

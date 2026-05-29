@@ -16,16 +16,18 @@ public sealed class IngestionJobRepository(IDbContextFactory<SaydinDbContext> co
     private const int MaxErrorMessageLength = 2000;
 
     public async Task<IngestionJob> StartAsync(
-        Guid assetId,
+        Guid? assetId,
         string jobType,
         DateOnly? rangeStart,
         DateOnly? rangeEnd,
+        string? source,
         CancellationToken ct)
     {
         var job = new IngestionJob
         {
             AssetId        = assetId,
             JobType        = jobType,
+            Source         = source,
             StartedAt      = DateTimeOffset.UtcNow,
             Status         = IngestionJobStatuses.Running,
             DateRangeStart = rangeStart,

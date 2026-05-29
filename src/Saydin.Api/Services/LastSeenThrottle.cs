@@ -15,7 +15,7 @@ public interface ILastSeenThrottle
     bool ShouldUpdate(Guid userId);
 }
 
-public sealed class LastSeenThrottle : ILastSeenThrottle
+public sealed class LastSeenThrottle(TimeProvider timeProvider) : ILastSeenThrottle
 {
     // Pencere süresi: ilk geliştirme aşamasında sabit, ileride IOptions ile dışarı alınabilir.
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(5);
@@ -33,7 +33,7 @@ public sealed class LastSeenThrottle : ILastSeenThrottle
 
     public bool ShouldUpdate(Guid userId)
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = timeProvider.GetUtcNow();
 
         // SVCR-009 follow-up (Codacy uyarısı): `AddOrUpdate` factory delegate'leri
         // contention durumunda birden fazla kez çağrılabilir; factory içinde local

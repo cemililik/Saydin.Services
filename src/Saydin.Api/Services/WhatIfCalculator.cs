@@ -1,11 +1,13 @@
 using System.Globalization;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
+using Saydin.Api.Helpers;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
@@ -16,6 +18,8 @@ public sealed class WhatIfCalculator(
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
     IDailyLimitGuard dailyLimitGuard,
+    IDeviceContext deviceContext,
+    TimeProvider timeProvider,
     IRedisCacheHelper cache,
     IAssetNameLocalizer assetNameLocalizer,
     IOptions<PlanOptions> options,
@@ -30,10 +34,10 @@ public sealed class WhatIfCalculator(
     // adlandırmak gerekirse tek yer güncellenir.
     private const string FeatureDisabledKey = "FeatureDisabled";
 
-    public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
+    public async Task<WhatIfResponse> CalculateAsync(WhatIfRequest request, CancellationToken ct)
     {
         EnsureRequest(request);
-        EnsureDeviceId(deviceId);
+        var deviceId = deviceContext.DeviceId;
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsurePositive(request.Amount, nameof(request.Amount));
@@ -63,10 +67,10 @@ public sealed class WhatIfCalculator(
         }
     }
 
-    public async Task<CompareResponse> CompareAsync(string deviceId, CompareRequest request, CancellationToken ct)
+    public async Task<CompareResponse> CompareAsync(CompareRequest request, CancellationToken ct)
     {
         EnsureRequest(request);
-        EnsureDeviceId(deviceId);
+        var deviceId = deviceContext.DeviceId;
 
         if (request.AssetSymbols is null)
             throw new ValidationException(
@@ -134,10 +138,10 @@ public sealed class WhatIfCalculator(
     }
 
     public async Task<ReverseWhatIfResponse> CalculateReverseAsync(
-        string deviceId, ReverseWhatIfRequest request, CancellationToken ct)
+        ReverseWhatIfRequest request, CancellationToken ct)
     {
         EnsureRequest(request);
-        EnsureDeviceId(deviceId);
+        var deviceId = deviceContext.DeviceId;
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.TargetAmountType, nameof(request.TargetAmountType));
         EnsurePositive(request.TargetAmount, nameof(request.TargetAmount));
@@ -223,14 +227,14 @@ public sealed class WhatIfCalculator(
 
         switch (targetAmountType)
         {
-            case "try":
+            case QuantityUnits.Try:
                 // Hedef TL değeri → kaç birim lazım → kaç TL yatırmalıydın
                 targetValueTry      = request.TargetAmount;
                 unitsAcquired       = Math.Round(request.TargetAmount / sellPrice, 6, MidpointRounding.AwayFromZero);
                 requiredInvestmentTry = Math.Round(unitsAcquired * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
-            case "units":
-            case "grams":
+            case QuantityUnits.Units:
+            case QuantityUnits.Grams:
                 // Hedef birim/gram sayısı → son değer TL → gereken TL
                 unitsAcquired       = request.TargetAmount;
                 targetValueTry      = Math.Round(request.TargetAmount * sellPrice, 2, MidpointRounding.AwayFromZero);
@@ -250,8 +254,9 @@ public sealed class WhatIfCalculator(
         IReadOnlyList<PriceHistoryPoint> priceHistory;
         try
         {
-            var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, "daily", ct);
-            priceHistory = SamplePriceHistory(range);
+            var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, PriceIntervals.Daily, ct);
+            priceHistory = ChartSampler.Downsample(
+                range, p => new PriceHistoryPoint(p.PriceDate, p.Close), MaxPriceHistoryPoints);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -375,12 +380,12 @@ public sealed class WhatIfCalculator(
 
         switch (amountType)
         {
-            case "try":
+            case QuantityUnits.Try:
                 initialValueTry = request.Amount;
                 unitsAcquired   = Math.Round(request.Amount / buyPrice, 6, MidpointRounding.AwayFromZero);
                 break;
-            case "units":
-            case "grams":
+            case QuantityUnits.Units:
+            case QuantityUnits.Grams:
                 unitsAcquired   = request.Amount;
                 initialValueTry = Math.Round(request.Amount * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
@@ -399,8 +404,9 @@ public sealed class WhatIfCalculator(
         IReadOnlyList<PriceHistoryPoint> priceHistory;
         try
         {
-            var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, "daily", ct);
-            priceHistory = SamplePriceHistory(range);
+            var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, PriceIntervals.Daily, ct);
+            priceHistory = ChartSampler.Downsample(
+                range, p => new PriceHistoryPoint(p.PriceDate, p.Close), MaxPriceHistoryPoints);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -499,12 +505,6 @@ public sealed class WhatIfCalculator(
                 string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
     }
 
-    private void EnsureDeviceId(string? deviceId)
-    {
-        if (string.IsNullOrWhiteSpace(deviceId))
-            throw new ValidationException(localizer["DeviceIdRequiredDetail"], field: "deviceId");
-    }
-
     // F1.9-4 ([C-F-14]): Negatif / sıfır amount semantik olarak anlamsız —
     // "ya 0 TL alsaydım?" pratik bir hesap değil. Validation tüm calculator
     // entry-point'lerinde aynı şekilde uygulanır.
@@ -522,24 +522,8 @@ public sealed class WhatIfCalculator(
     private void EnsureWithinHistoryWindow(DateOnly buyDate, int months)
     {
         if (months <= 0) return;
-        var earliestAllowed = DateOnly.FromDateTime(DateTime.UtcNow).AddMonths(-months);
+        var earliestAllowed = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime).AddMonths(-months);
         if (buyDate < earliestAllowed)
             throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "extended_history");
-    }
-
-    private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(
-        IReadOnlyList<PricePoint> points, int maxPoints = MaxPriceHistoryPoints)
-    {
-        if (points.Count == 0) return Array.Empty<PriceHistoryPoint>();
-        if (points.Count <= maxPoints)
-            return points.Select(p => new PriceHistoryPoint(p.PriceDate, p.Close)).ToList();
-
-        var result = new List<PriceHistoryPoint>(maxPoints);
-        for (var i = 0; i < maxPoints; i++)
-        {
-            var idx = Math.Min((int)((double)i * (points.Count - 1) / (maxPoints - 1)), points.Count - 1);
-            result.Add(new PriceHistoryPoint(points[idx].PriceDate, points[idx].Close));
-        }
-        return result;
     }
 }

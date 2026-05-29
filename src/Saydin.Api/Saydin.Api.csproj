@@ -34,6 +34,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Saydin.Api.Tests" />
+    <InternalsVisibleTo Include="Saydin.Api.IntegrationTests" />
   </ItemGroup>
 
 </Project>

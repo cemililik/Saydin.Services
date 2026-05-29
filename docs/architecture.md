@@ -240,6 +240,32 @@ Cache anahtarı normalize edilmiş parametrelerle oluşturulur.
 
 Detaylar: [../../docs/architecture/observability.md](../../docs/architecture/observability.md)
 
+## Faz 3 Sistemik Değişiklikler
+
+- **`IDeviceContext` (scoped):** İş service'leri (`IWhatIfCalculator`, `IDcaCalculator`,
+  `ISavedScenarioService`, `IAppConfigService`) artık `deviceId` parametresi taşımaz; device id
+  `RequireDeviceId` filter tarafından scoped `IDeviceContext`'e yazılır ve servislere enjekte
+  edilir. HTTP sözleşmesi (`X-Device-ID` header) değişmedi. `IDailyLimitGuard`/`IPlanLimitResolver`
+  altyapı bileşeni olarak `deviceId`'yi açık parametre tutar.
+- **`TimeProvider`:** API servisleri/handler/repository `DateTime.UtcNow` yerine enjekte edilen
+  `TimeProvider` (singleton `TimeProvider.System`) kullanır → testlerde `FakeTimeProvider` ile
+  deterministik saat (gün-dönümü flaky'liği yok).
+- **`ChartSampler`:** WhatIf/DCA'daki birebir tekrar eden grafik down-sampling tek jenerik
+  `Saydin.Api/Helpers/ChartSampler.Downsample<TIn,TOut>` yardımcısında toplandı.
+- **Domain constants:** `Saydin.Shared.Constants` altında `PriceIntervals`, `InflationSources`
+  ve `QuantityUnits.DcaAccepted` ile interval/amount-type/inflation-source literal'leri merkezlendi.
+- **inflation_rates composite PK `(period_date, source)` (migration 012/F2.7-5):** Aynı ay için
+  `seed-approximation` ve gerçek `tuik` satırı bir arada tutulabilir (audit). Okuma yolu
+  (`InflationRepository`) aynı tarihte `tuik`'i tercih eder; UPSERT conflict hedefi
+  `(period_date, source)`.
+- **ingestion_jobs (migration 012/INGR-002):** `asset_id` nullable + `source` kolonu. EVDS worker
+  artık ingestion_jobs yazar (`asset_id=null`, `source=evds`, job_type `inflation_*`) — CLAUDE.md
+  "ingestion_jobs'a başarı/hata yazılır" kuralı tüm worker'lar için sağlandı.
+- **activity_logs compression (migration 008b/013):** TimescaleDB 2.16.1 compression-enabled
+  hypertable'da `ALTER COLUMN TYPE`'ı engellediği için fresh init zinciri kırılıyordu; `008b`
+  (009'dan önce disable) + `013` (012'den sonra re-enable) deseni ile çözüldü (mevcut migration'lar
+  değiştirilmeden). Compression fiziksel katmandır → EF modeli etkilenmez.
+
 ## Proje Referans Kuralları
 
 ```

@@ -25,7 +25,7 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | Asset listesi | `assets:list` | 6 saat | `AssetService` |
 | Tek fiyat noktası | `price:{symbol}:{date}` | 24 saat | `AssetService` |
 | En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
-| Fiyat aralığı | `prices:{symbol}:{from}:{to}:{interval}` | 1 saat | `AssetService` (F2.2-1: interval suffix Faz 2) |
+| Fiyat aralığı | `prices:{symbol}:{from}:{to}:{interval}` | 1 saat | `AssetService` (F2.2-1: interval suffix Faz 2; F3.1-2: `interval` değeri artık `Saydin.Shared.Constants.PriceIntervals` sabitinden — key formatı değişmedi) |
 | En son fiyat tarihi | `latest_date:{symbol}` | 1 saat | `AssetService` |
 | DCA hesaplama | `dca:v1:{symbol}:{startDate}:{endDate}:{amount}:{period}:{amountType}{:inf?}:{lang}` | 1 saat | `DcaCalculator` |
 | Günlük kullanım sayacı (What-If) | `usage:whatif:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `DailyLimitGuard` |

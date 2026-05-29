@@ -32,9 +32,8 @@ public static class DcaEndpoints
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("what_if_dca");
-        var deviceId = httpContext.GetRequiredDeviceId();
 
-        var result = await calculator.CalculateAsync(deviceId, request, ct);
+        var result = await calculator.CalculateAsync(request, ct);
 
         log.WithData(new
         {

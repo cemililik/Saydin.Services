@@ -14,6 +14,8 @@ namespace Saydin.Api.Services;
 public sealed class SavedScenarioService(
     ISavedScenarioRepository repository,
     ILastSeenThrottle lastSeenThrottle,
+    IDeviceContext deviceContext,
+    TimeProvider timeProvider,
     IOptions<PlanOptions> options,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
@@ -23,8 +25,9 @@ public sealed class SavedScenarioService(
     private const int MaxDisplayNameLength = 200;
     private const int MaxLabelLength       = 200;
 
-    public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct)
+    public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(CancellationToken ct)
     {
+        var deviceId = deviceContext.DeviceId;
         // F2.2-13 ([C-B-SavedScenario-4]): GET path'inde user yaratma side-effect'i yok.
         // Cihaz hiç POST atmadan listele çağırdıysa boş liste döner ve users tablosu
         // gereksiz kayıt biriktirmez.
@@ -46,8 +49,9 @@ public sealed class SavedScenarioService(
     }
 
     public async Task<ScenarioResponse> SaveScenarioAsync(
-        string deviceId, SaveScenarioRequest request, CancellationToken ct)
+        SaveScenarioRequest request, CancellationToken ct)
     {
+        var deviceId = deviceContext.DeviceId;
         // Codacy follow-up: Tüm request-shape validasyonu user upsert/last_seen
         // touch'tan ÖNCE yapılır. Aksi halde malformed bir request (örn. invalid
         // Type, negatif Amount) yine de users tablosuna bir kayıt yaratıyor +
@@ -93,7 +97,7 @@ public sealed class SavedScenarioService(
             Quantity = request.Amount,
             QuantityUnit = request.AmountType,
             Label = request.Label,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = timeProvider.GetUtcNow(),
         };
 
         await repository.CreateAsync(scenario, ct);
@@ -105,8 +109,9 @@ public sealed class SavedScenarioService(
         return ToResponse(scenario);
     }
 
-    public async Task DeleteScenarioAsync(string deviceId, Guid scenarioId, CancellationToken ct)
+    public async Task DeleteScenarioAsync(Guid scenarioId, CancellationToken ct)
     {
+        var deviceId = deviceContext.DeviceId;
         // F2.2-13: DELETE path'inde user yaratma side-effect'i yok. Kullanıcı kaydı
         // hiç yoksa senaryo da yok → 404. (ScenarioNotFound semantik olarak doğru.)
         var user = await repository.GetUserByDeviceIdAsync(deviceId, ct)

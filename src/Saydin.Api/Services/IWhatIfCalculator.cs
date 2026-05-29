@@ -5,7 +5,8 @@ namespace Saydin.Api.Services;
 
 public interface IWhatIfCalculator
 {
-    Task<WhatIfResponse>        CalculateAsync       (string deviceId, WhatIfRequest        request, CancellationToken ct);
-    Task<CompareResponse>       CompareAsync         (string deviceId, CompareRequest       request, CancellationToken ct);
-    Task<ReverseWhatIfResponse> CalculateReverseAsync(string deviceId, ReverseWhatIfRequest request, CancellationToken ct);
+    // F2.2-3: deviceId artık IDeviceContext üzerinden (scoped) okunur — arayüz yalnız domain parametreleri taşır.
+    Task<WhatIfResponse>        CalculateAsync       (WhatIfRequest        request, CancellationToken ct);
+    Task<CompareResponse>       CompareAsync         (CompareRequest       request, CancellationToken ct);
+    Task<ReverseWhatIfResponse> CalculateReverseAsync(ReverseWhatIfRequest request, CancellationToken ct);
 }

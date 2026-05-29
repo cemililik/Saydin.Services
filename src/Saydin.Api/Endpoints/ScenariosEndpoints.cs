@@ -50,7 +50,7 @@ public static class ScenariosEndpoints
     {
         var log = httpContext.GetOrCreateActivityLog("scenario_list");
 
-        var scenarios = await service.GetScenariosAsync(httpContext.GetRequiredDeviceId(), ct);
+        var scenarios = await service.GetScenariosAsync(ct);
 
         log.WithData(new { scenarioCount = scenarios.Count });
 
@@ -65,7 +65,7 @@ public static class ScenariosEndpoints
     {
         var log = httpContext.GetOrCreateActivityLog("scenario_save");
 
-        var scenario = await service.SaveScenarioAsync(httpContext.GetRequiredDeviceId(), request, ct);
+        var scenario = await service.SaveScenarioAsync(request, ct);
 
         log.WithData(new
         {
@@ -86,7 +86,7 @@ public static class ScenariosEndpoints
     {
         var log = httpContext.GetOrCreateActivityLog("scenario_delete");
 
-        await service.DeleteScenarioAsync(httpContext.GetRequiredDeviceId(), id, ct);
+        await service.DeleteScenarioAsync(id, ct);
 
         log.WithData(new { scenarioId = id });
 

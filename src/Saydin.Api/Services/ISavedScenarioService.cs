@@ -5,7 +5,8 @@ namespace Saydin.Api.Services;
 
 public interface ISavedScenarioService
 {
-    Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct);
-    Task<ScenarioResponse> SaveScenarioAsync(string deviceId, SaveScenarioRequest request, CancellationToken ct);
-    Task DeleteScenarioAsync(string deviceId, Guid scenarioId, CancellationToken ct);
+    // F2.2-3: deviceId artık IDeviceContext üzerinden (scoped) okunur.
+    Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(CancellationToken ct);
+    Task<ScenarioResponse> SaveScenarioAsync(SaveScenarioRequest request, CancellationToken ct);
+    Task DeleteScenarioAsync(Guid scenarioId, CancellationToken ct);
 }
