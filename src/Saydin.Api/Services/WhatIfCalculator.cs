@@ -202,7 +202,7 @@ public sealed class WhatIfCalculator(
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
         var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         var amountStr = request.TargetAmount.ToString("G", CultureInfo.InvariantCulture);
-        var cacheKey = $"whatif:reverse:v1:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{targetAmountType}{inflationSuffix}:{lang}";
+        var cacheKey = $"whatif:reverse:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{targetAmountType}{inflationSuffix}:{lang}";
 
         var cached = await cache.TryGetAsync<ReverseWhatIfResponse>(cacheKey, ct);
         if (cached is not null)

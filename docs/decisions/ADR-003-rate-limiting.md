@@ -59,8 +59,12 @@ loopback güvenilir (spoofing'e kapalı).
   `DailyLimitExceededExceptionHandler` ile aynı şekil.
 - **IP doğruluğu:** `UseForwardedHeaders` sonrası gerçek IP. Reverse-proxy ortamında
   `ForwardedHeaders:KnownProxies`/`KnownNetworks` **yapılandırılmalıdır**; aksi halde
-  limiter proxy IP'sine göre partition eder (fail-safe: en kötü ihtimalle under-count,
-  spoof edilemez çünkü trust-list açıktır).
+  `UseForwardedHeaders` `X-Forwarded-For`'a güvenmez → `RemoteIpAddress` tüm istekler için
+  proxy IP'si olur ve TÜM istemciler **tek partition**'a düşer (over-aggregation /
+  over-throttling: ortak `PermitLimit` paylaşılır, meşru kullanıcılar 429 alır). Spoof
+  edilemez (trust-list açık) ama bu **fail-safe değil** — yanlış yapılandırma meşru trafiği
+  bloklar. Rollout/troubleshooting: yaygın 429 + tek-IP partition gözlemlenirse ilk olarak
+  `ForwardedHeaders:KnownProxies`/`KnownNetworks` config'ini doğrula.
 
 **Dağıtık (çok-instance) rate limiting**, API yatay ölçeklendiğinde eklenecek
 **dokümante edilmiş takip işidir** (Seçenek C) — bilinçli erteleme, eksik değil.
@@ -75,8 +79,9 @@ sıfır regresyon riski; lokalize 429 + Retry-After sözleşmesi tutarlı.
 **Risk:**
 - In-memory limiter çok-instance'ta tutarsız sayar → ADR'da bilinçli kabul; ölçeklenince
   Seçenek C.
-- Yanlış proxy trust config → limiter proxy IP'sine partition eder (DoS koruması zayıflar
-  ama spoofing açığı doğmaz). Deploy checklist'inde `KnownProxies` vurgulanmalı.
+- Yanlış proxy trust config → tüm istemciler proxy IP'sinin tek partition'ına düşer →
+  **over-throttling** (meşru kullanıcılar 429 alır); spoofing açığı doğmaz ama bu fail-safe
+  değildir. Deploy checklist'inde `KnownProxies`/`KnownNetworks` vurgulanmalı.
 
 ---
 

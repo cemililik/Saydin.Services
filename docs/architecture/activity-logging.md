@@ -465,7 +465,7 @@ sequenceDiagram
 
 ### 4.2 Bileşenler ve Yerleşim
 
-```
+```text
 Saydin.Shared/
   ├── Entities/ActivityLog.cs                          ← Entity (User navigation nullable)
   ├── Data/Configurations/ActivityLogConfiguration.cs  ← EF config (CHECK + index + max-length)

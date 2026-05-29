@@ -37,6 +37,8 @@ docker-compose up -d  # Saydin.Api
 
 ### Uygulamayı Çalıştır (Yerel .NET)
 
+> **Uyarı:** Bu repo Docker Compose tabanlıdır; lokal makinede .NET 10 SDK kurulu **olmayabilir**. SDK kurulu değilse aşağıdaki `dotnet` komutları çalışmaz — bunun yerine yukarıdaki **Uygulamayı Çalıştır (Docker)** akışını kullan. Ayrıntılar: [CLAUDE.md](CLAUDE.md).
+
 ```bash
 cd src/Saydin.Services
 

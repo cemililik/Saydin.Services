@@ -494,21 +494,25 @@ Bu üç sayaç, sessizce düşen/kısaltılan kayıtlar için **tek görünürl�
 ## Pratik Kullanım Senaryoları
 
 ### Senaryo 1: Yavaş Hesaplama Tespiti
+
 1. Prometheus'ta `saydin_whatif_calculation_duration_ms` histogram'ını izle.
 2. P99 > 500ms uyarısı: hangi `asset.symbol`?
 3. Aspire Dashboard → Traces'te `WhatIfCalculation` span'ını bul → hangi alt-adım yavaş?
 
 ### Senaryo 2: Dış API / Downstream Hata Takibi
+
 1. `ExternalApiException` → 502 logları Aspire Dashboard → Logs'ta `Warning` olarak görünür.
 2. Her log'da `traceId` var → ilgili `AddHttpClientInstrumentation` span'ını bul.
 3. Prometheus'ta `http.client.request.duration` ile trend analizi.
 
 ### Senaryo 3: Üretim Hata Analizi (5xx)
+
 1. Kullanıcı hata bildiriyor, yanıttaki `traceId: abc123` değerini paylaşıyor.
 2. Aspire Dashboard → Traces → `abc123` ara.
 3. Tam çağrı zinciri: endpoint → service → repository → DB query.
 
 ### Senaryo 4: Sessiz Log Kaybı / Limit Alarmı
+
 1. `saydin.activity_log.queue.drops.total` veya `…write.failures.total` artışı → activity log
    yazma yolunda darboğaz/hata.
 2. `saydin.inflation.ingestion.failures.total` (`outcome` tag'i) → EVDS TÜFE ingestion sorunu.

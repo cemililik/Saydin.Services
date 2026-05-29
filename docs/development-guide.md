@@ -88,9 +88,11 @@ mevcut dosyaları **asla değiştirme**. Alfabetik sıralama 008b/013 compressio
 bozmamalı (`014`+ güvenle 013 sonrası sıralanır).
 
 **Var olan (boş olmayan / prod) DB'ye deploy (F4-8):**
+
 ```bash
 DATABASE_URL='postgres://user:pass@host:5432/db' infrastructure/postgres/apply-migrations.sh
 ```
+
 Runner `schema_migrations`'a bakıp yalnız **kayıtlı olmayan** migration'ları uygular
 (initdb.d dışındadır → fresh init'te otomatik çalışmaz). 014-öncesi DB'lerde önce `014`
 elle uygulanmalı (geçmişi back-register eder).

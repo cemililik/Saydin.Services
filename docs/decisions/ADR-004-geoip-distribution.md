@@ -44,6 +44,7 @@ eder; `GeoIp__DatabasePath=/app/geoip/GeoLite2-City.mmdb`. Dosya yoksa resolver
    ile bu kadansta tazeler. Eskime analytics için kabul edilebilir.
 
 ### Gerekçe
+
 - CLAUDE.md güvenlik kuralı: API/license key'ler env var / user-secrets ile gelir, asla
   appsettings.json'a yazılmaz.
 - CLAUDE.md log seviyesi: "LogWarning → beklenen ama anormal durum" — eksik DB tam bu.

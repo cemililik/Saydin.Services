@@ -54,6 +54,7 @@ Uygulayan kod: `WhatIfEndpoints.cs` (calculate/compare/reverse), `DcaEndpoints.c
 `ScenariosEndpoints` zaten tutar loglamıyor (yalnız id/type/symbol/label) — değişmedi.
 
 ### Gerekçe
+
 - KVKK veri minimizasyonu + yayınlanmış gizlilik metniyle uyum (kod artık gerçeği metne
   uyduruyor).
 - IP zaten maskeli (`IpMasker` /24-/48); bucket, finansal eksen için aynı minimizasyonu

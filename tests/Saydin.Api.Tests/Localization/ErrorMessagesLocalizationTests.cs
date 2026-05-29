@@ -32,7 +32,7 @@ public class ErrorMessagesLocalizationTests
     [InlineData("DeviceIdRequired")]
     [InlineData("AmountMustBePositive")]
     [InlineData("PriceNotFound")]
-    public void Localizer_ResolvesKeyToValue_NotTheKeyItself(string key)
+    public void GetString_WithValidKey_ReturnsLocalizedValueNotKey(string key)
     {
         var localizer = CreateLocalizer();
 
@@ -49,7 +49,7 @@ public class ErrorMessagesLocalizationTests
     }
 
     [Fact]
-    public void Localizer_TurkishAndEnglish_DifferForSameKey()
+    public void GetString_WithDifferentCultures_ReturnsDifferentTranslations()
     {
         var localizer = CreateLocalizer();
 
@@ -73,7 +73,7 @@ public class ErrorMessagesLocalizationTests
     }
 
     [Fact]
-    public void WrongResourcesPath_FailsToResolve_DocumentsRootCause()
+    public void GetString_WithWrongResourcesPath_ReturnsResourceNotFound()
     {
         // Eski hatalı yapılandırmanın neden çalışmadığını kilitler: ResourcesPath="Resources"
         // embedding ile uyuşmaz → key çözülemez. Bu test kırılırsa embedding değişmiştir ve

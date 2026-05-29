@@ -89,6 +89,11 @@ ekosistemi olmayan kendi yarı-çözümümüz.
 
 ## Karar (Önerilen)
 
+> **⚠️ SUPERSEDED (Faz 4):** Bu bölümdeki orijinal öneri (**Seçenek B — EF Core**) Faz 4'te
+> **Seçenek C (Hybrid)** ile değiştirildi. Güncel karar için aşağıdaki
+> "Karar Revizyonu (Faz 4 — F4-1/F4-8)" bölümüne bakın. Aşağıdaki içerik denetim izi
+> (audit trail) için korunmuştur ve **artık geçerli değildir**.
+
 **Seçenek B — EF Core Migrations'a geçiş**, **Faz 1 / Sprint 2** içinde tamamlanacak.
 
 ### Gerekçe
@@ -186,6 +191,10 @@ ADR-B tam geçişe kadar:
 - **Seçenek B dokümante edilmiş gelecek yoludur**; bu ADR onu silmez, erteler.
 
 ## Sonuçlar / Risk
+
+> **NOT (Faz 4):** Bu bölümdeki sonuç/risk değerlendirmesi **ertelenen Seçenek B (EF Core)**
+> yoluna aittir. MVP'de uygulanan **Seçenek C (Hybrid)** için güncel sonuçlar yukarıdaki
+> "Karar Revizyonu (Faz 4 — F4-1/F4-8)" bölümündedir.
 
 **Olumlu:**
 - Schema versioning denetlenebilir hale gelir.

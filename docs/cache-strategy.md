@@ -22,7 +22,7 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | Amaç | Key Formatı | TTL | Servis |
 |---|---|---|---|
 | What-if hesaplama | `whatif:v3:{symbol}:{buyDate}:{sellDate}:{amountStr}:{amountType}{:inf?}:{lang}` | 1 saat | `WhatIfCalculator` (E-Info-2: v2→v3; amount kültür-bağımsız `amountStr`, inflation suffix + dil eklendi) |
-| Reverse what-if | `whatif:reverse:v1:{symbol}:{buyDate}:{sellDate}:{amountStr}:{targetAmountType}{:inf?}:{lang}` | 1 saat | `WhatIfCalculator` |
+| Reverse what-if | `whatif:reverse:v2:{symbol}:{buyDate}:{sellDate}:{amountStr}:{targetAmountType}{:inf?}:{lang}` | 1 saat | `WhatIfCalculator` (F4-3: v1→v2 — `targetValueTry` forward-consistency, eski entry'ler invalidate) |
 | Asset listesi | `assets:list:{sig}` / `assets:info:{sig}:{lang}` | 6 saat / 1 saat | `AssetService` |
 | Tek fiyat noktası | `price:{symbol}:{date}` | 24 saat | `AssetService` |
 | En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |

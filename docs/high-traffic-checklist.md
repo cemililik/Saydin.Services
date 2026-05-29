@@ -27,7 +27,7 @@
   - Tetikleyici: P99 latency artışı veya timeout hataları görülürse
 
 - [ ] **Cache key namespace'leri versiyonlanmalı**
-  - Şu an `whatif:v3:...`, `whatif:reverse:v1:...`, `dca:v1:...` formatında — breaking değişiklikte versiyon artırılmalı
+  - Şu an `whatif:v3:...`, `whatif:reverse:v2:...`, `dca:v1:...` formatında — breaking değişiklikte versiyon artırılmalı
   - Tetikleyici: Cache yapısını kıran her backend değişikliğinde (bkz. `docs/cache-strategy.md`)
 
 ---

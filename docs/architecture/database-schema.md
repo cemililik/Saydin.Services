@@ -416,21 +416,25 @@ TCMB intraday OHLC yayımlamadığı için yalnız `close` doldurulur; `open`/`h
 ## Tasarım Kararları
 
 ### NUMERIC — Float Kullanılmaz
+
 Finansal değerlerde kayan noktalı aritmetik yuvarlama hatasına yol açar. Fiyat kolonları
 `NUMERIC(18,6)`, hacim `NUMERIC(24,4)`, miktar `NUMERIC(18,8)`, enflasyon endeksi
 `NUMERIC(12,4)` tipindedir. C# tarafında karşılık `decimal`'dir (CLAUDE.md finansal
 hassasiyet kuralı; `double`/`float` yasak).
 
 ### `volume NUMERIC(24,4)` — Precision Drift Düzeltmesi
+
 Başlangıçta `volume` da `NUMERIC(18,6)` idi; yüksek kripto işlem hacimleri taşmaya yol
 açabiliyordu. Review F1.5-2 ile DB `NUMERIC(24,4)`'e çekildi ve EF
 (`PricePointConfiguration.cs:20`) `HasPrecision(24, 4)` ile hizalandı.
 
 ### `close` Kanonik Fiyat
+
 "Ya alsaydım?" hesaplamalarında endüstri standardı kapanış fiyatıdır. `open`/`high`/`low`
 grafik gösterimi için saklanır; TCMB forex verisinde NULL.
 
 ### `inflation_rates` Composite PK ve LKV Mantığı
+
 `(period_date, source)` bileşik PK sayesinde aynı ay için hem seed (`seed-approximation`)
 hem gerçek TÜİK (`tuik`) satırı bir arada tutulur (audit). Okuma yolu `tuik` satırını
 tercih eder. TÜİK yayın gecikmesi (2-3 ay) nedeniyle belirli bir tarih için "last known
@@ -445,11 +449,13 @@ Seed satırları yalnız tablo boşken eklenir; EVDS worker gerçek veriyi `ON C
 ile yazar (`InflationIngestionRepository`).
 
 ### `source_raw` / `data` JSONB
+
 `price_points.source_raw` ham API yanıtını saklar (yeniden işleme). `activity_logs.data`
 action'a göre değişen log payload'ıdır ve `pg_column_size(data) <= 10000` ile sınırlanır
 (GIN index `jsonb_path_ops` ile sorgulanabilir).
 
 ### `activity_logs` Hypertable + Compression Penceresi
+
 Log verisi hızlı büyüdüğü için haftalık chunk'lı hypertable ve 7 gün üstü chunk'lar için
 compression policy kullanılır. TimescaleDB 2.16.1'de compression bayrağı **set iken**
 `ALTER COLUMN ... TYPE` yasaktır; bu yüzden kolon-tip değişiklikleri (`009`, `011`)
@@ -457,6 +463,7 @@ compression policy kullanılır. TimescaleDB 2.16.1'de compression bayrağı **s
 eklenirken bu pencere korunmalıdır (CLAUDE.md notu).
 
 ### Cihaz Tabanlı Auth ve Partial UNIQUE
+
 `users.device_id` ve `users.email` partial UNIQUE index'lerle (`WHERE ... IS NOT NULL`)
 benzersizdir; böylece birden fazla anonim/kayıtsız satır NULL tutabilir.
 
@@ -465,6 +472,7 @@ benzersizdir; böylece birden fazla anonim/kayıtsız satır NULL tutabilir.
 > backend repo'sunda o dosya bulunmaz.
 
 ### `market_holidays` — Henüz Pasif
+
 Tablo şemada mevcuttur (001 + 011 FK) ancak uygulama katmanında kullanılmaz: EF entity'si
 yoktur ve hiçbir kod yolu onu okumaz/yazmaz. Tasarım niyeti, ingestion worker'ının tatil
 günlerini "eksik veri" saymamasıdır; bu davranış henüz devreye alınmamıştır.

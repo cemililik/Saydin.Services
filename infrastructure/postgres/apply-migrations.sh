@@ -16,6 +16,12 @@
 # (001..014 geçmişini DDL yeniden çalıştırmadan back-register eder). Sonrasında bu runner
 # yalnız 015+ migration'ları uygular — eski migration'ları RE-RUN ETMEZ (idempotency garantisi).
 #
+# ÇALIŞTIRMA GARANTİSİ (KRİTİK): Bu runner aynı anda TEK INSTANCE çalıştırılmalıdır
+# (CI/Job concurrency=1, overlapping/paralel deploy YOK). schema_migrations SELECT (kontrol)
+# ile INSERT (kayıt) arasında bir TOCTOU penceresi vardır; eşzamanlı iki runner aynı
+# migration'ı (DDL/.sh body) iki kez uygulayabilir — ON CONFLICT yalnız kayıt satırını korur,
+# migration gövdesini DEĞİL.
+#
 # Kullanım:
 #   DATABASE_URL='postgres://user:pass@host:5432/db' ./apply-migrations.sh
 #   # veya psql ortam değişkenleri (PGHOST/PGUSER/PGPASSWORD/PGDATABASE) ile DATABASE_URL boş bırakılabilir.
@@ -49,7 +55,7 @@ for path in "${MIGRATIONS_DIR}"/*; do
     esac
     version="${file%.*}"          # uzantısız ad = version
 
-    already="$(run_psql -tA -c "SELECT 1 FROM schema_migrations WHERE version = '${version}';")"
+    already="$(run_psql -tA -v version="${version}" -c "SELECT 1 FROM schema_migrations WHERE version = :'version';")"
     if [[ "${already}" == "1" ]]; then
         echo "↷ atlanıyor (uygulanmış): ${file}"
         continue
@@ -61,8 +67,8 @@ for path in "${MIGRATIONS_DIR}"/*; do
     else
         run_psql -f "${path}"
     fi
-    run_psql -q -c \
-        "INSERT INTO schema_migrations(version) VALUES ('${version}') ON CONFLICT (version) DO NOTHING;"
+    run_psql -q -v version="${version}" -c \
+        "INSERT INTO schema_migrations(version) VALUES (:'version') ON CONFLICT (version) DO NOTHING;"
     applied_count=$((applied_count + 1))
 done
 

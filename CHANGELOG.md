@@ -13,6 +13,7 @@ bilinçli ertelenen, ürün/legal/mimari **karar** gerektiren 14 bulgu karara ba
 yazıldı ve sonuçsal kod/doküman değişiklikleri uygulandı.
 
 #### Eklendi
+
 - **Mimari Karar Kayıtları (ADR):** `ADR-002-compare-quota`, `ADR-003-rate-limiting`,
   `ADR-004-geoip-distribution`, `ADR-005-secrets-management`,
   `ADR-006-activity-log-financial-policy` + backend ADR konvansiyonu için
@@ -30,6 +31,7 @@ yazıldı ve sonuçsal kod/doküman değişiklikleri uygulandı.
   `.env.example` `GEOIP_ACCOUNT_ID`/`GEOIP_LICENSE_KEY`.
 
 #### Değişti
+
 - **KVKK veri minimizasyonu** (F4-6): Activity log'larda ham finansal tutar yerine kaba
   aralık (`AmountBucket.Coarse`) yazılır; mutlak sonuç TL tutarları (ProfitLossTry,
   CurrentValueTry, RequiredInvestmentTry, TotalInvestedTry, AverageCostPerUnit) artık
@@ -50,6 +52,7 @@ yazıldı ve sonuçsal kod/doküman değişiklikleri uygulandı.
   `development-guide.md` (rate limit / GeoIP / worker / secrets / CodeRabbit notları).
 
 #### Doğrulandı (kod değişikliği gerekmedi)
+
 - **Compare kotası = 1 hesaplama** (F4-2, ADR-002): mevcut davranış ratify edildi; per-feature
   alt-kotalar post-MVP.
 - **Feature-disabled = 403 Forbidden** (F4-14): `FeatureDisabledExceptionHandler` zaten 403
@@ -59,15 +62,18 @@ yazıldı ve sonuçsal kod/doküman değişiklikleri uygulandı.
   `architecture.md`'ye politika notu eklendi.
 
 #### Kaldırıldı
+
 - `.dockerignore`'dan ölü `.sourcery.yaml` referansı (F4-12; dosya zaten Faz 1'de silinmişti).
 
 #### İnsan onayı bekleyen (kod hazır)
+
 - Precautionary secret rotation (F4-13, **PENDING**), KVKK bucket sınırları + geçmiş satır
   purge kararı (F4-6 legal), compare/reverse public roadmap kota uyumu (F4-2 ürün), reverse
   `targetValueTry` display semantiği (F4-3 UX), GeoIP lisans/ops sahipliği (F4-7), meta repo
   ADR README (F4-10).
 
 #### Doğrulama
+
 - Build: 0 uyarı / 0 hata (SDK 10.0). Testler: 346 geçti (Api 257 · PriceIngestion 86 ·
   Integration 3, 0 skipped). Migration zinciri 001→014 fresh-init'te abort'suz; `schema_migrations`
   16 satır.

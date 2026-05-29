@@ -355,7 +355,7 @@ try
                     Title  = localizer["RateLimited"],
                     Status = StatusCodes.Status429TooManyRequests,
                     Detail = string.Format(localizer["RateLimitedDetail"], windowSeconds, permitLimit),
-                    Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() }
+                    Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier }
                 }, ct);
             };
         });

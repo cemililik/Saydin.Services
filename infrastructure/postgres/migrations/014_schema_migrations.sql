@@ -32,6 +32,26 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 COMMENT ON TABLE schema_migrations IS
     'Uygulanan SQL migration sürümlerinin denetim izi (F4-1/ADR-001). version = dosya adının uzantısız hâli.';
 
+-- ÖN-KOŞUL GUARD (F17): 001..013 back-register'ı SADECE DB 014-öncesi TAM duruma
+-- ulaşmışsa geçerlidir. Ara sürümdeki (ör. 011/012) bir DB'de bu dosya ELLE çalıştırılırsa,
+-- uygulanmamış 012/012b/013'ü "uygulandı" diye işaretler → apply-migrations.sh onları
+-- SESSİZCE atlar → şema drift'i. Son yapısal migration 013 activity_logs compression'ını açar;
+-- fresh init'te 013 alfabetik olarak 014'ten ÖNCE çalıştığından compression ZATEN açıktır →
+-- guard RAISE ETMEZ. 013'e ulaşmamış DB'de kapalıdır → loud fail.
+-- (timescaledb_information.hypertables.compression_enabled TS 2.16.1'de stabil public view'dır.)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM   timescaledb_information.hypertables
+        WHERE  hypertable_name = 'activity_logs'
+        AND    compression_enabled
+    ) THEN
+        RAISE EXCEPTION
+            '014 on-kosulu saglanmadi: activity_logs compression KAPALI -> DB beklenen 013 durumunda degil. Once 013 dahil eksik migrationlari uygulayin, sonra 014u calistirin (fresh init bu hatayi vermez).';
+    END IF;
+END $$;
+
 -- Tüm mevcut migration'ları + kendini back-register et (DDL yeniden çalıştırılmaz).
 INSERT INTO schema_migrations (version) VALUES
     ('001_initial'),

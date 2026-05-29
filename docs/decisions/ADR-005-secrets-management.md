@@ -37,6 +37,7 @@ yapıldı; geriye **ADR dokümanı** + bir **insan rotasyon aksiyonu** kaldı.
 ## Değerlendirilen Seçenekler (production store)
 
 ### Seçenek A — Host env / gitignored prod `.env` — MVP SEÇİMİ
+
 - Tek-host Docker Compose deploy; sırlar host'taki `chmod 600` gitignored `.env`'den
   interpolation ile gelir (image'a girmez — `.dockerignore` garanti). Compose `${VAR:?...}`
   fail-fast guard'ları zaten var.
@@ -44,10 +45,12 @@ yapıldı; geriye **ADR dokümanı** + bir **insan rotasyon aksiyonu** kaldı.
   senaryosunda elle yönetim zorlaşır.
 
 ### Seçenek B — Docker Compose `secrets:` (file-mount) — DOKÜMANTE EDİLMİŞ SONRAKİ ADIM
+
 - Sırlar dosya olarak mount edilir (`*_FILE` konvansiyonu). Deploy topolojisi
   netleşince geçilir.
 
 ### Seçenek C — Vault / cloud KMS (AWS/Azure/GCP) — ERTELENDİ (post-MVP)
+
 - **Artı:** Merkezi, otomatik rotation, audit. **Eksi:** Tek-host MVP ayak izi için
   operasyonel olarak ağır — aşırı mühendislik.
 
