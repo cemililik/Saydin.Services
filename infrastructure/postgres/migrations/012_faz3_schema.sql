@@ -1,5 +1,6 @@
--- INFR-009: hata durumunda init zinciri dursun (yeni migration'larda repo-içi garanti).
-\set ON_ERROR_STOP on
+-- NOT (INFR-009): docker-entrypoint init'i `psql -v ON_ERROR_STOP=1` ile çalıştırır
+-- (hata → zincir durur). psql `\set` meta-komutu KULLANILMADI (SQL analyzer + psql-dışı
+-- araç uyumu için).
 -- ============================================================
 -- Migration 012: Faz 3 — Schema (inflation source, ingestion job audit)
 --

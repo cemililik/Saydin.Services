@@ -1,6 +1,6 @@
--- INFR-009: hata durumunda zincir dursun (entrypoint -v ON_ERROR_STOP=1 verir; yeni
--- migration'larda repo-içi garanti için açıkça da set ediyoruz).
-\set ON_ERROR_STOP on
+-- NOT (INFR-009): init zinciri docker-entrypoint tarafından `psql -v ON_ERROR_STOP=1`
+-- ile çalıştırılır → bir .sql hata verirse zincir durur. psql `\set` meta-komutu burada
+-- KULLANILMADI; SQL static-analyzer'ları (Codacy) ve psql-dışı migration araçlarını kırıyor.
 -- ============================================================
 -- Migration 008b: activity_logs compression'ı GEÇİCİ olarak kapat
 --

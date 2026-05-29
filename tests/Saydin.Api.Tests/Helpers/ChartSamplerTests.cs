@@ -87,4 +87,24 @@ public class ChartSamplerTests
 
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
+
+    [Fact]
+    public void Downsample_MaxPointsOne_WithLargerSource_ReturnsFirstElementOnly()
+    {
+        // Regresyon: maxPoints==1 + count>1 → (maxPoints-1)=0 → 0/0=NaN → (int)NaN=int.MinValue
+        // → source[int.MinValue] çökerdi. Kısa devre ile tek nokta (ilk eleman) dönmeli.
+        var source = Enumerable.Range(10, 50).ToArray(); // 10..59
+
+        var result = ChartSampler.Downsample(source, x => x, maxPoints: 1);
+
+        result.Should().ContainSingle().Which.Should().Be(10);
+    }
+
+    [Fact]
+    public void Downsample_MaxPointsOne_WithSingleSource_ReturnsThatElement()
+    {
+        var result = ChartSampler.Downsample(new[] { 42 }, x => x, maxPoints: 1);
+
+        result.Should().ContainSingle().Which.Should().Be(42);
+    }
 }

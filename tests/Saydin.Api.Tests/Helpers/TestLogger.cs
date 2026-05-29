@@ -39,10 +39,15 @@ public sealed class TestLogger<T> : ILogger<T>
 
     /// <summary>Yakalanan tek bir log kaydı.</summary>
     public sealed record LogEntry(LogLevel Level, EventId EventId, string Message, Exception? Exception);
+}
 
-    private sealed class NullScope : IDisposable
-    {
-        public static readonly NullScope Instance = new();
-        public void Dispose() { }
-    }
+/// <summary>
+/// BeginScope için no-op disposable. Generic <see cref="TestLogger{T}"/> dışında (file-scoped,
+/// non-generic) tanımlandı; aksi halde static <c>Instance</c> alanı her kapalı generic tip için
+/// ayrı olur (Codacy/CA1000). Böylece tek paylaşılan instance kullanılır.
+/// </summary>
+file sealed class NullScope : IDisposable
+{
+    public static readonly NullScope Instance = new();
+    public void Dispose() { }
 }

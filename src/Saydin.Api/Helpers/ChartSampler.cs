@@ -43,6 +43,13 @@ public static class ChartSampler
             return all;
         }
 
+        // maxPoints == 1 (ve buraya geldiysek source.Count > 1): aşağıdaki indeks formülünde
+        // (maxPoints - 1) sıfır olur → 0.0/0.0 = double.NaN → (int)NaN = int.MinValue →
+        // source[int.MinValue] ArgumentOutOfRangeException ile çöker. Tek noktayı (ilk eleman)
+        // döndürerek bu sıfıra bölmeyi kısa devre yaparız.
+        if (maxPoints == 1)
+            return new List<TOut> { selector(source[0]) };
+
         var result = new List<TOut>(maxPoints);
         for (var i = 0; i < maxPoints; i++)
         {
