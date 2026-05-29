@@ -56,13 +56,25 @@ public class AssetLocalizationContractTests
     private static IReadOnlyList<string> ExtractSeededAssetSymbols()
     {
         var migrationsDir = Path.Combine(RepoRoot, "infrastructure", "postgres", "migrations");
-        // Asset seed satırı: ('SYMBOL', 'DisplayName', ...) — sembol UPPER, ardından quoted metin.
-        // Tarih/lowercase sabitler (inflation seed, CHECK listeleri) eşleşmez.
-        var pattern = new Regex(@"\(\s*'([A-Z][A-Z0-9_]+)'\s*,\s*'", RegexOptions.Compiled);
+
+        // Review follow-up: önce yalnız "INSERT INTO assets ... ;" bloklarını izole et, sonra
+        // sembol regex'ini SADECE o bloklarda çalıştır. Tüm dosyayı taramak başka tablolardaki
+        // ('UPPER','text') tuple'larını over-match edebilirdi (asset olmayan sembol → yanlış fail).
+        // Singleline: '.' yeni satırları kapsar; non-greedy: ilk ';'de durur (asset seed
+        // statement'ında gömülü ';' yoktur). \bassets\b: assets_* gibi tabloları dışlar.
+        var insertBlock = new Regex(@"INSERT\s+INTO\s+assets\b.*?;",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+        // Asset satırı: ('SYMBOL', 'DisplayName', ...) — sembol UPPER, ardından quoted metin.
+        var symbolPattern = new Regex(@"\(\s*'([A-Z][A-Z0-9_]+)'\s*,\s*'", RegexOptions.Compiled);
+
         var symbols = new SortedSet<string>(StringComparer.Ordinal);
         foreach (var file in Directory.EnumerateFiles(migrationsDir, "*.sql"))
-            foreach (Match m in pattern.Matches(File.ReadAllText(file)))
-                symbols.Add(m.Groups[1].Value);
+        {
+            var sql = File.ReadAllText(file);
+            foreach (Match block in insertBlock.Matches(sql))
+                foreach (Match m in symbolPattern.Matches(block.Value))
+                    symbols.Add(m.Groups[1].Value);
+        }
         return symbols.ToList();
     }
 
