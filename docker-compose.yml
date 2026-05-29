@@ -290,12 +290,11 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    healthcheck:
-      # INFR-007: aynı pattern.
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:9121/metrics > /dev/null || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    # NOT (INFR-007 düzeltme): oliver006/redis_exporter minimal (scratch) imajdır — içinde
+    # /bin/sh, wget, curl YOKTUR. CMD-SHELL/CMD tabanlı her healthcheck "exec /bin/sh: no such
+    # file or directory" ile FALSE-UNHEALTHY üretir (exporter aslında :9121/metrics'i sunarken).
+    # Bu imaj kendini probe edemez; canlılık Prometheus `up{job="redis-exporter"}` metriğinden
+    # izlenir. (postgres-exporter imajında shell olduğu için orada healthcheck korunuyor.)
     restart: unless-stopped
 
 volumes:
