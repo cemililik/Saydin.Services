@@ -1,10 +1,12 @@
 using System.Globalization;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
+using Saydin.Api.Helpers;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
@@ -15,6 +17,8 @@ public sealed class DcaCalculator(
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
     IDailyLimitGuard dailyLimitGuard,
+    IDeviceContext deviceContext,
+    TimeProvider timeProvider,
     IRedisCacheHelper cache,
     IAssetNameLocalizer assetNameLocalizer,
     IOptions<PlanOptions> options,
@@ -28,16 +32,16 @@ public sealed class DcaCalculator(
     // 6500 nokta üretmesini engelle (review M-16).
     private const int    MaxPurchasePoints   = 600;
 
-    public async Task<DcaResponse> CalculateAsync(string deviceId, DcaRequest request, CancellationToken ct)
+    public async Task<DcaResponse> CalculateAsync(DcaRequest request, CancellationToken ct)
     {
         // P1R-003: domain ValidationException ile guard — handler'ın ArgumentException
-        // catch'i altyapı/framework hatalarını yutmasın diye request/deviceId null check'i
-        // burada explicit yapılır.
+        // catch'i altyapı/framework hatalarını yutmasın diye request null check'i explicit.
         if (request is null)
             throw new ValidationException(
                 string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
-        if (string.IsNullOrWhiteSpace(deviceId))
-            throw new ValidationException(localizer["DeviceIdRequiredDetail"], field: "deviceId");
+
+        // F2.2-3: device id artık scoped IDeviceContext'ten — RequireDeviceId filter doğrular/doldurur.
+        var deviceId = deviceContext.DeviceId;
 
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
@@ -58,7 +62,7 @@ public sealed class DcaCalculator(
         // dışına çıkamaz. 0 = sınırsız (premium).
         if (features.PriceHistoryMonths > 0)
         {
-            var earliestAllowed = DateOnly.FromDateTime(DateTime.UtcNow).AddMonths(-features.PriceHistoryMonths);
+            var earliestAllowed = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime).AddMonths(-features.PriceHistoryMonths);
             if (request.StartDate < earliestAllowed)
                 throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "extended_history");
         }
@@ -104,12 +108,13 @@ public sealed class DcaCalculator(
         if (request.StartDate > endDate)
             throw new ValidationException(localizer["BuyDateAfterSellDate"], field: nameof(request.StartDate));
 
-        if (period is not ("weekly" or "monthly"))
+        if (period is not (PriceIntervals.Weekly or PriceIntervals.Monthly))
             throw new ValidationException(
                 string.Format(localizer["InvalidPeriod"], request.Period),
                 field: nameof(request.Period));
 
-        if (amountType is not "try")
+        // DCA periyodik yatırım yalnızca TL bazında anlamlı (bkz. QuantityUnits.DcaAccepted).
+        if (!QuantityUnits.DcaAccepted.Contains(amountType))
             throw new ValidationException(
                 string.Format(localizer["InvalidDcaAmountType"], request.AmountType),
                 field: nameof(request.AmountType));
@@ -253,7 +258,10 @@ public sealed class DcaCalculator(
         }
 
         // ── Chart data (max 60 nokta) ───────────────────────────────────────
-        var chartData = SampleChartData(purchases, MaxChartPoints);
+        var chartData = ChartSampler.Downsample(
+            purchases,
+            p => new DcaChartPoint(p.Date, p.CumulativeCostTry, p.CumulativeValueTry),
+            MaxChartPoints);
 
         var response = new DcaResponse(
             AssetSymbol:                symbol,
@@ -302,7 +310,7 @@ public sealed class DcaCalculator(
         // anchor day kaymasına yol açar (örn. 31 Ocak → 28 Şubat → 28 Mart …).
         // Tüm tarihler `startDate`'e göre indeks-bazlı hesaplanır; `AddMonths` ay
         // sonu clamp'ini hâlâ uygular ama bir sonraki ay startDate'in gününden devam eder.
-        if (period == "weekly")
+        if (period == PriceIntervals.Weekly)
         {
             for (var current = startDate; current <= endDate; current = current.AddDays(7))
                 dates.Add(current);
@@ -323,28 +331,5 @@ public sealed class DcaCalculator(
         }
 
         return dates;
-    }
-
-    private static IReadOnlyList<DcaChartPoint> SampleChartData(
-        List<DcaPurchase> purchases, int maxPoints)
-    {
-        if (purchases.Count == 0) return Array.Empty<DcaChartPoint>();
-
-        if (purchases.Count <= maxPoints)
-        {
-            return purchases
-                .Select(p => new DcaChartPoint(p.Date, p.CumulativeCostTry, p.CumulativeValueTry))
-                .ToList();
-        }
-
-        var result = new List<DcaChartPoint>(maxPoints);
-        for (var i = 0; i < maxPoints; i++)
-        {
-            var idx = Math.Min((int)((double)i * (purchases.Count - 1) / (maxPoints - 1)), purchases.Count - 1);
-            var p   = purchases[idx];
-            result.Add(new DcaChartPoint(p.Date, p.CumulativeCostTry, p.CumulativeValueTry));
-        }
-
-        return result;
     }
 }

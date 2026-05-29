@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Saydin.Api.Options;
@@ -15,6 +16,7 @@ public class DailyLimitGuardTests
 {
     private readonly IConnectionMultiplexer _redis = Substitute.For<IConnectionMultiplexer>();
     private readonly IDatabase             _db    = Substitute.For<IDatabase>();
+    private readonly FakeTimeProvider      _timeProvider = new();
     private readonly DailyLimitGuard       _sut;
 
     private const string DeviceId = "test-device-001";
@@ -41,7 +43,7 @@ public class DailyLimitGuardTests
         _redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(_db);
 
         var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions());
-        _sut = new DailyLimitGuard(_redis, options, NullLogger<DailyLimitGuard>.Instance);
+        _sut = new DailyLimitGuard(_redis, options, _timeProvider, NullLogger<DailyLimitGuard>.Instance);
     }
 
     // ── CheckAsync ────────────────────────────────────────────────────────
@@ -186,7 +188,7 @@ public class DailyLimitGuardTests
         {
             Free = new TierOptions { DailyCalculationLimit = 0 }
         });
-        var sut = new DailyLimitGuard(_redis, options, NullLogger<DailyLimitGuard>.Instance);
+        var sut = new DailyLimitGuard(_redis, options, _timeProvider, NullLogger<DailyLimitGuard>.Instance);
 
         await sut.CheckAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
 
@@ -201,7 +203,7 @@ public class DailyLimitGuardTests
         {
             Free = new TierOptions { DailyCalculationLimit = 0 }
         });
-        var sut = new DailyLimitGuard(_redis, options, NullLogger<DailyLimitGuard>.Instance);
+        var sut = new DailyLimitGuard(_redis, options, _timeProvider, NullLogger<DailyLimitGuard>.Instance);
 
         await sut.IncrementAsync(FreeUser, FreeUser.DeviceId!, UsagePrefix);
 
@@ -291,10 +293,13 @@ public class DailyLimitGuardTests
 
     // ── BuildUsageKey ─────────────────────────────────────────────────────
 
+    // C-Low-1: BuildUsageKey artık `now` ZORUNLU alır — sabit timestamp ile deterministik.
+    private static readonly DateTime FixedNow = new(2026, 5, 29, 12, 0, 0, DateTimeKind.Utc);
+
     [Fact]
     public void BuildUsageKey_WithUser_UsesUserId()
     {
-        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "some-device", UsagePrefix);
+        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "some-device", UsagePrefix, FixedNow);
 
         key.Should().StartWith(UsagePrefix);
         key.Should().Contain(FreeUser.Id.ToString());
@@ -304,22 +309,19 @@ public class DailyLimitGuardTests
     [Fact]
     public void BuildUsageKey_WithoutUser_UsesDeviceId()
     {
-        var key = DailyLimitGuard.BuildUsageKey(null, DeviceId, UsagePrefix);
+        var key = DailyLimitGuard.BuildUsageKey(null, DeviceId, UsagePrefix, FixedNow);
 
         key.Should().StartWith(UsagePrefix);
         key.Should().Contain(DeviceId);
     }
 
     [Fact]
-    public void BuildUsageKey_ContainsCurrentDate()
+    public void BuildUsageKey_UsesProvidedDate()
     {
-        // UTC gece-yarısı sınırında flake olmaması için: key oluşturulduktan sonra UTC tarihi
-        // tekrar oku ve "key oluşmadan önceki gün VEYA şu anki gün" şeklinde tolerans bırak.
-        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "device", UsagePrefix);
-        var nowAfter = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        var nowAfterMinusOne = DateTime.UtcNow.AddDays(-1).ToString("yyyy-MM-dd");
+        // Sağlanan `now`'ın tarihi key'e birebir yansır — gerçek-saat toleransı yok.
+        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "device", UsagePrefix, FixedNow);
 
-        key.Should().Match(k => k.EndsWith(nowAfter) || k.EndsWith(nowAfterMinusOne));
+        key.Should().EndWith("2026-05-29");
     }
 
     // ── TryAcquireAsync / ReleaseAsync (Faz 0 follow-up #2) ───────────────

@@ -25,10 +25,9 @@ public static class AppConfigEndpoints
         IAppConfigService configService,
         CancellationToken ct)
     {
-        var deviceId = httpContext.GetRequiredDeviceId();
         var log = httpContext.GetOrCreateActivityLog("config_fetch");
 
-        var config = await configService.GetConfigAsync(deviceId, ct);
+        var config = await configService.GetConfigAsync(ct);
 
         log.WithData(new { tier = config.Tier });
         return Results.Ok(config);

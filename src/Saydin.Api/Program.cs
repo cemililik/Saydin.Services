@@ -203,6 +203,13 @@ try
         .ValidateOnStart();
 
     // ─── Repositories & Services ─────────────────────────────────────────────
+    // F3.1-5 / SVCR-007/025: TimeProvider — servisler DateTime.UtcNow yerine bunu
+    // enjekte eder; testlerde FakeTimeProvider ile saat dondurulur (gün dönümü flaky'liği biter).
+    builder.Services.AddSingleton(TimeProvider.System);
+    // F2.2-3 ([C-B-CC-5]): scoped cihaz kimliği — RequireDeviceId filter doldurur,
+    // iş service'leri (WhatIf/Dca/SavedScenario/AppConfig) `deviceId` parametresi yerine okur.
+    builder.Services.AddScoped<DeviceContext>();
+    builder.Services.AddScoped<IDeviceContext>(sp => sp.GetRequiredService<DeviceContext>());
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
     builder.Services.AddScoped<IInflationRepository, InflationRepository>();

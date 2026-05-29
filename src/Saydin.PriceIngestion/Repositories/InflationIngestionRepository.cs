@@ -11,10 +11,13 @@ namespace Saydin.PriceIngestion.Repositories;
 public sealed class InflationIngestionRepository(IDbContextFactory<SaydinDbContext> contextFactory)
     : IInflationIngestionRepository
 {
-    public async Task<DateOnly?> GetLatestInflationDateAsync(CancellationToken ct)
+    public async Task<DateOnly?> GetLatestInflationDateAsync(string source, CancellationToken ct)
     {
         await using var context = await contextFactory.CreateDbContextAsync(ct);
+        // INGR-012: yalnız verilen source'un (EVDS için 'tuik') max period_date'i. Tüm kaynakların
+        // max'ı seed verisini (2010→2025) kapsadığından gerçek tuik backfill'ini atlıyordu.
         return await context.InflationRates
+            .Where(r => r.Source == source)
             .MaxAsync(r => (DateOnly?)r.PeriodDate, ct);
     }
 
@@ -41,9 +44,8 @@ public sealed class InflationIngestionRepository(IDbContextFactory<SaydinDbConte
                 {createdAts}::timestamptz[],
                 {updatedAts}::timestamptz[]
             )
-            ON CONFLICT (period_date) DO UPDATE
+            ON CONFLICT (period_date, source) DO UPDATE
                 SET index_value = EXCLUDED.index_value,
-                    source      = EXCLUDED.source,
                     updated_at  = EXCLUDED.updated_at
             """,
             ct);

@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Localization;
+using Saydin.Api.Services;
 
 namespace Saydin.Api.Endpoints;
 
@@ -59,6 +60,15 @@ internal static partial class EndpointExtensions
             }
 
             ctx.HttpContext.Items[DeviceIdItemKey] = deviceId;
+
+            // F2.2-3: doğrulanmış device id'yi scoped IDeviceContext'e de yaz — iş
+            // service'leri (WhatIf/Dca/SavedScenario/AppConfig) artık `deviceId` parametresi
+            // yerine bu context'ten okur. Items[] ise GetRequiredDeviceId() (AssetsEndpoints,
+            // ActivityLog) için korunur.
+            ctx.HttpContext.RequestServices
+                .GetRequiredService<DeviceContext>()
+                .SetDeviceId(deviceId);
+
             return await next(ctx);
         });
 }

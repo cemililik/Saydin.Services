@@ -17,13 +17,12 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.Api.Tests", "tests\S
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.PriceIngestion.Tests", "tests\Saydin.PriceIngestion.Tests\Saydin.PriceIngestion.Tests.csproj", "{07549CAF-2691-4CB6-BF1F-707CA6584421}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.Api.IntegrationTests", "tests\Saydin.Api.IntegrationTests\Saydin.Api.IntegrationTests.csproj", "{042FE10C-6D3C-48A3-92BE-4E59B1B49C15}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Release|Any CPU = Release|Any CPU
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{02807055-196D-4983-9471-433EE631AB17}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
@@ -46,6 +45,13 @@ Global
 		{07549CAF-2691-4CB6-BF1F-707CA6584421}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{07549CAF-2691-4CB6-BF1F-707CA6584421}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{07549CAF-2691-4CB6-BF1F-707CA6584421}.Release|Any CPU.Build.0 = Release|Any CPU
+		{042FE10C-6D3C-48A3-92BE-4E59B1B49C15}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{042FE10C-6D3C-48A3-92BE-4E59B1B49C15}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{042FE10C-6D3C-48A3-92BE-4E59B1B49C15}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{042FE10C-6D3C-48A3-92BE-4E59B1B49C15}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{02807055-196D-4983-9471-433EE631AB17} = {2FEAEEF8-D693-461E-8F93-5C0BAAD979B3}
@@ -53,5 +59,6 @@ Global
 		{45081DB7-8CD0-41DB-8FF5-DC50C1577CBF} = {2FEAEEF8-D693-461E-8F93-5C0BAAD979B3}
 		{9457B33C-3ECA-407D-8BD6-D9928BE18557} = {1DD4C92D-A417-4A2C-B2D5-CA37690C2E4E}
 		{07549CAF-2691-4CB6-BF1F-707CA6584421} = {1DD4C92D-A417-4A2C-B2D5-CA37690C2E4E}
+		{042FE10C-6D3C-48A3-92BE-4E59B1B49C15} = {1DD4C92D-A417-4A2C-B2D5-CA37690C2E4E}
 	EndGlobalSection
 EndGlobal

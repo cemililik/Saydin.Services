@@ -12,15 +12,24 @@ public sealed class IngestionJob
 {
     public Guid Id { get; init; } = Guid.CreateVersion7();
 
-    /// <summary>Hangi asset için bu işlemin yapıldığı.</summary>
-    public Guid AssetId { get; init; }
+    /// <summary>
+    /// Hangi asset için bu işlemin yapıldığı. INGR-002 (migration 012): inflation
+    /// (EVDS) job'larında <c>null</c> — aylık TÜFE endeksi bir asset değildir.
+    /// </summary>
+    public Guid? AssetId { get; init; }
 
     /// <summary>
     /// İşlem tipi. CHECK constraint izin verilen değerler:
-    /// <c>historical_backfill</c>, <c>daily_update</c>.
-    /// Bkz. <see cref="IngestionJobTypes"/>.
+    /// <c>historical_backfill</c>, <c>daily_update</c>, <c>inflation_backfill</c>,
+    /// <c>inflation_daily</c>. Bkz. <see cref="IngestionJobTypes"/>.
     /// </summary>
     public string JobType { get; init; } = default!;
+
+    /// <summary>
+    /// Veri kaynağı (provenance): <c>tcmb</c>, <c>coingecko</c>, <c>openexchangerates</c>,
+    /// <c>twelvedata</c>, <c>evds</c>. INGR-002 (migration 012). Geçmiş satırlarda null olabilir.
+    /// </summary>
+    public string? Source { get; init; }
 
     public DateTimeOffset StartedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? FinishedAt { get; set; }
@@ -44,11 +53,15 @@ public sealed class IngestionJob
     public Asset? Asset { get; init; }
 }
 
-/// <summary>Ingestion job tip sabitleri (DB CHECK constraint ile eşleşir).</summary>
+/// <summary>Ingestion job tip sabitleri (DB CHECK constraint ile eşleşir; migration 011/012).</summary>
 public static class IngestionJobTypes
 {
     public const string HistoricalBackfill = "historical_backfill";
     public const string DailyUpdate = "daily_update";
+
+    // INGR-002: EVDS (inflation) worker job tipleri — migration 011'de CHECK'e eklendi.
+    public const string InflationBackfill = "inflation_backfill";
+    public const string InflationDaily = "inflation_daily";
 }
 
 /// <summary>Ingestion job durum sabitleri (DB CHECK constraint ile eşleşir).</summary>

@@ -9,6 +9,7 @@ namespace Saydin.Api.Services;
 public sealed class DailyLimitGuard(
     IConnectionMultiplexer redis,
     IOptions<PlanOptions> options,
+    TimeProvider timeProvider,
     ILogger<DailyLimitGuard> logger) : IDailyLimitGuard
 {
     private const string PremiumTier = "premium";
@@ -42,7 +43,7 @@ public sealed class DailyLimitGuard(
     {
         // Tek nokta UtcNow okuması — key date'i ile TTL'in farklı dakikalardan
         // (gece yarısı geçişinde) çıkmasını engeller.
-        var now = DateTime.UtcNow;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
@@ -83,7 +84,7 @@ public sealed class DailyLimitGuard(
     {
         // Aynı `now` değeri hem key date'i hem TTL hesabı için kullanılır;
         // BuildUsageKey'in bağımsız UtcNow okuması ile oluşan midnight race kapanır.
-        var now = DateTime.UtcNow;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
@@ -139,7 +140,7 @@ public sealed class DailyLimitGuard(
         int? limitOverride = null,
         CancellationToken ct = default)
     {
-        var now = DateTime.UtcNow;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var (hasLimit, _, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
         if (!hasLimit) return;
 
@@ -169,16 +170,14 @@ public sealed class DailyLimitGuard(
 
     /// <summary>
     /// Usage key formatı: <c>{prefix}{userId|deviceId}:{yyyy-MM-dd}</c>.
-    /// <paramref name="now"/> parametresi opsiyonel; verilmezse <see cref="DateTime.UtcNow"/>
-    /// kullanılır (testler için kullanışlı). Production yollarında caller tek bir
-    /// timestamp yakalayıp TTL hesabıyla aynı değeri buraya geçirir — gece yarısı
-    /// race koşulu kapanır.
+    /// C-Low-1: <paramref name="now"/> ZORUNLU — caller (production'da TimeProvider'dan,
+    /// testlerde sabit timestamp) tek bir değer yakalayıp TTL hesabıyla buraya geçirir;
+    /// gece yarısı race'i kapanır ve testlerde gerçek-saat (DateTime.UtcNow) flaky'liği olmaz.
     /// </summary>
-    internal static string BuildUsageKey(User? user, string deviceId, string prefix, DateTime? now = null)
+    internal static string BuildUsageKey(User? user, string deviceId, string prefix, DateTime now)
     {
-        var effective = now ?? DateTime.UtcNow;
         var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = effective.ToString("yyyy-MM-dd");
+        var dateKey = now.ToString("yyyy-MM-dd");
         return $"{prefix}{userId}:{dateKey}";
     }
 }

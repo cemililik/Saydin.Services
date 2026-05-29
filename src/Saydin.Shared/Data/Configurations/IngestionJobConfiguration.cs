@@ -15,7 +15,7 @@ public sealed class IngestionJobConfiguration : IEntityTypeConfiguration<Ingesti
         {
             t.HasCheckConstraint(
                 "chk_ingestion_jobs_type",
-                $"job_type IN ('{IngestionJobTypes.HistoricalBackfill}', '{IngestionJobTypes.DailyUpdate}', 'inflation_backfill', 'inflation_daily')");
+                $"job_type IN ('{IngestionJobTypes.HistoricalBackfill}', '{IngestionJobTypes.DailyUpdate}', '{IngestionJobTypes.InflationBackfill}', '{IngestionJobTypes.InflationDaily}')");
             t.HasCheckConstraint(
                 "chk_ingestion_jobs_status",
                 $"status IN ('{IngestionJobStatuses.Running}', '{IngestionJobStatuses.Success}', '{IngestionJobStatuses.Failed}')");
@@ -25,10 +25,14 @@ public sealed class IngestionJobConfiguration : IEntityTypeConfiguration<Ingesti
         builder.Property(j => j.JobType).HasMaxLength(50).IsRequired();
         builder.Property(j => j.Status).HasMaxLength(20).IsRequired();
         builder.Property(j => j.ErrorMessage).HasColumnType("text");
+        // INGR-002 (migration 012): provenance kolonu (nullable).
+        builder.Property(j => j.Source).HasMaxLength(30);
 
         // SHRD-019: started_at DB-side DEFAULT NOW() — EF Configuration ile sync (drift yok).
         builder.Property(j => j.StartedAt).HasDefaultValueSql("NOW()");
 
+        // INGR-002: AssetId nullable (inflation job'larında null). Guid? FK olduğu için
+        // EF ilişkiyi otomatik optional yapar; ON DELETE RESTRICT migration tarafında.
         builder.HasOne(j => j.Asset)
                .WithMany()
                .HasForeignKey(j => j.AssetId)

@@ -58,9 +58,8 @@ public static class WhatIfEndpoints
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("what_if_calculate");
-        var deviceId = httpContext.GetRequiredDeviceId();
 
-        var result = await calculator.CalculateAsync(deviceId, request, ct);
+        var result = await calculator.CalculateAsync(request, ct);
 
         log.WithData(new
         {
@@ -91,9 +90,8 @@ public static class WhatIfEndpoints
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("what_if_compare");
-        var deviceId = httpContext.GetRequiredDeviceId();
 
-        var result = await calculator.CompareAsync(deviceId, request, ct);
+        var result = await calculator.CompareAsync(request, ct);
 
         log.WithData(new
         {
@@ -125,9 +123,8 @@ public static class WhatIfEndpoints
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("what_if_reverse");
-        var deviceId = httpContext.GetRequiredDeviceId();
 
-        var result = await calculator.CalculateReverseAsync(deviceId, request, ct);
+        var result = await calculator.CalculateReverseAsync(request, ct);
 
         log.WithData(new
         {

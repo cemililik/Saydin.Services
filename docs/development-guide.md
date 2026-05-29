@@ -56,6 +56,20 @@ docker exec saydin-postgres psql -U saydin -d saydin \
   -c "\dt" | grep -E "assets|price_points|users"
 ```
 
+> **Fresh init (tüm migration'lar):** `infrastructure/postgres/migrations/*.sql` dosyaları
+> docker-entrypoint tarafından **yalnız boş volume'da** alfabetik + `ON_ERROR_STOP` ile
+> çalışır. Tüm zinciri (001→013) temiz uygulamak için:
+> ```bash
+> docker compose down -v && docker compose up -d   # DİKKAT: dev volume'larını sıfırlar
+> docker compose logs postgres | grep -E "running /docker-entrypoint|ERROR"  # abort yok mu?
+> ```
+> **Migration 008b/013 (Faz 3):** TimescaleDB 2.16.1'de compression **enabled** iken
+> `ALTER COLUMN ... TYPE` yasaktır. `008` retroaktif compression açtığı için 009/011 ALTER'ları
+> fresh init'te zinciri kırıyordu. `008b` compression'ı 009'dan önce kapatır, `013` 012'den sonra
+> geri açar (mevcut migration'lar değiştirilmedi). Yeni bir `ALTER COLUMN TYPE` eklerken bu
+> disable/re-enable penceresini koru. Zaten compress edilmiş **prod** tablolar için 011 üst
+> yorumundaki manuel runbook geçerlidir.
+
 ### EF Core ile Yeni Migration Ekleme
 
 ```bash
@@ -134,18 +148,30 @@ dotnet run --project src/Saydin.PriceIngestion
 
 ## 5. Testleri Çalıştırma
 
+Lokalde .NET SDK olmadığı için testler **`tests` compose profili** (SDK imajı + repo mount +
+compose ağı) ile koşar — `saydin-api` runtime imajı SDK/test projeleri içermez (Faz 3).
+
 ```bash
-cd src/Saydin.Services
+# Tüm solution (unit + integration). Integration için postgres/redis up olmalı.
+docker compose up -d postgres redis
+docker compose run --rm tests
 
-# Tüm testler
-dotnet test
+# Yalnız unit testler (DB gerekmez)
+docker compose run --rm tests test tests/Saydin.Api.Tests
+docker compose run --rm tests test tests/Saydin.PriceIngestion.Tests
 
-# Belirli proje
-dotnet test tests/Saydin.Api.Tests/
+# Gerçek PostgreSQL/Redis entegrasyon testleri (F2.6-21)
+docker compose run --rm tests test tests/Saydin.Api.IntegrationTests
 
-# Coverage raporu
-dotnet test --collect:"XPlat Code Coverage"
+# Sadece build doğrulaması (compose'suz, SDK imajı + mount)
+docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
+  dotnet build Saydin.Services.sln -c Debug
 ```
+
+> **Integration testleri (F2.6-21):** Testcontainers BU ortamda kullanılamaz (api
+> container'ında docker.sock yok); testler compose ağındaki `postgres`/`redis`'e bağlanır.
+> DB/Redis erişilemez veya migration 012 uygulanmamışsa testler `SkippableFact` ile
+> **atlanır** (kırmızı olmaz). NuGet önbelleği için `nuget_cache` named volume kullanılır.
 
 ## 6. Sık Kullanılan Komutlar
 

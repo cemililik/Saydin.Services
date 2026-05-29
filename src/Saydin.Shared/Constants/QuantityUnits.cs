@@ -20,6 +20,14 @@ public static class QuantityUnits
         Try,
         Units);
 
+    /// <summary>
+    /// DCA hesaplamaları için kabul edilen tipler. DCA periyodik yatırım yalnızca
+    /// TL bazında anlamlıdır (her periyotta sabit ₺ tutarı yatırılır) — units/grams
+    /// için periyodik miktar semantiği yoktur. F3.1-2: önceki <c>amountType is not "try"</c>
+    /// literal kontrolü bu kümeye indirgendi.
+    /// </summary>
+    public static readonly ImmutableArray<string> DcaAccepted = ImmutableArray.Create(Try);
+
     /// <summary>DB CHECK constraint için izin verilen tüm değerler.</summary>
     public static readonly ImmutableArray<string> All = WhatIfAccepted;
 

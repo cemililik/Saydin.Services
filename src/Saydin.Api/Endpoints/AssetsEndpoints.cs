@@ -2,6 +2,7 @@ using Microsoft.Extensions.Localization;
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Services;
+using Saydin.Shared.Constants;
 using Saydin.Shared.Exceptions;
 
 namespace Saydin.Api.Endpoints;
@@ -143,7 +144,7 @@ public static class AssetsEndpoints
         IPlanLimitResolver planLimits,
         IStringLocalizer<ErrorMessages> localizer,
         CancellationToken ct,
-        string interval = "daily")
+        string interval = PriceIntervals.Daily)
     {
         // Tarih aralığı sınırı: keyfi geniş aralıkla DB/Redis cache'i şişirme riskini önler.
         // ValidationException → 400 + ProblemDetails (ValidationExceptionHandler tarafından).

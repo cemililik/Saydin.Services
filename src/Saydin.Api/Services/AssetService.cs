@@ -5,6 +5,7 @@ using Microsoft.Extensions.Localization;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
 
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
@@ -15,6 +16,7 @@ public sealed class AssetService(
     IRedisCacheHelper cache,
     IAssetSymbolIndex symbolIndex,
     IAssetNameLocalizer assetNameLocalizer,
+    TimeProvider timeProvider,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<AssetService> logger) : IAssetService
 {
@@ -137,7 +139,7 @@ public sealed class AssetService(
             return cachedDate;
 
         var date = await repository.GetLatestPriceDateAsync(symbol.ToUpperInvariant(), ct)
-            ?? throw new PriceNotFoundException(symbol, DateOnly.FromDateTime(DateTime.UtcNow));
+            ?? throw new PriceNotFoundException(symbol, DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime));
 
         await cache.TrySetAsync(cacheKey, date.ToString("yyyy-MM-dd"), TimeSpan.FromHours(1), ct);
 
@@ -147,9 +149,11 @@ public sealed class AssetService(
     public async Task<IReadOnlyList<PricePoint>> GetPriceRangeAsync(
         string symbol, DateOnly from, DateOnly to, string interval, CancellationToken ct)
     {
-        // Yalnız 'daily' destekleniyor; weekly/monthly future enhancement.
+        // Yalnız 'daily' destekleniyor; weekly/monthly future enhancement (PriceIntervals).
         // Sessizce 'daily' döndürmek yerine açıkça reddet — sessiz kontrat ihlali (review H-9).
-        if (!string.Equals(interval, "daily", StringComparison.OrdinalIgnoreCase))
+        // F3.1-2: desteklenen interval kümesi tek noktadan (PriceIntervals.SupportedLookup) gelir.
+        var normalizedInterval = interval.Trim().ToLowerInvariant();
+        if (!PriceIntervals.SupportedLookup.Contains(normalizedInterval))
             throw new ValidationException(
                 string.Format(localizer["InvalidInterval"], interval),
                 field: nameof(interval));
@@ -157,7 +161,6 @@ public sealed class AssetService(
         // F2.2-1 ([C-B-AssetService-5/7]): cache key'e interval suffix ekle. Şu an
         // yalnızca "daily" destekleniyor; weekly/monthly eklenirse aynı (symbol, from, to)
         // çiftinin farklı interval'larda farklı response'u olur → cache key ayrımı şart.
-        var normalizedInterval = interval.ToLowerInvariant();
         var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:{normalizedInterval}";
 
         var cached = await cache.TryGetAsync<List<PricePoint>>(cacheKey, ct);

@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
+using Saydin.Shared.Constants;
+using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Workers;
 
@@ -10,20 +12,22 @@ namespace Saydin.PriceIngestion.Workers;
 /// Ardından her ayın {MonthlyRunDay}. günü saat {DailyRunUtcHour}:00 UTC'de çalışır.
 /// appsettings.json → IngestionWorkers:EvdsInflation ile tüm parametreler override edilebilir.
 ///
-/// NOT: <c>ingestion_jobs</c> tablosu asset_id NOT NULL FK ile asset bazlı tasarlandı;
-/// EVDS bir asset değil aylık endeks serisidir. Bu nedenle EVDS worker job kaydı YAZMAZ.
-/// Faz 2'de "inflation_jobs" benzeri ayrı bir tablo değerlendirilmelidir.
+/// INGR-002 (migration 012): Artık <c>ingestion_jobs</c> tablosuna kayıt yazar
+/// (<c>asset_id = null</c>, <c>source = "evds"</c>, job_type <c>inflation_backfill</c> /
+/// <c>inflation_daily</c>) — CLAUDE.md "ingestion_jobs'a başarı ve hata durumları yazılır"
+/// kuralına uyar. Job kaydı best-effort'tur; DB hatası asıl ingestion'ı maskelemez.
 ///
-/// F1.4-2 / [C-D-37]: Generic <c>IBaseWorker&lt;TPayload&gt;</c> abstraction'ı Faz 3'e
-/// ertelendi — `BaseAssetWorker` asset_id bazlı (price_points), bu worker aylık endeks
-/// (inflation_rates) yazıyor; ortak abstraction inflation_jobs şeması karara bağlandıktan
-/// sonra anlamlı (review F4-1 / migration strategy ADR ile birlikte).
+/// F1.4-2 / [C-D-37]: Generic <c>IBaseWorker&lt;TPayload&gt;</c> abstraction'ı bilinçli
+/// olarak Faz 4'e ertelendi — `BaseAssetWorker` günlük + asset_id bazlı (price_points),
+/// bu worker aylık + global (inflation_rates) yazıyor; zamanlama, iterasyon ve gap-aware
+/// backfill yapısal olarak farklı (bkz. PHASE-3-DOC-UPDATE-NOTES).
 /// targetMonth hesaplaması ([C-D-38]): `AddMonths(-1)` yıl-rollover'ı doğru ele alır;
 /// Aralık 3'ünde Kasım, Ocak 3'ünde önceki yılın Aralık verisi çekilir.
 /// </summary>
 public sealed class EvdsInflationWorker(
     IInflationAdapter adapter,
     IInflationIngestionRepository repository,
+    IIngestionJobRepository jobs,
     IConfiguration configuration,
     ILogger<EvdsInflationWorker> logger)
 {
@@ -64,54 +68,141 @@ public sealed class EvdsInflationWorker(
         }
     }
 
+    // INGR-012: İlk backfill 20 yılı kapsayabilir. EVDS çok-yıllı aralık limitlerine karşı
+    // güvende olmak için aralık bu kadar aylık chunk'lara bölünür (her chunk = ayrı job + tek
+    // EVDS çağrısı). 60 ay = 5 yıl: tek istekte makul, 20 yıl ~4 chunk.
+    private const int BackfillChunkMonths = 60;
+
     private async Task BackfillAsync(CancellationToken ct)
     {
-        var latestDate = await repository.GetLatestInflationDateAsync(ct);
+        // INGR-012: anchor = en son GERÇEK tuik tarihi (tüm kaynakların max'ı DEĞİL). Seed
+        // (source='seed-approximation') 2010→2025'i kapladığından max-all anchor'ı gerçek
+        // TÜİK'in tarihsel aylara hiç yazılmamasına yol açıyordu → reel-getiri seed'de donuyordu.
+        // tuik-anchor ile EVDS, tuik'in bittiği yerden (ilk çalıştırmada BackfillStartDate'ten)
+        // devam eder; composite PK sayesinde tuik satırları seed'in yanında durur, okuma tuik'i seçer.
+        var latestTuik = await repository.GetLatestInflationDateAsync(InflationSources.Tuik, ct);
 
-        // Bir sonraki eksik aydan başla
-        var from = latestDate.HasValue
-            ? latestDate.Value.AddMonths(1)
-            : BackfillStartDate;
-
+        var from = latestTuik?.AddMonths(1) ?? BackfillStartDate;
         // Şu anki ay henüz yayınlanmamış olabilir; bir önceki aya kadar al
         var to = new DateOnly(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-1);
 
-        if (from > to)
+        var chunks = ComputeBackfillChunks(from, to, BackfillChunkMonths);
+        if (chunks.Count == 0)
         {
-            logger.LogInformation("EVDS TÜFE: backfill gerekmiyor (son kayıt: {Latest})", latestDate);
+            logger.LogInformation("EVDS TÜFE: tuik backfill gerekmiyor (son tuik: {Latest})", latestTuik);
             return;
         }
 
-        logger.LogInformation("EVDS TÜFE backfill başlıyor: {From} → {To}", from, to);
+        logger.LogInformation(
+            "EVDS TÜFE backfill başlıyor (tuik): {From} → {To} ({Chunks} parça)", from, to, chunks.Count);
 
-        try
+        foreach (var (chunkFrom, chunkTo) in chunks)
         {
-            var rates = await adapter.FetchRangeAsync(from, to, ct);
-            await repository.UpsertInflationRatesAsync(rates, ct);
-            logger.LogInformation("EVDS TÜFE backfill tamamlandı: {Count} ay kaydedildi", rates.Count);
+            if (ct.IsCancellationRequested) break;
+            await RunInflationJobAsync(IngestionJobTypes.InflationBackfill, chunkFrom, chunkTo, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+    }
+
+    /// <summary>
+    /// INGR-012: [from, to] aralığını <paramref name="chunkMonths"/> aylık ardışık dilimlere böler
+    /// (son dilim to'da biter). from > to ise boş liste. Saf fonksiyon — test edilebilir.
+    /// </summary>
+    internal static IReadOnlyList<(DateOnly From, DateOnly To)> ComputeBackfillChunks(
+        DateOnly from, DateOnly to, int chunkMonths)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(chunkMonths, 1);
+        var chunks = new List<(DateOnly, DateOnly)>();
+        var start = from;
+        while (start <= to)
         {
-            logger.LogError(ex, "EVDS TÜFE backfill başarısız ({From}–{To})", from, to);
+            var end = start.AddMonths(chunkMonths - 1);
+            if (end > to) end = to;
+            chunks.Add((start, end));
+            start = end.AddMonths(1);
         }
+        return chunks;
     }
 
     private async Task FetchLatestAsync(CancellationToken ct)
     {
         // Bir önceki ayın verisini çek (TÜİK yayın gecikmesi nedeniyle)
         var targetMonth = new DateOnly(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-1);
+        await RunInflationJobAsync(IngestionJobTypes.InflationDaily, targetMonth, targetMonth, ct);
+    }
 
+    /// <summary>
+    /// INGR-002: fetch + upsert akışını <c>ingestion_jobs</c> yaşam döngüsüyle sarmalar
+    /// (asset_id=null, source=adapter.Source). Job kaydı best-effort'tur — job DB hatası
+    /// asıl ingestion'ı maskelemez ve worker'ı düşürmez (log-and-continue korunur).
+    /// </summary>
+    private async Task RunInflationJobAsync(string jobType, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var job = await TryStartJobAsync(jobType, from, to, ct);
         try
         {
-            var rates = await adapter.FetchRangeAsync(targetMonth, targetMonth, ct);
+            var rates = await adapter.FetchRangeAsync(from, to, ct);
             await repository.UpsertInflationRatesAsync(rates, ct);
+            await TryMarkSuccessAsync(job, rates.Count, ct);
             logger.LogInformation(
-                "EVDS TÜFE aylık güncelleme: {Month:yyyy-MM} için {Count} kayıt",
-                targetMonth, rates.Count);
+                "EVDS TÜFE {JobType} tamamlandı: {From} → {To} ({Count} kayıt)",
+                jobType, from, to, rates.Count);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
         {
-            logger.LogError(ex, "EVDS TÜFE aylık güncelleme başarısız ({Month})", targetMonth);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await TryMarkFailedAsync(job, ex);
+            logger.LogError(ex, "EVDS TÜFE {JobType} başarısız ({From}–{To})", jobType, from, to);
+        }
+    }
+
+    private async Task<IngestionJob?> TryStartJobAsync(
+        string jobType, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        try
+        {
+            // asset_id=null: inflation bir asset değil (INGR-002). source: provenance.
+            return await jobs.StartAsync(assetId: null, jobType, from, to, adapter.Source, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "EVDS ingestion_jobs.StartAsync başarısız ({JobType}) — job kaydı atlanıyor", jobType);
+            return null;
+        }
+    }
+
+    private async Task TryMarkSuccessAsync(IngestionJob? job, int recordsUpserted, CancellationToken ct)
+    {
+        if (job is null) return;
+        try
+        {
+            await jobs.MarkSuccessAsync(job.Id, recordsUpserted, ct);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort telemetri — job güncellemesi başarısız olsa da ingestion başarılı sayılır.
+            logger.LogWarning(ex, "EVDS ingestion_jobs MarkSuccess başarısız: {JobId}", job.Id);
+        }
+    }
+
+    private async Task TryMarkFailedAsync(IngestionJob? job, Exception cause)
+    {
+        if (job is null) return;
+        try
+        {
+            // B-Low-1: failed-status finalize'ı CancellationToken.None ile yaz — shutdown
+            // (iptal) sırasında patlayan bir job'ın "running"da takılı kalmasını önler.
+            await jobs.MarkFailedAsync(job.Id, cause.GetBaseException().Message, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "EVDS ingestion_jobs MarkFailed başarısız: {JobId}", job.Id);
         }
     }
 

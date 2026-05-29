@@ -21,13 +21,22 @@ Tüm build, test ve çalıştırma işlemleri **Docker Compose** üzerinden yap�
 # Kod değişikliğinden sonra image'ı yeniden oluştur ve servisleri başlat
 docker compose build && docker compose up -d
 
-# Test
-docker compose run --rm api dotnet test
+# Test (Faz 3: `tests` compose profili — SDK imajı + repo mount + compose ağı).
+# `api`/`saydin-api` runtime imajı SDK ve test projeleri içermez; `dotnet test` ÇALIŞMAZ.
+docker compose run --rm tests                                   # tüm solution (unit + integration)
+docker compose run --rm tests test tests/Saydin.Api.Tests       # yalnız bir proje
+docker compose run --rm tests test tests/Saydin.Api.IntegrationTests   # gerçek PG/Redis (compose up gerekli)
 ```
 
 **`docker compose run --rm api dotnet build` KULLANMA** — build ve deploy için her zaman `docker compose build && docker compose up -d` kullan.
 
 Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
+
+**NOT (Faz 3):** Migration zinciri yalnız boş volume'da (fresh init) alfabetik + `ON_ERROR_STOP`
+ile çalışır. Bir `.sql` hata verirse zincir DURUR. TimescaleDB hypertable'larında (`activity_logs`)
+compression **enabled** iken `ALTER COLUMN ... TYPE` yasaktır (TS 2.16.1). Bu nedenle compression'ı
+etkileyen kolon değişiklikleri için `008b` (009'dan önce disable) / `013` (012'den sonra re-enable)
+sarmalama deseni kullanılır — yeni `ALTER COLUMN TYPE` eklerken bu pencereyi koru.
 
 ---
 
@@ -44,8 +53,11 @@ durumlarında işlem sonrası bu dokümanı güncelle.
 **Kod değişikliklerini commit etmeden önce mutlaka build ve testleri çalıştır.**
 
 ```bash
-docker compose run --rm api dotnet build
-docker compose run --rm api dotnet test
+# Build doğrulaması (SDK imajı + repo mount):
+docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
+  dotnet build Saydin.Services.sln -c Debug
+# Testler (`tests` compose profili):
+docker compose run --rm tests
 ```
 
 Build veya test başarısız olursa commit atma, önce hatayı düzelt.
@@ -156,6 +168,30 @@ var result = await service.CalculateAsync(ct);
   "SELECT * FROM price_points WHERE asset_id = @assetId"
   ```
 - Dış API isteklerinde timeout zorunludur
+
+### Zaman (TimeProvider) — Faz 3
+
+- API servislerinde `DateTime.UtcNow` / `DateTimeOffset.UtcNow` **doğrudan kullanma** —
+  constructor'a enjekte edilen `TimeProvider` üzerinden `timeProvider.GetUtcNow()` kullan.
+  `TimeProvider.System` singleton kayıtlıdır (Program.cs). Testlerde
+  `Microsoft.Extensions.TimeProvider.Testing.FakeTimeProvider` ile saat dondurulur
+  (gün-dönümü flaky'liği önlenir).
+- PriceIngestion worker'ları şimdilik kapsam dışı (worker zamanlaması test determinizmi gerektirmiyor).
+
+### İstek Bağlamı (IDeviceContext) — Faz 3
+
+- İş service'i arayüzleri (`IWhatIfCalculator`, `IDcaCalculator`, `ISavedScenarioService`,
+  `IAppConfigService`) `string deviceId` parametresi **taşımaz** — device id scoped
+  `IDeviceContext`'ten okunur. `RequireDeviceId` filter doğrulanmış değeri doldurur.
+  `IDeviceContext` **scoped** kayıtlıdır; singleton'a enjekte ETME (cihazlar-arası sızıntı).
+- `IDailyLimitGuard` / `IPlanLimitResolver` altyapı bileşenidir; `deviceId`'yi açık parametre
+  olarak taşımaya devam eder (endpoint'ten `null` user ile çağrılabilir).
+
+### Kod Stili (.editorconfig) — Faz 3
+
+- Kök `.editorconfig` isimlendirme (I-prefix interface, `_camelCase` private field) + format
+  kurallarını **öneri (suggestion)** seviyesinde tutar. `EnforceCodeStyleInBuild` set EDİLMEDİ →
+  build'i kırmaz. XML doc comment zorunluluğu (CS1591) bilinçli olarak kapalıdır.
 
 ---
 

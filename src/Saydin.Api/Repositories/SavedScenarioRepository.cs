@@ -5,7 +5,7 @@ using Saydin.Shared.Entities;
 
 namespace Saydin.Api.Repositories;
 
-public sealed class SavedScenarioRepository(SaydinDbContext context) : ISavedScenarioRepository
+public sealed class SavedScenarioRepository(SaydinDbContext context, TimeProvider timeProvider) : ISavedScenarioRepository
 {
     public async Task<User?> GetUserByDeviceIdAsync(string deviceId, CancellationToken ct)
         => await context.Users
@@ -21,7 +21,7 @@ public sealed class SavedScenarioRepository(SaydinDbContext context) : ISavedSce
         // Premium kullanıcı yarıştan korkmadan reset olmaz: ON CONFLICT DO NOTHING
         // yalnızca yeni satır yazımı iptal eder, var olan satırı değiştirmez.
         var newId = Guid.CreateVersion7();
-        var now   = DateTimeOffset.UtcNow;
+        var now   = timeProvider.GetUtcNow();
 
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"""
@@ -46,7 +46,7 @@ public sealed class SavedScenarioRepository(SaydinDbContext context) : ISavedSce
         // free UPDATE atılır.
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"""
-            UPDATE users SET last_seen_at = {DateTimeOffset.UtcNow} WHERE id = {user.Id}
+            UPDATE users SET last_seen_at = {timeProvider.GetUtcNow()} WHERE id = {user.Id}
             """,
             ct);
     }

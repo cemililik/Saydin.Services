@@ -2,6 +2,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Saydin.Api.Models.Requests;
@@ -23,6 +24,8 @@ public class DcaCalculatorTests
     private readonly IRedisCacheHelper               _cache               = Substitute.For<IRedisCacheHelper>();
     private readonly IAssetNameLocalizer             _assetNameLocalizer  = Substitute.For<IAssetNameLocalizer>();
     private readonly IStringLocalizer<ErrorMessages> _localizer           = Substitute.For<IStringLocalizer<ErrorMessages>>();
+    private readonly IDeviceContext                  _deviceContext       = Substitute.For<IDeviceContext>();
+    private readonly FakeTimeProvider                _timeProvider        = new();
     private readonly DcaCalculator                   _sut;
 
     private const string FreeDeviceId    = "free-device";
@@ -82,6 +85,9 @@ public class DcaCalculatorTests
         _assetNameLocalizer.Localize(Arg.Any<string>(), Arg.Any<string?>())
                            .Returns(ci => (string?)ci[1] ?? (string)ci[0]);
 
+        // F2.2-3: device id artık IDeviceContext'ten; varsayılan = free kullanıcı cihazı.
+        _deviceContext.DeviceId.Returns(FreeDeviceId);
+
         // F2.2-22: Default test PlanOptions free PriceHistoryMonths sınırını kapatır,
         // aksi halde geçmişe ait test BuyDate'leri "extended_history" sebebiyle
         // FeatureDisabled fırlatır.
@@ -93,7 +99,7 @@ public class DcaCalculatorTests
         var options = Microsoft.Extensions.Options.Options.Create(defaultPlans);
         _sut = new DcaCalculator(
             _assetService, _scenarioRepository, _inflationRepository,
-            _dailyLimitGuard, _cache, _assetNameLocalizer,
+            _dailyLimitGuard, _deviceContext, _timeProvider, _cache, _assetNameLocalizer,
             options, _localizer, NullLogger<DcaCalculator>.Instance);
     }
 
@@ -105,7 +111,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(20m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.AssetSymbol.Should().Be("USDTRY");
         result.Period.Should().Be("monthly");
@@ -126,7 +132,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", start, end, 500m, "weekly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.Period.Should().Be("weekly");
         result.TotalPurchases.Should().Be(5);
@@ -138,7 +144,7 @@ public class DcaCalculatorTests
         SetupIncreasingPrices(10m, 2m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.TotalPurchases.Should().Be(6);
         result.TotalInvestedTry.Should().Be(6000m);
@@ -153,7 +159,7 @@ public class DcaCalculatorTests
         SetupDecreasingPrices(20m, 3m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.IsProfit.Should().BeFalse();
         result.ProfitLossTry.Should().BeNegative();
@@ -165,7 +171,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(25m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.AverageCostPerUnit.Should().Be(25m);
     }
@@ -176,7 +182,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 500m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.ChartData.Should().HaveCount(result.TotalPurchases);
     }
@@ -189,7 +195,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", start, end, 100m, "weekly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.TotalPurchases.Should().BeGreaterThan(60);
         result.ChartData.Should().HaveCount(60);
@@ -197,19 +203,9 @@ public class DcaCalculatorTests
 
     // ── Validasyon ───────────────────────────────────────────────────────────
 
-    // P1R-003: Servis katmanı artık deviceId boş/whitespace için `ValidationException`
-    // fırlatıyor (ArgumentException değil); jenerik `ArgumentException` (Redis/EF Core
-    // altyapı hataları) ValidationExceptionHandler tarafından 400'e dönmesin diye.
-    [Fact]
-    public async Task CalculateAsync_EmptyDeviceId_ThrowsValidationException()
-    {
-        var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-
-        var act = () => _sut.CalculateAsync("", request, CancellationToken.None);
-
-        await act.Should().ThrowAsync<ValidationException>()
-                 .Where(ex => ex.Field == "deviceId");
-    }
+    // F2.2-3: deviceId boş/whitespace doğrulaması artık RequireDeviceId endpoint
+    // filter'ında (400 + ProblemDetails). Servis device id'yi IDeviceContext'ten okur;
+    // servis-seviyesi "EmptyDeviceId" testi kaldırıldı (context sözleşmesi DeviceContextTests'te).
 
     // P1R-008 / P1R-017: Hafta sonu / tatil clip ile aynı PriceDate'e iki alım düşerse
     // satır dedup edilir, toplam tutar ve birim cumulative değerler korunur.
@@ -239,7 +235,7 @@ public class DcaCalculatorTests
                      .Returns(EndDate);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         // 6 alım niyetlendi, 2 tanesi aynı güne çakıştı → satır sayısı 5.
         result.Purchases.Should().HaveCount(5);
@@ -262,7 +258,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
         var request = MakeRequest("USDTRY", EndDate, StartDate, 1000m, "monthly");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -274,7 +270,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "daily");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -286,7 +282,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly", amountType: "units");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -302,7 +298,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, amount, "monthly");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>()
                  .Where(ex => ex.Field == nameof(request.PeriodicAmount));
@@ -317,7 +313,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<AssetNotFoundException>();
     }
@@ -340,7 +336,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<PriceNotFoundException>();
     }
@@ -355,7 +351,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", start, end, 100m, "weekly");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -368,7 +364,8 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        await _sut.CalculateAsync(PremiumDeviceId, request, CancellationToken.None);
+        _deviceContext.DeviceId.Returns(PremiumDeviceId);
+        await _sut.CalculateAsync(request, CancellationToken.None);
 
         await _dailyLimitGuard.Received(1)
             .TryAcquireAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
@@ -386,7 +383,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<DailyLimitExceededException>();
         // Quota rejection sonrası release çağırılmamalı (acquire fail oldu, geri verilecek bir şey yok)
@@ -395,7 +392,7 @@ public class DcaCalculatorTests
     }
 
     [Fact]
-    public async Task CalculateAsync_HesapBaşarısız_QuotaReleaseEdilir()
+    public async Task CalculateAsync_CoreCalculationFails_ReleasesQuota()
     {
         _assetService.GetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns((Asset?)null);
@@ -403,7 +400,7 @@ public class DcaCalculatorTests
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<AssetNotFoundException>();
         await _dailyLimitGuard.Received(1)
@@ -416,7 +413,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
     }
@@ -435,7 +432,7 @@ public class DcaCalculatorTests
             .Returns((100m, startMonth, 120m, endMonth));
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly", includeInflation: true);
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.CumulativeInflationPercent.Should().BeApproximately(20m, 0.01m);
         result.RealProfitLossPercent.Should().NotBeNull();
@@ -447,7 +444,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly", includeInflation: false);
-        await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        await _sut.CalculateAsync(request, CancellationToken.None);
 
         await _inflationRepository.DidNotReceive()
             .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
@@ -464,7 +461,7 @@ public class DcaCalculatorTests
                      .Returns(latestDate);
 
         var request = MakeRequest("USDTRY", StartDate, null, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.EndDate.Should().Be(latestDate);
     }
@@ -475,7 +472,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("usdtry", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.AssetSymbol.Should().Be("USDTRY");
     }
@@ -486,7 +483,7 @@ public class DcaCalculatorTests
         SetupConstantPrice(10m);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.Purchases.Should().NotBeEmpty();
         result.Purchases[0].CumulativeCostTry.Should().Be(1000m);
@@ -511,7 +508,7 @@ public class DcaCalculatorTests
               .Returns(cached);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.TotalPurchases.Should().Be(6);
         result.ProfitLossPercent.Should().Be(20m);
@@ -530,13 +527,13 @@ public class DcaCalculatorTests
         };
         var sut = new DcaCalculator(
             _assetService, _scenarioRepository, _inflationRepository,
-            _dailyLimitGuard, _cache, _assetNameLocalizer,
+            _dailyLimitGuard, _deviceContext, _timeProvider, _cache, _assetNameLocalizer,
             Microsoft.Extensions.Options.Options.Create(planOptions),
             _localizer, NullLogger<DcaCalculator>.Instance);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
 
-        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<FeatureDisabledException>();
     }
@@ -550,13 +547,13 @@ public class DcaCalculatorTests
         };
         var sut = new DcaCalculator(
             _assetService, _scenarioRepository, _inflationRepository,
-            _dailyLimitGuard, _cache, _assetNameLocalizer,
+            _dailyLimitGuard, _deviceContext, _timeProvider, _cache, _assetNameLocalizer,
             Microsoft.Extensions.Options.Options.Create(planOptions),
             _localizer, NullLogger<DcaCalculator>.Instance);
 
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly", includeInflation: true);
 
-        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<FeatureDisabledException>();
     }

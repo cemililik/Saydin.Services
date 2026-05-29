@@ -5,5 +5,6 @@ namespace Saydin.Api.Services;
 
 public interface IDcaCalculator
 {
-    Task<DcaResponse> CalculateAsync(string deviceId, DcaRequest request, CancellationToken ct);
+    // F2.2-3: deviceId artık IDeviceContext üzerinden (scoped) okunur.
+    Task<DcaResponse> CalculateAsync(DcaRequest request, CancellationToken ct);
 }

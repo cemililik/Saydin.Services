@@ -379,7 +379,7 @@ public abstract class BaseAssetWorker(
         // cycle'da tekrar denenir. Loglanır, ama worker'ın tamamen düşmesini engeller.
         try
         {
-            return await jobs.StartAsync(asset.Id, jobType, from, to, ct);
+            return await jobs.StartAsync(asset.Id, jobType, from, to, asset.Source, ct);
         }
         catch (OperationCanceledException)
         {

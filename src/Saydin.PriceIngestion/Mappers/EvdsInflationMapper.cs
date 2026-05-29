@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Mappers;
@@ -15,7 +16,7 @@ public static class EvdsInflationMapper
     // TP.FG.J0 → EVDS JSON field: TP_FG_J0
     private const string FieldName = "TP_FG_J0";
 
-    public static IReadOnlyList<InflationRate> Map(string json, string source = "tuik")
+    public static IReadOnlyList<InflationRate> Map(string json, string source = InflationSources.Tuik)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -48,10 +49,11 @@ public static class EvdsInflationMapper
             {
                 PeriodDate = periodDate,
                 IndexValue = indexValue,
-                // INGR-001: source parametrik — adapter `Source => "evds"` ile aynı
-                // değer geçilmesi tutarsızlığı kapatır. Default "tuik" mevcut data ile
-                // geriye uyumluluk için bırakıldı; caller EvdsInflationAdapter
-                // `EvdsInflationMapper.Map(json, source: Source)` ile doğru değeri verir.
+                // INGR-010: source = veri KÖKENİ (data origin). EVDS adaptörü
+                // InflationSources.Tuik geçirir (TP.FG.J0 = TÜİK TÜFE serisi). Dış-API
+                // kanal kimliği "evds" ise ingestion_jobs.source'ta tutulur (kısıtsız).
+                // chk_inflation_rates_source + composite PK yalnız 'tuik'/'seed-approximation'
+                // kabul eder; buraya "evds" yazmak CHECK ihlali verir.
                 Source     = source,
                 CreatedAt  = now,
                 UpdatedAt  = now,

@@ -1,0 +1,15 @@
+---
+# Codacy yapılandırması.
+#
+# PostgreSQL/TimescaleDB migration .sql dosyaları Codacy SQL analizöründen HARİÇ tutulur:
+# analizör T-SQL (SQL Server) lehçesi kuralları uyguluyor — örn. "Expected SET QUOTED_IDENTIFIER
+# ON near top of file" (yalnız SQL Server'a özgü; PostgreSQL/psql'de geçersiz). PostgreSQL için
+# tamamen YANLIŞ-POZİTİF. (Not: psql `\set` meta-komutu da analizörü kırıyordu; o satırlar
+# zaten kaldırıldı — ama T-SQL lehçe uyumsuzluğu sürdüğünden exclusion gereklidir.)
+# Migration'lar zaten (a) kod review, (b) fresh-init doğrulaması (down -v && up -d → 001→013),
+# (c) Sonar PL/SQL analizöründen hariç ve (d) .coderabbit.yaml path filtresi ile denetleniyor.
+#
+# NOT: Yalnız *.sql hariç tutulur; 012b_create_exporter_role.sh HARİÇ DEĞİL → ShellCheck devam eder.
+exclude_paths:
+  - "infrastructure/postgres/migrations/*.sql"
+  - "infrastructure/postgres/migrations/**/*.sql"

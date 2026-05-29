@@ -7,16 +7,18 @@ namespace Saydin.Api.Services;
 
 public interface IAppConfigService
 {
-    Task<AppConfigResponse> GetConfigAsync(string deviceId, CancellationToken ct);
+    // F2.2-3: deviceId artık IDeviceContext üzerinden (scoped) okunur.
+    Task<AppConfigResponse> GetConfigAsync(CancellationToken ct);
 }
 
 public sealed class AppConfigService(
     ISavedScenarioRepository scenarioRepository,
+    IDeviceContext deviceContext,
     IOptions<PlanOptions> options) : IAppConfigService
 {
-    public async Task<AppConfigResponse> GetConfigAsync(string deviceId, CancellationToken ct)
+    public async Task<AppConfigResponse> GetConfigAsync(CancellationToken ct)
     {
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
+        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceContext.DeviceId, ct);
         var tier = user?.Tier ?? "free";
         var tierOptions = options.Value.GetTierOptions(tier);
 

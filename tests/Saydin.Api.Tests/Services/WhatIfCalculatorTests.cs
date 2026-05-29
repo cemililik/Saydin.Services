@@ -2,6 +2,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Saydin.Api.Models.Requests;
@@ -23,6 +24,8 @@ public class WhatIfCalculatorTests
     private readonly IRedisCacheHelper            _cache              = Substitute.For<IRedisCacheHelper>();
     private readonly IAssetNameLocalizer          _assetNameLocalizer = Substitute.For<IAssetNameLocalizer>();
     private readonly IStringLocalizer<ErrorMessages> _localizer       = Substitute.For<IStringLocalizer<ErrorMessages>>();
+    private readonly IDeviceContext                  _deviceContext   = Substitute.For<IDeviceContext>();
+    private readonly FakeTimeProvider                _timeProvider    = new();
     private readonly WhatIfCalculator             _sut;
 
     private const string DeviceId  = "test-device-001";
@@ -101,12 +104,17 @@ public class WhatIfCalculatorTests
             Free    = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } },
             Premium = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } }
         };
+        // F2.2-3: device id artık IDeviceContext'ten; varsayılan = free kullanıcı cihazı.
+        _deviceContext.DeviceId.Returns(FreeDeviceId);
+
         var options = Microsoft.Extensions.Options.Options.Create(defaultPlans);
         _sut = new WhatIfCalculator(
             _assetService,
             _scenarioRepository,
             _inflationRepository,
             _dailyLimitGuard,
+            _deviceContext,
+            _timeProvider,
             _cache,
             _assetNameLocalizer,
             options,
@@ -123,7 +131,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try");
 
-        var result = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.AssetSymbol.Should().Be("USDTRY");
         result.BuyPrice.Should().Be(5.95m);
@@ -145,7 +153,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 100m, "units");
 
-        var result = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.UnitsAcquired.Should().Be(100m);
         result.InitialValueTry.Should().Be(Math.Round(100m * 5.95m, 2, MidpointRounding.AwayFromZero));
@@ -164,7 +172,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("XAUTRY", BuyDate, SellDate, 50m, "grams");
 
-        var result = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.UnitsAcquired.Should().Be(50m);
         result.InitialValueTry.Should().Be(Math.Round(50m * 1000m, 2, MidpointRounding.AwayFromZero));
@@ -177,7 +185,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 10m, sellPrice: 5m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.IsProfit.Should().BeFalse();
         result.ProfitLossTry.Should().BeNegative();
@@ -190,7 +198,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 10m, sellPrice: 10m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.IsProfit.Should().BeTrue();
         result.ProfitLossTry.Should().Be(0m);
@@ -204,27 +212,17 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 30m, sellDate: today);
 
         var request = new WhatIfRequest("USDTRY", BuyDate, SellDate: null, 10_000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.SellDate.Should().Be(today);
     }
 
     // ── Validasyon ───────────────────────────────────────────────────────────
 
-    // P1R-003: deviceId boş/whitespace artık `ValidationException` üretir (handler
-    // yalnızca domain validation ile uğraşır, jenerik ArgumentException 500'e gider).
-    [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    public async Task CalculateAsync_EmptyDeviceId_ThrowsValidationException(string deviceId)
-    {
-        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-
-        var act = () => _sut.CalculateAsync(deviceId, request, CancellationToken.None);
-
-        await act.Should().ThrowAsync<ValidationException>()
-                 .Where(ex => ex.Field == "deviceId");
-    }
+    // F2.2-3: deviceId boş/whitespace doğrulaması artık servis katmanında DEĞİL —
+    // RequireDeviceId endpoint filter'ında yapılır (400 + ProblemDetails). Servis,
+    // device id'yi scoped IDeviceContext'ten okur. Önceki "CalculateAsync_EmptyDeviceId"
+    // servis-seviyesi testi bu nedenle kaldırıldı; context sözleşmesi DeviceContextTests'te.
 
     [Fact]
     public async Task CalculateAsync_BuyDateAfterSellDate_ThrowsValidationException()
@@ -232,7 +230,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
         var request = MakeRequest("USDTRY", SellDate, BuyDate, 1000m, "try");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>()
                  .WithMessage("*BuyDateAfterSellDate*");
@@ -245,7 +243,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "eur");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>()
                  .WithMessage("*InvalidAmountType*");
@@ -260,7 +258,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<AssetNotFoundException>();
     }
@@ -272,7 +270,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<PriceNotFoundException>();
     }
@@ -286,7 +284,8 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        await _sut.CalculateAsync(PremiumDeviceId, request, CancellationToken.None);
+        _deviceContext.DeviceId.Returns(PremiumDeviceId);
+        await _sut.CalculateAsync(request, CancellationToken.None);
 
         await _dailyLimitGuard.Received(1)
             .TryAcquireAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
@@ -301,7 +300,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var act     = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act     = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().NotThrowAsync<DailyLimitExceededException>();
     }
@@ -316,7 +315,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<DailyLimitExceededException>()
                  .Where(ex => ex.Limit == 20);
@@ -327,7 +326,7 @@ public class WhatIfCalculatorTests
     }
 
     [Fact]
-    public async Task CalculateAsync_HesapBaşarısız_QuotaReleaseEdilir()
+    public async Task CalculateAsync_CoreCalculationFails_ReleasesQuota()
     {
         // İç hesap sürecinde fırlatılan exception kotanın iade edilmesini tetiklemeli
         // ("başarısız hesap kotadan düşmesin", review H-6).
@@ -337,7 +336,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<AssetNotFoundException>();
         await _dailyLimitGuard.Received(1)
@@ -350,7 +349,8 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        await _sut.CalculateAsync(DeviceId, request, CancellationToken.None);
+        _deviceContext.DeviceId.Returns(DeviceId);
+        await _sut.CalculateAsync(request, CancellationToken.None);
 
         await _dailyLimitGuard.Received(1)
             .TryAcquireAsync(null, DeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
@@ -365,7 +365,7 @@ public class WhatIfCalculatorTests
         // Varsayılan mock davranışı: exception fırlatmaz.
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().NotThrowAsync();
     }
@@ -389,7 +389,7 @@ public class WhatIfCalculatorTests
               .Returns(cached);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1m, "units");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.BuyPrice.Should().Be(5.95m);
         await _assetService.DidNotReceive().GetPriceAsync(
@@ -404,7 +404,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("usdtry", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.AssetSymbol.Should().Be("USDTRY");
         await _assetService.Received().GetNearestPriceAsync("USDTRY", Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
@@ -419,7 +419,7 @@ public class WhatIfCalculatorTests
         SetupPriceRange(30);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.PriceHistory.Should().HaveCount(30);
     }
@@ -431,7 +431,7 @@ public class WhatIfCalculatorTests
         SetupPriceRange(100);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.PriceHistory.Should().HaveCount(60);
     }
@@ -456,7 +456,7 @@ public class WhatIfCalculatorTests
                      .Returns(points.AsReadOnly());
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.PriceHistory.Should().HaveCount(60);
         result.PriceHistory[0].Date.Should().Be(points.First().PriceDate);
@@ -475,7 +475,7 @@ public class WhatIfCalculatorTests
                      .Returns(Array.Empty<PricePoint>().ToList().AsReadOnly());
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.PriceHistory.Should().BeEmpty();
     }
@@ -491,7 +491,7 @@ public class WhatIfCalculatorTests
                      .ThrowsAsync(new TimeoutException("Bağlantı zaman aşımı"));
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.PriceHistory.Should().BeEmpty();
     }
@@ -562,7 +562,7 @@ public class WhatIfCalculatorTests
             buyDate: saturday, actualBuyDate: friday);
 
         var request = MakeRequest("USDTRY", saturday, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.ActualBuyDate.Should().Be(friday);
         result.ActualSellDate.Should().BeNull();
@@ -578,7 +578,7 @@ public class WhatIfCalculatorTests
             sellDate: sunday, actualSellDate: friday);
 
         var request = MakeRequest("USDTRY", BuyDate, sunday, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.ActualSellDate.Should().Be(friday);
         result.ActualBuyDate.Should().BeNull();
@@ -590,7 +590,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.ActualBuyDate.Should().BeNull();
         result.ActualSellDate.Should().BeNull();
@@ -610,7 +610,7 @@ public class WhatIfCalculatorTests
             .Returns((100m, buyMonth, 150m, sellMonth));
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.CumulativeInflationPercent.Should().BeApproximately(50m, 0.01m);
         result.RealProfitLossPercent.Should().NotBeNull();
@@ -634,7 +634,7 @@ public class WhatIfCalculatorTests
             .Returns((100m, buyMonth, 140m, laggedMonth));
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.InflationDataAsOf.Should().Be(laggedMonth);
         result.RealProfitLossPercent.Should().NotBeNull();
@@ -646,7 +646,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
-        var result  = await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.RealProfitLossPercent.Should().BeNull();
         result.CumulativeInflationPercent.Should().BeNull();
@@ -659,7 +659,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: false);
-        await _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        await _sut.CalculateAsync(request, CancellationToken.None);
 
         await _inflationRepository.DidNotReceive()
             .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
@@ -675,7 +675,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 100_000m, "try");
-        var result  = await _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CalculateReverseAsync(request, CancellationToken.None);
 
         result.AssetSymbol.Should().Be("USDTRY");
         result.BuyPrice.Should().Be(5.95m);
@@ -699,7 +699,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "eur");
 
-        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateReverseAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -711,7 +711,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateReverseAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<PriceNotFoundException>();
     }
@@ -722,7 +722,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
         var request = MakeReverseRequest("USDTRY", SellDate, BuyDate, 1000m, "try");
 
-        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateReverseAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -740,7 +740,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try", includeInflation: true);
 
-        var act = () => sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<FeatureDisabledException>();
     }
@@ -756,7 +756,7 @@ public class WhatIfCalculatorTests
 
         var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try", includeInflation: true);
 
-        var act = () => sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => sut.CalculateReverseAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<FeatureDisabledException>();
     }
@@ -772,7 +772,7 @@ public class WhatIfCalculatorTests
 
         var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try");
 
-        var act = () => sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => sut.CompareAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<FeatureDisabledException>();
     }
@@ -802,7 +802,7 @@ public class WhatIfCalculatorTests
                      .Returns(new Asset { Id = Guid.NewGuid(), Symbol = "BTC", DisplayName = "Bitcoin",
                                           Category = AssetCategory.Crypto, Source = "coingecko", IsActive = true });
 
-        var result = await sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var result = await sut.CompareAsync(request, CancellationToken.None);
 
         // Inflation talep edildi ama disabled → InflationRepository hiç çağrılmamalı
         await _inflationRepository.DidNotReceive()
@@ -821,7 +821,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
         var request = MakeRequest("USDTRY", BuyDate, SellDate, amount, "try");
 
-        var act = () => _sut.CalculateAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>()
                  .Where(ex => ex.Field == nameof(request.Amount));
@@ -835,7 +835,7 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
         var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, target, "try");
 
-        var act = () => _sut.CalculateReverseAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CalculateReverseAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>()
                  .Where(ex => ex.Field == nameof(request.TargetAmount));
@@ -846,7 +846,7 @@ public class WhatIfCalculatorTests
     {
         var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, -100m, "try");
 
-        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CompareAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>()
                  .Where(ex => ex.Field == nameof(request.Amount));
@@ -885,7 +885,7 @@ public class WhatIfCalculatorTests
         var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try");
 
         // Act
-        var result = await _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var result = await _sut.CompareAsync(request, CancellationToken.None);
 
         // Assert
         result.Results.Should().HaveCount(2);
@@ -897,6 +897,38 @@ public class WhatIfCalculatorTests
         result.Results[0].Calculation.ProfitLossPercent.Should().BeGreaterThan(
             result.Results[1].Calculation.ProfitLossPercent);
         result.Results[1].Rank.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task CompareAsync_ComputesSymbolsSequentially_NoConcurrentRepositoryAccess()
+    {
+        // CONC-001 guard: Önceki sürüm Task.WhenAll ile paralel hesaplıyordu; tüm task'lar aynı
+        // scoped SaydinDbContext'i paylaştığı için soğuk cache'te eşzamanlı EF sorguları
+        // "second operation on this context" (500) veriyordu. Mock'lar thread-safe olduğundan
+        // sonuç testleri bunu yakalamaz; bu test inflation repo'ya (cache'siz, her sembolde
+        // çağrılır) re-entrancy dedektörü koyarak hesabın ARDIŞIK yapıldığını (overlap yok) doğrular.
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        _assetService.GetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(UsdTry);
+
+        var inFlight = 0;
+        var overlapped = false;
+        _inflationRepository
+            .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns(async _ =>
+            {
+                if (Interlocked.Increment(ref inFlight) > 1) overlapped = true;
+                await Task.Delay(25);
+                Interlocked.Decrement(ref inFlight);
+                return ((decimal?)null, (DateOnly?)null, (decimal?)null, (DateOnly?)null);
+            });
+
+        var request = new CompareRequest(
+            ["USDTRY", "EURTRY", "GBPTRY"], BuyDate, SellDate, 1000m, "try", IncludeInflation: true);
+
+        await _sut.CompareAsync(request, CancellationToken.None);
+
+        overlapped.Should().BeFalse(
+            "CompareAsync sembolleri ardışık hesaplamalı — paralel hesap paylaşılan DbContext'i çökertir (CONC-001)");
     }
 
     // P1R-014: Multi-symbol ranking — 3, 4, 5 sembol için Rank pozisyonları doğru;
@@ -937,7 +969,7 @@ public class WhatIfCalculatorTests
 
         var request = new CompareRequest(symbols, BuyDate, SellDate, 1000m, "try");
 
-        var result = await _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var result = await _sut.CompareAsync(request, CancellationToken.None);
 
         result.Results.Should().HaveCount(symbolCount);
 
@@ -981,7 +1013,7 @@ public class WhatIfCalculatorTests
                      .Returns(SellDate);
 
         var request = new CompareRequest(["AAA", "BBB"], BuyDate, SellDate, 1000m, "try");
-        var result  = await _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var result  = await _sut.CompareAsync(request, CancellationToken.None);
 
         result.Results.Select(r => r.Rank).Should().Equal(1, 2);
         // Eşit ProfitLossPercent → her iki sembol de aynı yüzdeye sahip olmalı.
@@ -996,7 +1028,7 @@ public class WhatIfCalculatorTests
     {
         var request = new CompareRequest(["USDTRY", "USDTRY"], BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CompareAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -1008,7 +1040,7 @@ public class WhatIfCalculatorTests
             ["USDTRY", "EURTRY", "BTC", "ETH", "XAU_TRY_GRAM", "THYAO"],
             BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CompareAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -1018,7 +1050,7 @@ public class WhatIfCalculatorTests
     {
         var request = new CompareRequest(null!, BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CompareAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -1029,9 +1061,48 @@ public class WhatIfCalculatorTests
         var request = new CompareRequest(
             ["usdtry", "USDTRY", "Usdtry"], BuyDate, SellDate, 1000m, "try");
 
-        var act = () => _sut.CompareAsync(FreeDeviceId, request, CancellationToken.None);
+        var act = () => _sut.CompareAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
+    }
+
+    // ── PriceHistoryMonths penceresi (C-Low-2: kontrollü saat / TimeProvider) ────────
+
+    [Fact]
+    public async Task CalculateAsync_BuyDateBeforeHistoryWindow_ThrowsFeatureDisabled()
+    {
+        // TimeProvider'ın deterministik kıldığı davranış: clock=2026-05-29, Free penceresi=6 ay
+        // → en erken izinli ~2025-11-29. BuyDate 2025-01-01 pencereden eski → extended_history.
+        _timeProvider.SetUtcNow(new DateTimeOffset(2026, 5, 29, 0, 0, 0, TimeSpan.Zero));
+        var sut = CreateSutWithOptions(new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 6 } },
+        });
+
+        var request = MakeRequest("USDTRY", new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1), 1000m, "try");
+
+        var act = () => sut.CalculateAsync(request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<FeatureDisabledException>()
+                 .Where(ex => ex.FeatureKey == "extended_history");
+    }
+
+    [Fact]
+    public async Task CalculateAsync_BuyDateWithinHistoryWindow_DoesNotThrowFeatureDisabled()
+    {
+        _timeProvider.SetUtcNow(new DateTimeOffset(2026, 5, 29, 0, 0, 0, TimeSpan.Zero));
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        var sut = CreateSutWithOptions(new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 6 } },
+        });
+
+        // BuyDate pencere içinde (2026-03-01 > ~2025-11-29) → window guard tetiklenmez.
+        var request = MakeRequest("USDTRY", new DateOnly(2026, 3, 1), new DateOnly(2026, 4, 1), 1000m, "try");
+
+        var act = () => sut.CalculateAsync(request, CancellationToken.None);
+
+        await act.Should().NotThrowAsync<FeatureDisabledException>();
     }
 
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────
@@ -1040,7 +1111,7 @@ public class WhatIfCalculatorTests
     {
         return new WhatIfCalculator(
             _assetService, _scenarioRepository, _inflationRepository,
-            _dailyLimitGuard, _cache, _assetNameLocalizer,
+            _dailyLimitGuard, _deviceContext, _timeProvider, _cache, _assetNameLocalizer,
             Microsoft.Extensions.Options.Options.Create(planOptions),
             _localizer, NullLogger<WhatIfCalculator>.Instance);
     }
