@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Workers;
@@ -67,26 +68,59 @@ public sealed class EvdsInflationWorker(
         }
     }
 
+    // INGR-012: İlk backfill 20 yılı kapsayabilir. EVDS çok-yıllı aralık limitlerine karşı
+    // güvende olmak için aralık bu kadar aylık chunk'lara bölünür (her chunk = ayrı job + tek
+    // EVDS çağrısı). 60 ay = 5 yıl: tek istekte makul, 20 yıl ~4 chunk.
+    private const int BackfillChunkMonths = 60;
+
     private async Task BackfillAsync(CancellationToken ct)
     {
-        var latestDate = await repository.GetLatestInflationDateAsync(ct);
+        // INGR-012: anchor = en son GERÇEK tuik tarihi (tüm kaynakların max'ı DEĞİL). Seed
+        // (source='seed-approximation') 2010→2025'i kapladığından max-all anchor'ı gerçek
+        // TÜİK'in tarihsel aylara hiç yazılmamasına yol açıyordu → reel-getiri seed'de donuyordu.
+        // tuik-anchor ile EVDS, tuik'in bittiği yerden (ilk çalıştırmada BackfillStartDate'ten)
+        // devam eder; composite PK sayesinde tuik satırları seed'in yanında durur, okuma tuik'i seçer.
+        var latestTuik = await repository.GetLatestInflationDateAsync(InflationSources.Tuik, ct);
 
-        // Bir sonraki eksik aydan başla
-        var from = latestDate.HasValue
-            ? latestDate.Value.AddMonths(1)
-            : BackfillStartDate;
-
+        var from = latestTuik?.AddMonths(1) ?? BackfillStartDate;
         // Şu anki ay henüz yayınlanmamış olabilir; bir önceki aya kadar al
         var to = new DateOnly(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-1);
 
-        if (from > to)
+        var chunks = ComputeBackfillChunks(from, to, BackfillChunkMonths);
+        if (chunks.Count == 0)
         {
-            logger.LogInformation("EVDS TÜFE: backfill gerekmiyor (son kayıt: {Latest})", latestDate);
+            logger.LogInformation("EVDS TÜFE: tuik backfill gerekmiyor (son tuik: {Latest})", latestTuik);
             return;
         }
 
-        logger.LogInformation("EVDS TÜFE backfill başlıyor: {From} → {To}", from, to);
-        await RunInflationJobAsync(IngestionJobTypes.InflationBackfill, from, to, ct);
+        logger.LogInformation(
+            "EVDS TÜFE backfill başlıyor (tuik): {From} → {To} ({Chunks} parça)", from, to, chunks.Count);
+
+        foreach (var (chunkFrom, chunkTo) in chunks)
+        {
+            if (ct.IsCancellationRequested) break;
+            await RunInflationJobAsync(IngestionJobTypes.InflationBackfill, chunkFrom, chunkTo, ct);
+        }
+    }
+
+    /// <summary>
+    /// INGR-012: [from, to] aralığını <paramref name="chunkMonths"/> aylık ardışık dilimlere böler
+    /// (son dilim to'da biter). from > to ise boş liste. Saf fonksiyon — test edilebilir.
+    /// </summary>
+    internal static IReadOnlyList<(DateOnly From, DateOnly To)> ComputeBackfillChunks(
+        DateOnly from, DateOnly to, int chunkMonths)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(chunkMonths, 1);
+        var chunks = new List<(DateOnly, DateOnly)>();
+        var start = from;
+        while (start <= to)
+        {
+            var end = start.AddMonths(chunkMonths - 1);
+            if (end > to) end = to;
+            chunks.Add((start, end));
+            start = end.AddMonths(1);
+        }
+        return chunks;
     }
 
     private async Task FetchLatestAsync(CancellationToken ct)
