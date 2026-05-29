@@ -392,7 +392,7 @@ public class DcaCalculatorTests
     }
 
     [Fact]
-    public async Task CalculateAsync_HesapBaşarısız_QuotaReleaseEdilir()
+    public async Task CalculateAsync_CoreCalculationFails_ReleasesQuota()
     {
         _assetService.GetBySymbolAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns((Asset?)null);

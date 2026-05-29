@@ -326,7 +326,7 @@ public class WhatIfCalculatorTests
     }
 
     [Fact]
-    public async Task CalculateAsync_HesapBaşarısız_QuotaReleaseEdilir()
+    public async Task CalculateAsync_CoreCalculationFails_ReleasesQuota()
     {
         // İç hesap sürecinde fırlatılan exception kotanın iade edilmesini tetiklemeli
         // ("başarısız hesap kotadan düşmesin", review H-6).
@@ -1032,6 +1032,45 @@ public class WhatIfCalculatorTests
         var act = () => _sut.CompareAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<ValidationException>();
+    }
+
+    // ── PriceHistoryMonths penceresi (C-Low-2: kontrollü saat / TimeProvider) ────────
+
+    [Fact]
+    public async Task CalculateAsync_BuyDateBeforeHistoryWindow_ThrowsFeatureDisabled()
+    {
+        // TimeProvider'ın deterministik kıldığı davranış: clock=2026-05-29, Free penceresi=6 ay
+        // → en erken izinli ~2025-11-29. BuyDate 2025-01-01 pencereden eski → extended_history.
+        _timeProvider.SetUtcNow(new DateTimeOffset(2026, 5, 29, 0, 0, 0, TimeSpan.Zero));
+        var sut = CreateSutWithOptions(new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 6 } },
+        });
+
+        var request = MakeRequest("USDTRY", new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1), 1000m, "try");
+
+        var act = () => sut.CalculateAsync(request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<FeatureDisabledException>()
+                 .Where(ex => ex.FeatureKey == "extended_history");
+    }
+
+    [Fact]
+    public async Task CalculateAsync_BuyDateWithinHistoryWindow_DoesNotThrowFeatureDisabled()
+    {
+        _timeProvider.SetUtcNow(new DateTimeOffset(2026, 5, 29, 0, 0, 0, TimeSpan.Zero));
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        var sut = CreateSutWithOptions(new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 6 } },
+        });
+
+        // BuyDate pencere içinde (2026-03-01 > ~2025-11-29) → window guard tetiklenmez.
+        var request = MakeRequest("USDTRY", new DateOnly(2026, 3, 1), new DateOnly(2026, 4, 1), 1000m, "try");
+
+        var act = () => sut.CalculateAsync(request, CancellationToken.None);
+
+        await act.Should().NotThrowAsync<FeatureDisabledException>();
     }
 
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────

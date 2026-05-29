@@ -58,4 +58,24 @@ public class InflationRepositoryIntegrationTests(DatabaseFixture db)
                 .ExecuteDeleteAsync();
         }
     }
+
+    [SkippableFact]
+    public async Task Insert_WithChannelIdentitySource_IsRejectedByCheckConstraint()
+    {
+        // INGR-010 regresyon koruması (DB seviyesi): inflation_rates.source DATA kökenidir;
+        // chk_inflation_rates_source yalnız 'tuik'/'seed-approximation' kabul eder. Kanal
+        // kimliği "evds" buraya yazılırsa DB reddetmeli (EVDS worker artık Tuik yazıyor).
+        Skip.IfNot(db.Available, db.SkipReason);
+
+        await using var ctx = db.CreateContext();
+        ctx.InflationRates.Add(new InflationRate
+        {
+            PeriodDate = new DateOnly(2099, 11, 1), IndexValue = 1m, Source = "evds",
+        });
+
+        var act = () => ctx.SaveChangesAsync();
+
+        // DbUpdateException → inner PostgresException SqlState 23514 (check_violation).
+        await act.Should().ThrowAsync<DbUpdateException>();
+    }
 }

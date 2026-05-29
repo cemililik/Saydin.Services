@@ -1,3 +1,5 @@
+-- INFR-009: hata durumunda init zinciri dursun (yeni migration'larda repo-içi garanti).
+\set ON_ERROR_STOP on
 -- ============================================================
 -- Migration 013: activity_logs compression'ını GERİ AÇ (008b'nin kapattığını restore et)
 --

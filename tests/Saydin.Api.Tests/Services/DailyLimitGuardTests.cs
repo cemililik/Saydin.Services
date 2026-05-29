@@ -293,10 +293,13 @@ public class DailyLimitGuardTests
 
     // ── BuildUsageKey ─────────────────────────────────────────────────────
 
+    // C-Low-1: BuildUsageKey artık `now` ZORUNLU alır — sabit timestamp ile deterministik.
+    private static readonly DateTime FixedNow = new(2026, 5, 29, 12, 0, 0, DateTimeKind.Utc);
+
     [Fact]
     public void BuildUsageKey_WithUser_UsesUserId()
     {
-        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "some-device", UsagePrefix);
+        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "some-device", UsagePrefix, FixedNow);
 
         key.Should().StartWith(UsagePrefix);
         key.Should().Contain(FreeUser.Id.ToString());
@@ -306,22 +309,19 @@ public class DailyLimitGuardTests
     [Fact]
     public void BuildUsageKey_WithoutUser_UsesDeviceId()
     {
-        var key = DailyLimitGuard.BuildUsageKey(null, DeviceId, UsagePrefix);
+        var key = DailyLimitGuard.BuildUsageKey(null, DeviceId, UsagePrefix, FixedNow);
 
         key.Should().StartWith(UsagePrefix);
         key.Should().Contain(DeviceId);
     }
 
     [Fact]
-    public void BuildUsageKey_ContainsCurrentDate()
+    public void BuildUsageKey_UsesProvidedDate()
     {
-        // UTC gece-yarısı sınırında flake olmaması için: key oluşturulduktan sonra UTC tarihi
-        // tekrar oku ve "key oluşmadan önceki gün VEYA şu anki gün" şeklinde tolerans bırak.
-        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "device", UsagePrefix);
-        var nowAfter = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        var nowAfterMinusOne = DateTime.UtcNow.AddDays(-1).ToString("yyyy-MM-dd");
+        // Sağlanan `now`'ın tarihi key'e birebir yansır — gerçek-saat toleransı yok.
+        var key = DailyLimitGuard.BuildUsageKey(FreeUser, "device", UsagePrefix, FixedNow);
 
-        key.Should().Match(k => k.EndsWith(nowAfter) || k.EndsWith(nowAfterMinusOne));
+        key.Should().EndWith("2026-05-29");
     }
 
     // ── TryAcquireAsync / ReleaseAsync (Faz 0 follow-up #2) ───────────────

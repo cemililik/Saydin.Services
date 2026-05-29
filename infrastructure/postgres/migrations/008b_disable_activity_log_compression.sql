@@ -1,3 +1,6 @@
+-- INFR-009: hata durumunda zincir dursun (entrypoint -v ON_ERROR_STOP=1 verir; yeni
+-- migration'larda repo-içi garanti için açıkça da set ediyoruz).
+\set ON_ERROR_STOP on
 -- ============================================================
 -- Migration 008b: activity_logs compression'ı GEÇİCİ olarak kapat
 --

@@ -1,3 +1,5 @@
+-- INFR-009: hata durumunda init zinciri dursun (yeni migration'larda repo-içi garanti).
+\set ON_ERROR_STOP on
 -- ============================================================
 -- Migration 012: Faz 3 — Schema (inflation source, ingestion job audit)
 --

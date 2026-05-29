@@ -119,7 +119,7 @@ public sealed class EvdsInflationWorker(
         }
         catch (Exception ex)
         {
-            await TryMarkFailedAsync(job, ex, ct);
+            await TryMarkFailedAsync(job, ex);
             logger.LogError(ex, "EVDS TÜFE {JobType} başarısız ({From}–{To})", jobType, from, to);
         }
     }
@@ -157,12 +157,14 @@ public sealed class EvdsInflationWorker(
         }
     }
 
-    private async Task TryMarkFailedAsync(IngestionJob? job, Exception cause, CancellationToken ct)
+    private async Task TryMarkFailedAsync(IngestionJob? job, Exception cause)
     {
         if (job is null) return;
         try
         {
-            await jobs.MarkFailedAsync(job.Id, cause.GetBaseException().Message, ct);
+            // B-Low-1: failed-status finalize'ı CancellationToken.None ile yaz — shutdown
+            // (iptal) sırasında patlayan bir job'ın "running"da takılı kalmasını önler.
+            await jobs.MarkFailedAsync(job.Id, cause.GetBaseException().Message, CancellationToken.None);
         }
         catch (Exception ex)
         {

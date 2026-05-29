@@ -1,5 +1,6 @@
 using FluentAssertions;
 using Saydin.PriceIngestion.Mappers;
+using Saydin.Shared.Constants;
 
 namespace Saydin.PriceIngestion.Tests.Adapters;
 
@@ -59,11 +60,26 @@ public class EvdsInflationMapperTests
     }
 
     [Fact]
-    public void Map_ValidJson_SourceIsTuik()
+    public void Map_DefaultSource_IsTuik()
     {
+        // Default source = InflationSources.Tuik (sabit; hardcoded literal değil).
         var result = EvdsInflationMapper.Map(ValidJson);
 
-        result.Should().AllSatisfy(r => r.Source.Should().Be("tuik"));
+        result.Should().AllSatisfy(r => r.Source.Should().Be(InflationSources.Tuik));
+    }
+
+    [Fact]
+    public void Map_PersistedSource_IsAlwaysAValidCheckConstraintValue()
+    {
+        // INGR-010/INGR-011 regresyon koruması: mapper'ın persist ettiği source DEĞERİ
+        // chk_inflation_rates_source / composite-PK kümesinde (InflationSources.Lookup)
+        // OLMALI. Üretim yolu EvdsInflationAdapter `InflationSources.Tuik` geçirir; eğer
+        // birisi yanlışlıkla "evds" gibi kanal kimliği geçirirse bu test kırmızıya döner.
+        var result = EvdsInflationMapper.Map(ValidJson, source: InflationSources.Tuik);
+
+        result.Should().NotBeEmpty();
+        result.Should().AllSatisfy(r =>
+            InflationSources.Lookup.Should().Contain(r.Source));
     }
 
     // ── ND (No Data) değerleri atlanmalı ────────────────────────────────────

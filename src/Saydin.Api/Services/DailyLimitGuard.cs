@@ -170,16 +170,14 @@ public sealed class DailyLimitGuard(
 
     /// <summary>
     /// Usage key formatı: <c>{prefix}{userId|deviceId}:{yyyy-MM-dd}</c>.
-    /// <paramref name="now"/> parametresi opsiyonel; verilmezse <see cref="DateTime.UtcNow"/>
-    /// kullanılır (testler için kullanışlı). Production yollarında caller tek bir
-    /// timestamp yakalayıp TTL hesabıyla aynı değeri buraya geçirir — gece yarısı
-    /// race koşulu kapanır.
+    /// C-Low-1: <paramref name="now"/> ZORUNLU — caller (production'da TimeProvider'dan,
+    /// testlerde sabit timestamp) tek bir değer yakalayıp TTL hesabıyla buraya geçirir;
+    /// gece yarısı race'i kapanır ve testlerde gerçek-saat (DateTime.UtcNow) flaky'liği olmaz.
     /// </summary>
-    internal static string BuildUsageKey(User? user, string deviceId, string prefix, DateTime? now = null)
+    internal static string BuildUsageKey(User? user, string deviceId, string prefix, DateTime now)
     {
-        var effective = now ?? DateTime.UtcNow;
         var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = effective.ToString("yyyy-MM-dd");
+        var dateKey = now.ToString("yyyy-MM-dd");
         return $"{prefix}{userId}:{dateKey}";
     }
 }

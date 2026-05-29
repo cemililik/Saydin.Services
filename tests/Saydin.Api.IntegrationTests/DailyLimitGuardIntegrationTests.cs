@@ -40,8 +40,9 @@ public class DailyLimitGuardIntegrationTests(RedisFixture redis)
         }
         finally
         {
-            // Sayaç key'ini temizle (TTL gece yarısı; testler arası birikmesin).
-            var key = DailyLimitGuard.BuildUsageKey(null, deviceId, prefix);
+            // Sayaç key'ini temizle (TTL gece yarısı; testler arası birikmesin). Guard
+            // TimeProvider.System ile yazdı → aynı UTC gününün key'i (test saniyeler sürer).
+            var key = DailyLimitGuard.BuildUsageKey(null, deviceId, prefix, DateTime.UtcNow);
             await redis.Multiplexer!.GetDatabase().KeyDeleteAsync(key);
         }
     }

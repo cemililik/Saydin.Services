@@ -63,4 +63,13 @@ public class DomainConstantsTests
         InflationSources.Lookup.Should().Contain(InflationSources.SeedApproximation);
         InflationSources.Lookup.Should().HaveCount(2);
     }
+
+    [Theory]
+    [InlineData(InflationSources.Tuik)]
+    [InlineData(InflationSources.SeedApproximation)]
+    public void InflationSources_Values_AreLowercase(string value)
+    {
+        // DB CHECK + composite PK literal'leriyle byte-for-byte uyum için lowercase olmalı.
+        value.Should().Be(value.ToLowerInvariant());
+    }
 }

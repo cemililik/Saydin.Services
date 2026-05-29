@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Mappers;
+using Saydin.Shared.Constants;
 using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -75,9 +76,11 @@ public sealed class EvdsInflationAdapter(
             }
 
             var json = await response.Content.ReadAsStringAsync(ct);
-            // INGR-001: Source `Source` ile aynı değer ("evds") map'lenir; adapter
-            // ile DB satırı arasında source-string tutarsızlığı kalktı.
-            var rates = EvdsInflationMapper.Map(json, source: Source);
+            // INGR-010: inflation_rates.source veri KÖKENİDİR (TÜİK) — chk_inflation_rates_source
+            // yalnız 'tuik'/'seed-approximation' kabul eder. "evds" yalnız taşıma kanalıdır ve
+            // ingestion_jobs.source='evds' (EvdsInflationWorker, adapter.Source) ile zaten
+            // kaydedilir. TP.FG.J0 serisi TÜİK TÜFE'sidir → InflationSources.Tuik yazılır.
+            var rates = EvdsInflationMapper.Map(json, source: InflationSources.Tuik);
 
             logger.LogInformation(
                 "EVDS TÜFE: {Count} aylık endeks alındı ({From}–{To})",
