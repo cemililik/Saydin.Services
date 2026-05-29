@@ -101,7 +101,12 @@ try
             .AddPrometheusExporter());
 
     // ─── Localization ──────────────────────────────────────────────────────────
-    builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
+    // ResourcesPath BİLEREK ayarlanmaz: resx dosyaları Resources/ErrorMessages.cs (namespace
+    // Saydin.Api) ile DependentUpon olduğundan "Saydin.Api.ErrorMessages.resources" olarak
+    // gömülür — "Resources" segmenti YOKTUR. ResourcesPath="Resources" verilirse factory
+    // "Saydin.Api.Resources.ErrorMessages" arar → her lookup ıskalar ve ham resx KEY'i döner
+    // (tr/en ayrımı kaybolur). Bkz. ErrorMessagesLocalizationTests (regresyon kilidi).
+    builder.Services.AddLocalization();
 
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();
