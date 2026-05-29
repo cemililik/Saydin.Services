@@ -133,6 +133,13 @@ public sealed class ActivityLogWriter(
                     if (!await BackoffAsync(attempt, maxAttempts, entries.Count, outcome.Exception!, ct))
                         throw new OperationCanceledException(ct);
                     break;
+
+                // Sonar S131: default — enum'a yeni değer eklendiğinde derleyici
+                // switch'in eksikliğini sezmez. Runtime'da fail-fast vermesi için
+                // explicit branch; pratikte unreachable.
+                default:
+                    throw new InvalidOperationException(
+                        $"Unhandled FlushOutcomeKind: {outcome.Kind}");
             }
         }
 
