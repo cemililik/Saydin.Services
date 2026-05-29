@@ -5,6 +5,7 @@ using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
@@ -12,12 +13,11 @@ namespace Saydin.Api.Services;
 
 public sealed class SavedScenarioService(
     ISavedScenarioRepository repository,
+    ILastSeenThrottle lastSeenThrottle,
     IOptions<PlanOptions> options,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
-    private static readonly HashSet<string> AllowedTypes = ["what_if", "comparison", "portfolio", "dca"];
-
     // DB kolon kapasiteleri ile uyumlu max length validasyonu.
     private const int MaxSymbolLength      = 64;
     private const int MaxDisplayNameLength = 200;
@@ -25,7 +25,17 @@ public sealed class SavedScenarioService(
 
     public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(string deviceId, CancellationToken ct)
     {
-        var user = await GetOrCreateUserAsync(deviceId, ct);
+        // F2.2-13 ([C-B-SavedScenario-4]): GET path'inde user yaratma side-effect'i yok.
+        // Cihaz hiç POST atmadan listele çağırdıysa boş liste döner ve users tablosu
+        // gereksiz kayıt biriktirmez.
+        var user = await repository.GetUserByDeviceIdAsync(deviceId, ct);
+        if (user is null)
+        {
+            logger.LogInformation("Senaryo listesi: {DeviceId} için kullanıcı kaydı yok — boş döndü", deviceId);
+            return Array.Empty<ScenarioResponse>();
+        }
+
+        await TryTouchLastSeenAsync(user, ct);
         var scenarios = await repository.GetByUserIdAsync(user.Id, ct);
 
         logger.LogInformation(
@@ -38,63 +48,30 @@ public sealed class SavedScenarioService(
     public async Task<ScenarioResponse> SaveScenarioAsync(
         string deviceId, SaveScenarioRequest request, CancellationToken ct)
     {
-        // P1R-003: domain ValidationException ile guard — altyapı kaynaklı ArgumentException
-        // (Redis/EF Core) artık ValidationExceptionHandler tarafından 400'e dönmez.
-        if (request is null)
-            throw new ValidationException(
-                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+        // Codacy follow-up: Tüm request-shape validasyonu user upsert/last_seen
+        // touch'tan ÖNCE yapılır. Aksi halde malformed bir request (örn. invalid
+        // Type, negatif Amount) yine de users tablosuna bir kayıt yaratıyor +
+        // last_seen_at güncelliyordu (gereksiz DB yazma + telemetri kirliliği).
+        // EnforceScenarioLimitAsync user gerektirdiği için upsert SONRASI kalır.
+        ValidateRequestNotNull(request);
+        var normalizedType = NormalizeAndValidateType(request);
+        var (trimmedSymbol, requiresAssetSymbol) = ValidateAssetSymbol(request, normalizedType);
+        ValidateOptionalFields(request);
+        ValidateQuantity(request);
 
-        var user = await GetOrCreateUserAsync(deviceId, ct);
+        // Save path'inde user atomik upsert + select — request artık geçerli.
+        var user = await repository.GetOrCreateUserAsync(deviceId, ct);
+        await TryTouchLastSeenAsync(user, ct);
 
-        var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
-        if (scenarioLimit > 0)
-        {
-            var count = await repository.CountByUserIdAsync(user.Id, ct);
-            if (count >= scenarioLimit)
-                throw new ScenarioLimitExceededException(scenarioLimit);
-        }
+        await EnforceScenarioLimitAsync(user, ct);
 
-        if (string.IsNullOrWhiteSpace(request.Type))
-            throw new ValidationException(
-                string.Format(localizer["RequestPayloadMissing"], nameof(request.Type)),
-                field: nameof(request.Type));
-
-        // Trim before normalize: " what_if " ve " btc " gibi inputlar lookup'ta gereksiz fail etmemeli.
-        var normalizedType = request.Type.Trim().ToLowerInvariant();
-
-        if (!AllowedTypes.Contains(normalizedType))
-            throw new ValidationException(
-                string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", AllowedTypes)),
-                field: nameof(request.Type));
-
-        if (string.IsNullOrWhiteSpace(request.AssetSymbol))
-            throw new ValidationException(
-                string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbol)),
-                field: nameof(request.AssetSymbol));
-
-        var trimmedSymbol = request.AssetSymbol.Trim();
-        if (trimmedSymbol.Length > MaxSymbolLength)
-            throw new ValidationException(
-                string.Format(localizer["FieldTooLong"], nameof(request.AssetSymbol), MaxSymbolLength),
-                field: nameof(request.AssetSymbol));
-        if (!string.IsNullOrEmpty(request.AssetDisplayName)
-            && request.AssetDisplayName.Length > MaxDisplayNameLength)
-            throw new ValidationException(
-                string.Format(localizer["FieldTooLong"], nameof(request.AssetDisplayName), MaxDisplayNameLength),
-                field: nameof(request.AssetDisplayName));
-        if (!string.IsNullOrEmpty(request.Label) && request.Label.Length > MaxLabelLength)
-            throw new ValidationException(
-                string.Format(localizer["FieldTooLong"], nameof(request.Label), MaxLabelLength),
-                field: nameof(request.Label));
-
-        // what_if / dca tipleri için asset FK kontrolü + sembol/display name canonicalization
-        // (kullanıcı "btc" göndermiş olabilir; lookup case-insensitive ve kayıt asset'in
-        // canonical değerleriyle yazılır → tutarsız casing veya XSS-yakın display name engellenir).
+        // F2.3-6 ([C-C-29]): client-tarafı AssetDisplayName artık güven kaynağı değil —
+        // server-side resolve.
         Asset? asset = null;
-        string canonicalSymbol      = trimmedSymbol.ToUpperInvariant();
-        string? canonicalDisplayName = request.AssetDisplayName;
+        string canonicalSymbol       = trimmedSymbol.ToUpperInvariant();
+        string  canonicalDisplayName = canonicalSymbol;
 
-        if (normalizedType is "what_if" or "dca")
+        if (requiresAssetSymbol)
         {
             asset = await repository.GetActiveAssetBySymbolAsync(canonicalSymbol, ct)
                 ?? throw new AssetNotFoundException(trimmedSymbol);
@@ -104,11 +81,11 @@ public sealed class SavedScenarioService(
 
         var scenario = new SavedScenario
         {
-            Id = Guid.NewGuid(),
+            Id = Guid.CreateVersion7(),
             UserId = user.Id,
             AssetId = asset?.Id,
             AssetSymbol = canonicalSymbol,
-            AssetDisplayName = canonicalDisplayName ?? canonicalSymbol,
+            AssetDisplayName = canonicalDisplayName,
             Type = normalizedType,
             ExtraData = request.ExtraData,
             BuyDate = request.BuyDate,
@@ -130,7 +107,11 @@ public sealed class SavedScenarioService(
 
     public async Task DeleteScenarioAsync(string deviceId, Guid scenarioId, CancellationToken ct)
     {
-        var user = await GetOrCreateUserAsync(deviceId, ct);
+        // F2.2-13: DELETE path'inde user yaratma side-effect'i yok. Kullanıcı kaydı
+        // hiç yoksa senaryo da yok → 404. (ScenarioNotFound semantik olarak doğru.)
+        var user = await repository.GetUserByDeviceIdAsync(deviceId, ct)
+            ?? throw new ScenarioNotFoundException(scenarioId);
+        await TryTouchLastSeenAsync(user, ct);
 
         var scenario = await repository.GetByIdAndUserIdAsync(scenarioId, user.Id, ct)
             ?? throw new ScenarioNotFoundException(scenarioId);
@@ -142,17 +123,27 @@ public sealed class SavedScenarioService(
             deviceId, scenarioId);
     }
 
-    private async Task<User> GetOrCreateUserAsync(string deviceId, CancellationToken ct)
+    /// <summary>
+    /// F2.2-12: last_seen_at UPDATE'lerini throttling yapar. Hata kullanıcı yoluna sızmaz.
+    /// </summary>
+    private async Task TryTouchLastSeenAsync(User user, CancellationToken ct)
     {
-        var user = await repository.GetUserByDeviceIdAsync(deviceId, ct);
-        if (user is not null)
+        if (!lastSeenThrottle.ShouldUpdate(user.Id))
+            return;
+
+        try
         {
             await repository.UpdateUserLastSeenAsync(user, ct);
-            return user;
         }
-
-        logger.LogInformation("Yeni kullanıcı oluşturuluyor: {DeviceId}", deviceId);
-        return await repository.CreateUserAsync(deviceId, ct);
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // last_seen telemetri bilgisidir — DB hatası kullanıcıyı engelelmemeli.
+            logger.LogWarning(ex, "users.last_seen_at güncellemesi başarısız: {UserId}", user.Id);
+        }
     }
 
     private static ScenarioResponse ToResponse(SavedScenario s) => new(
@@ -168,4 +159,83 @@ public sealed class SavedScenarioService(
         s.Type,
         s.ExtraData
     );
+
+    // ─── Sonar S3776: SaveScenarioAsync için validation helper'ları ──────────
+
+    private void ValidateRequestNotNull(SaveScenarioRequest request)
+    {
+        // P1R-003: domain ValidationException ile guard.
+        if (request is null)
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
+    }
+
+    private async Task EnforceScenarioLimitAsync(User user, CancellationToken ct)
+    {
+        var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
+        if (scenarioLimit <= 0) return;
+
+        var count = await repository.CountByUserIdAsync(user.Id, ct);
+        if (count >= scenarioLimit)
+            throw new ScenarioLimitExceededException(scenarioLimit);
+    }
+
+    private string NormalizeAndValidateType(SaveScenarioRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Type))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.Type)),
+                field: nameof(request.Type));
+
+        // Trim before normalize: " what_if " ve " btc " gibi inputlar lookup'ta gereksiz fail etmemeli.
+        var normalizedType = request.Type.Trim().ToLowerInvariant();
+
+        // F2.5-2 sync: kabul edilen tipler tek noktadan (ScenarioTypes.All) gelir.
+        if (!ScenarioTypes.Lookup.Contains(normalizedType))
+            throw new ValidationException(
+                string.Format(localizer["InvalidScenarioType"], request.Type, string.Join(", ", ScenarioTypes.All)),
+                field: nameof(request.Type));
+        return normalizedType;
+    }
+
+    private (string TrimmedSymbol, bool RequiresAssetSymbol) ValidateAssetSymbol(
+        SaveScenarioRequest request, string normalizedType)
+    {
+        // F2.2-11: what_if/dca zorunlu sembol; comparison/portfolio için sentinel.
+        var requiresAssetSymbol = normalizedType is ScenarioTypes.WhatIf or ScenarioTypes.Dca;
+        if (requiresAssetSymbol && string.IsNullOrWhiteSpace(request.AssetSymbol))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.AssetSymbol)),
+                field: nameof(request.AssetSymbol));
+
+        var trimmedSymbol = string.IsNullOrWhiteSpace(request.AssetSymbol)
+            ? "PORTFOLIO"
+            : request.AssetSymbol.Trim();
+        if (trimmedSymbol.Length > MaxSymbolLength)
+            throw new ValidationException(
+                string.Format(localizer["FieldTooLong"], nameof(request.AssetSymbol), MaxSymbolLength),
+                field: nameof(request.AssetSymbol));
+        return (trimmedSymbol, requiresAssetSymbol);
+    }
+
+    private void ValidateOptionalFields(SaveScenarioRequest request)
+    {
+        if (!string.IsNullOrEmpty(request.AssetDisplayName)
+            && request.AssetDisplayName.Length > MaxDisplayNameLength)
+            throw new ValidationException(
+                string.Format(localizer["FieldTooLong"], nameof(request.AssetDisplayName), MaxDisplayNameLength),
+                field: nameof(request.AssetDisplayName));
+        if (!string.IsNullOrEmpty(request.Label) && request.Label.Length > MaxLabelLength)
+            throw new ValidationException(
+                string.Format(localizer["FieldTooLong"], nameof(request.Label), MaxLabelLength),
+                field: nameof(request.Label));
+    }
+
+    private void ValidateQuantity(SaveScenarioRequest request)
+    {
+        // SVCR-012: Quantity ≤ 0 DB'ye yazılmasın (request.Amount → SavedScenario.Quantity).
+        if (request.Amount <= 0m)
+            throw new ValidationException(
+                localizer["AmountMustBePositive"], field: nameof(request.Amount));
+    }
 }

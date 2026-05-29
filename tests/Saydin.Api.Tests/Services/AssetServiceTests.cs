@@ -41,8 +41,11 @@ public class AssetServiceTests
         _assetNameLocalizer.Localize(Arg.Any<string>(), Arg.Any<string?>())
                            .Returns(ci => (string?)ci[1] ?? (string)ci[0]);
 
+        // SVCR-001/002/003 follow-up: IAssetSymbolIndex singleton testlerde gerçek
+        // implementasyonla beslenir (instance scope test isolation'ı bozmaz).
         _sut = new AssetService(
-            _repository, _cache, _assetNameLocalizer, _localizer, NullLogger<AssetService>.Instance);
+            _repository, _cache, new AssetSymbolIndex(),
+            _assetNameLocalizer, _localizer, NullLogger<AssetService>.Instance);
     }
 
     // ── GetPriceAsync ────────────────────────────────────────────────────────
@@ -143,9 +146,10 @@ public class AssetServiceTests
     [Fact]
     public async Task GetAllAssetInfoAsync_CacheHit_SkipsRepository_AndReturnsCachedList()
     {
+        // F2.3-7: AssetResponse.Category artık string (snake_case server-side projeksiyon).
         var cachedList = new List<AssetResponse>
         {
-            new("USDTRY", "Dolar/TL", AssetCategory.Currency,
+            new("USDTRY", "Dolar/TL", "currency",
                 new DateOnly(2020, 1, 1), new DateOnly(2024, 12, 31))
         };
 
@@ -157,6 +161,9 @@ public class AssetServiceTests
 
         result.Should().HaveCount(1);
         result[0].Symbol.Should().Be("USDTRY");
+        // F14 follow-up: Category string kontrat regresyonu için assertion eklendi
+        // (enum → string projeksiyonu F2.3-7'de yapılmıştı; cache-hit path'i koruma).
+        result[0].Category.Should().Be("currency");
         await _repository.DidNotReceive()
             .GetAllActiveAssetsWithDateRangesAsync(Arg.Any<CancellationToken>());
     }

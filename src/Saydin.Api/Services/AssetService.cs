@@ -1,4 +1,6 @@
+using System.Collections.Frozen;
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.Extensions.Localization;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
@@ -11,6 +13,7 @@ namespace Saydin.Api.Services;
 public sealed class AssetService(
     IPriceRepository repository,
     IRedisCacheHelper cache,
+    IAssetSymbolIndex symbolIndex,
     IAssetNameLocalizer assetNameLocalizer,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<AssetService> logger) : IAssetService
@@ -41,11 +44,12 @@ public sealed class AssetService(
 
     public async Task<Asset?> GetBySymbolAsync(string symbol, CancellationToken ct)
     {
-        var upper = symbol.ToUpperInvariant();
+        // F2.2-20: O(1) sembol lookup. SVCR-001/002/003 follow-up: static field
+        // yerine `IAssetSymbolIndex` singleton; immutable record snapshot ile
+        // atomik swap; cache key listenin **içerik hash**'ine bağlı (sadece count
+        // değil, DisplayName/Category/IsActive değişimleri de invalidate eder).
         var all = await GetAllAsync(ct);
-        // assets:list cache'i şu an küçük (~30 asset); ileride büyürse symbol → asset
-        // dictionary cache'i eklenebilir. Şu an LINQ scan O(n) yeterli.
-        return all.FirstOrDefault(a => a.Symbol == upper);
+        return symbolIndex.Lookup(all, symbol);
     }
 
     public async Task<IReadOnlyList<AssetResponse>> GetAllAssetInfoAsync(CancellationToken ct)
@@ -70,7 +74,8 @@ public sealed class AssetService(
             .Select(r => new AssetResponse(
                 r.Asset.Symbol,
                 assetNameLocalizer.Localize(r.Asset.Symbol, r.Asset.DisplayName),
-                r.Asset.Category,
+                // F2.3-7: enum sızıntısı kalktı — DTO string snake_case taşır.
+                ToSnakeCase(r.Asset.Category),
                 r.FirstDate,
                 r.LastDate))
             .ToList();
@@ -78,6 +83,15 @@ public sealed class AssetService(
         await cache.TrySetAsync(listKey, result, TimeSpan.FromHours(1), ct);
         return result;
     }
+
+    /// <summary>
+    /// F2.3-7 / SVCR-017: PascalCase enum adını snake_case JSON değerine çevirir
+    /// (<c>PreciousMetal → precious_metal</c>). .NET built-in
+    /// <see cref="JsonNamingPolicy.SnakeCaseLower"/> ile birebir tutarlı — önceki
+    /// elle yazılmış StringBuilder loop'u kalktı.
+    /// </summary>
+    private static string ToSnakeCase(AssetCategory category) =>
+        JsonNamingPolicy.SnakeCaseLower.ConvertName(category.ToString());
 
     public async Task<PricePoint> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct)
     {
@@ -140,7 +154,11 @@ public sealed class AssetService(
                 string.Format(localizer["InvalidInterval"], interval),
                 field: nameof(interval));
 
-        var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:daily";
+        // F2.2-1 ([C-B-AssetService-5/7]): cache key'e interval suffix ekle. Şu an
+        // yalnızca "daily" destekleniyor; weekly/monthly eklenirse aynı (symbol, from, to)
+        // çiftinin farklı interval'larda farklı response'u olur → cache key ayrımı şart.
+        var normalizedInterval = interval.ToLowerInvariant();
+        var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:{normalizedInterval}";
 
         var cached = await cache.TryGetAsync<List<PricePoint>>(cacheKey, ct);
         if (cached is not null) return cached;

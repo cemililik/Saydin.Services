@@ -1,13 +1,23 @@
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Localization;
 
 namespace Saydin.Api.Endpoints;
 
-internal static class EndpointExtensions
+internal static partial class EndpointExtensions
 {
     internal const string DeviceIdItemKey = "DeviceId";
 
     private const string DeviceIdHeader   = "X-Device-ID";
     private const int    MaxDeviceIdLength = 128;
+
+    /// <summary>
+    /// F2.1-3 ([C-A-8]): ASCII-only sınıf — <see cref="char.IsLetterOrDigit"/>
+    /// Unicode harf ve rakamları da kabul eder (örn. <c>İ</c>, <c>ǅ</c>).
+    /// DeviceId Flutter SecureStorage UUID'leri için ASCII alphanumeric + ayraç
+    /// karakterleri (<c>-_.</c>) ile sınırlı.
+    /// </summary>
+    [GeneratedRegex(@"^[A-Za-z0-9._-]+$")]
+    private static partial Regex DeviceIdPattern();
 
     /// <summary>
     /// <c>RequireDeviceId()</c> filter'ı <see cref="DeviceIdItemKey"/> öğesini set ettiği için
@@ -39,8 +49,7 @@ internal static class EndpointExtensions
 
             var deviceId = headerValues[0]!.Trim();
 
-            if (deviceId.Length > MaxDeviceIdLength ||
-                !deviceId.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.'))
+            if (deviceId.Length > MaxDeviceIdLength || !DeviceIdPattern().IsMatch(deviceId))
             {
                 return Results.Problem(
                     title: localizer["DeviceIdInvalid"],

@@ -1,7 +1,12 @@
+using System.Text.Json;
+using System.Xml;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Npgsql;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
 using Saydin.Shared.Entities;
+using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Workers;
 
@@ -58,6 +63,16 @@ public abstract class BaseAssetWorker(
     protected virtual DateOnly TargetDate(DateTime utcNow) =>
         DateOnly.FromDateTime(utcNow.Date);
 
+    /// <summary>
+    /// F2.4-9 ([G-D-04]): Varsayılan olarak <c>false</c> — backfill yalnız "latestDate
+    /// sonrasını" kovalar (orijinal davranış). Override edilirse <see cref="BackfillAsync"/>
+    /// `[BackfillStartDate, yesterday]` aralığındaki tüm boşlukları DB'de var olmayan
+    /// tarih kümesinden hedefler. Hafta sonu/tatil "boş" olduğu kaynaklar (TCMB, OXR)
+    /// bunu açmamalı — gereksiz API çağrısı yaratır. Crypto (CoinGecko, 7/24 piyasa)
+    /// için uygundur.
+    /// </summary>
+    protected virtual bool EnableGapAwareBackfill => false;
+
     public async Task RunAsync(CancellationToken ct)
     {
         await BackfillAsync(ct);
@@ -82,6 +97,13 @@ public abstract class BaseAssetWorker(
             {
                 return;
             }
+            catch (Exception ex) when (IsTransient(ex))
+            {
+                // Codacy follow-up: ilk fetch için de aynı exponential backoff
+                // mantığı; transient olmayan bug/config error rethrow edilir.
+                if (!await TryRecoverWithBackoffAsync(ex, ct))
+                    return;
+            }
         }
 
         while (!ct.IsCancellationRequested)
@@ -99,7 +121,67 @@ public abstract class BaseAssetWorker(
             {
                 break;
             }
+            catch (Exception ex) when (IsTransient(ex))
+            {
+                // INGR-007: Transient hatalar (HTTP/JSON/XML/EF transient/Polly
+                // ExternalApiException) exponential backoff ile aynı gün içinde
+                // 5 deneme — "scheduled time geçti, 24sa bekle" davranışı engellenir.
+                // Codacy follow-up: blanket Exception catch yerine specific filter
+                // — bug/config error (Null/Argument/InvalidOperation) loop'tan
+                // sızar ve fail-fast olur.
+                if (!await TryRecoverWithBackoffAsync(ex, ct))
+                    break; // cancellation token tetiklendi
+            }
         }
+    }
+
+    /// <summary>
+    /// INGR-007 follow-up: Transient hatadan exponential backoff ile kurtulmayı dener.
+    /// Aynı gün içinde en fazla 5 deneme yapar; her biri başarılı olursa <c>true</c>
+    /// döner ve döngü normal scheduled cycle'a geri döner. Cancellation token
+    /// tetiklenirse <c>false</c> döner (caller break eder).
+    /// </summary>
+    private async Task<bool> TryRecoverWithBackoffAsync(Exception cause, CancellationToken ct)
+    {
+        var backoff = TimeSpan.FromMinutes(5);
+        const int maxAttempts = 5;
+        // Sonar S6646: aynı block içinde 2 LogError vardı (giriş + tükenme). Giriş
+        // mesajı transient hata için "henüz error değil" → LogWarning'e indirildi.
+        // Asıl LogError sadece tüm denemeler tükendiğinde atılır.
+        logger.LogWarning(cause,
+            "{Source} günlük çekim sırasında beklenmeyen hata — exponential backoff ile {Max} deneme",
+            adapter.Source, maxAttempts);
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try { await Task.Delay(backoff, ct); }
+            catch (OperationCanceledException) { return false; }
+
+            try
+            {
+                await FetchTodayAsync(ct);
+                logger.LogInformation(
+                    "{Source} transient hatadan kurtulundu (deneme {Attempt}/{Max})",
+                    adapter.Source, attempt, maxAttempts);
+                return true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return false;
+            }
+            catch (Exception retryEx)
+            {
+                logger.LogWarning(retryEx,
+                    "{Source} retry {Attempt}/{Max} başarısız; {Backoff:hh\\:mm} bekle",
+                    adapter.Source, attempt, maxAttempts, backoff);
+                backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+            }
+        }
+
+        logger.LogError(
+            "{Source} {MaxAttempts} deneme sonrasında günlük veri çekilemedi; bir sonraki scheduled cycle'a düşülüyor",
+            adapter.Source, maxAttempts);
+        return true; // caller döngüye dönsün; bir sonraki cycle planla.
     }
 
     private bool IsScheduledTimePassedToday()
@@ -108,6 +190,24 @@ public abstract class BaseAssetWorker(
         var scheduledToday = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
         return now >= scheduledToday;
     }
+
+    /// <summary>
+    /// Codacy follow-up: Transient ve "expected" dış kaynak hataları beyaz-listesi.
+    /// Sadece bu set retry pencereye alınır; bug (Null/Argument/InvalidOperation)
+    /// ve programlama hataları rethrow edilerek fail-fast davranışı korunur.
+    /// </summary>
+    private static bool IsTransient(Exception ex) => ex switch
+    {
+        ExternalApiException                   => true, // dış API beklenen hata (Polly tükenmiş)
+        HttpRequestException                   => true, // network/DNS, transient HTTP
+        TaskCanceledException                  => true, // per-attempt timeout (non-shutdown)
+        TimeoutException                       => true,
+        JsonException                          => true, // adapter payload schema drift
+        XmlException                           => true, // TCMB XML transient
+        DbUpdateException                      => true, // EF transient (deadlock, connection blink)
+        NpgsqlException                        => true, // Npgsql transient (server reset)
+        _                                      => false,
+    };
 
     /// <summary>
     /// FetchToday'ı backfill sonrası tetikleyip tetiklememeyi kararlaştırır.
@@ -137,10 +237,19 @@ public abstract class BaseAssetWorker(
 
         foreach (var asset in assets)
         {
-            var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
-            var effectiveStart = BackfillStartDate;
-            var from = latestDate?.AddDays(1) ?? effectiveStart;
             var to = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-1));
+
+            // F2.4-9: Gap-aware mode (yalnız 7/24 piyasalar için) tüm aralıkta var
+            // olmayan tarihleri hedefler. Default davranış (latestDate sonrası tek blok)
+            // hafta sonu/tatil "boş" olan kaynaklarda gereksiz API çağrısı yaratmaz.
+            if (EnableGapAwareBackfill)
+            {
+                await BackfillGapsAsync(asset, BackfillStartDate, to, ct);
+                continue;
+            }
+
+            var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
+            var from = latestDate?.AddDays(1) ?? BackfillStartDate;
 
             if (from > to)
             {
@@ -150,21 +259,78 @@ public abstract class BaseAssetWorker(
             }
 
             logger.LogInformation("{Symbol} backfill başlıyor: {From} → {To}", asset.Symbol, from, to);
+            await BackfillChunkedAsync(asset, from, to, ct);
+        }
+    }
 
-            var chunkFrom = from;
-            while (chunkFrom <= to && !ct.IsCancellationRequested)
+    private async Task BackfillGapsAsync(Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        if (from > to) return;
+        var existing = await repository.GetExistingDatesAsync(asset.Id, from, to, ct);
+        var missingRanges = ComputeMissingRanges(from, to, existing);
+
+        if (missingRanges.Count == 0)
+        {
+            logger.LogInformation("{Symbol} için backfill gerekmiyor (tüm aralık DB'de mevcut)", asset.Symbol);
+            return;
+        }
+
+        logger.LogInformation(
+            "{Symbol} gap-aware backfill: {RangeCount} eksik blok ({From}..{To})",
+            asset.Symbol, missingRanges.Count, from, to);
+
+        foreach (var (rangeFrom, rangeTo) in missingRanges)
+        {
+            if (ct.IsCancellationRequested) break;
+            await BackfillChunkedAsync(asset, rangeFrom, rangeTo, ct);
+        }
+    }
+
+    private async Task BackfillChunkedAsync(Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var chunkFrom = from;
+        while (chunkFrom <= to && !ct.IsCancellationRequested)
+        {
+            var chunkTo = chunkFrom.AddDays(ChunkDays - 1);
+            if (chunkTo > to) chunkTo = to;
+
+            await FetchAndUpsertAsync(asset, chunkFrom, chunkTo,
+                IngestionJobTypes.HistoricalBackfill, ct);
+            chunkFrom = chunkTo.AddDays(1);
+
+            if (ChunkDelay > TimeSpan.Zero && chunkFrom <= to)
+                await Task.Delay(ChunkDelay, ct);
+        }
+    }
+
+    /// <summary>
+    /// F2.4-9: <paramref name="existing"/> kümesi temel alınarak <paramref name="from"/> ↔
+    /// <paramref name="to"/> aralığında bitişik eksik gün bloklarını döner.
+    /// Açgözlü tarama, O(<c>to-from</c>) zaman; test kapsamı kolay.
+    /// </summary>
+    internal static List<(DateOnly From, DateOnly To)> ComputeMissingRanges(
+        DateOnly from, DateOnly to, IReadOnlySet<DateOnly> existing)
+    {
+        var result = new List<(DateOnly, DateOnly)>();
+        DateOnly? rangeStart = null;
+        for (var d = from; d <= to; d = d.AddDays(1))
+        {
+            if (existing.Contains(d))
             {
-                var chunkTo = chunkFrom.AddDays(ChunkDays - 1);
-                if (chunkTo > to) chunkTo = to;
-
-                await FetchAndUpsertAsync(asset, chunkFrom, chunkTo,
-                    IngestionJobTypes.HistoricalBackfill, ct);
-                chunkFrom = chunkTo.AddDays(1);
-
-                if (ChunkDelay > TimeSpan.Zero && chunkFrom <= to)
-                    await Task.Delay(ChunkDelay, ct);
+                if (rangeStart.HasValue)
+                {
+                    result.Add((rangeStart.Value, d.AddDays(-1)));
+                    rangeStart = null;
+                }
+            }
+            else
+            {
+                rangeStart ??= d;
             }
         }
+        if (rangeStart.HasValue)
+            result.Add((rangeStart.Value, to));
+        return result;
     }
 
     private async Task FetchTodayAsync(CancellationToken ct)

@@ -17,7 +17,13 @@ public sealed class ActivityLog
     public string? AppVersion { get; init; }
     public JsonElement? Data { get; init; }
     public short StatusCode { get; init; }
-    public int? DurationMs { get; init; }
+    /// <summary>
+    /// F2.1-9 ([C-A-29]): <c>long</c> — int kullanılırsa 24.8 günden uzun süreli
+    /// işlemler taşma yapar. Pratikte HTTP istekleri saniyeler içinde tamamlanır
+    /// ancak shutdown drain veya hatalı bekleyen task'lerin gerçek süresini görmek
+    /// için sınır int'in altında tutulmamalı.
+    /// </summary>
+    public long? DurationMs { get; init; }
     public string? ErrorCode { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 

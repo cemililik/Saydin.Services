@@ -136,10 +136,15 @@ try
     builder.Services.AddSingleton(npgsqlDataSource);
 
     // ─── EF Core ─────────────────────────────────────────────────────────────
+    // F2.3-1 ([C-C-3/10/13], [G-C-01]): API read-heavy bir servistir; tracking ihtiyacı
+    // hemen hiçbir endpoint'te yok. Global NoTracking sorgu maliyetini düşürür
+    // (change tracker entries oluşmaz). Mutasyon gerektiren tek nokta SavedScenarioRepository
+    // — orada explicit `AsTracking()` çağrılır.
     builder.Services.AddDbContext<SaydinDbContext>(options =>
         options.UseNpgsql(npgsqlDataSource, npgsql =>
             npgsql.MapEnum<AssetCategory>("asset_category"))
-               .UseSnakeCaseNamingConvention());
+               .UseSnakeCaseNamingConvention()
+               .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking));
 
     // ─── Health Checks ───────────────────────────────────────────────────────
     builder.Services
@@ -166,15 +171,36 @@ try
     var redisOptions = ConfigurationOptions.Parse(redisConnection);
     redisOptions.AbortOnConnectFail = false;
 
-    builder.Services.AddSingleton<IConnectionMultiplexer>(
-        ConnectionMultiplexer.Connect(redisOptions));
+    // APIR-027 ([C-A-1]): Connect (blocking) → ConnectAsync + Lazy. Startup'ta
+    // ana thread bloğu kalktı; cache miss riski yine yok (AbortOnConnectFail=false
+    // sayesinde Redis down olsa bile API ayağa kalkar, ilk istek cache-aside).
+    // Task<ConnectionMultiplexer> kovaryant değil → açıkça IConnectionMultiplexer cast.
+    var redisLazy = new Lazy<Task<IConnectionMultiplexer>>(
+        async () => await ConnectionMultiplexer.ConnectAsync(redisOptions),
+        LazyThreadSafetyMode.ExecutionAndPublication);
+    builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
+    {
+        // GetAwaiter().GetResult() startup'ta tek seferlik; sonraki çağrılarda
+        // cached Task instance'ı tamamlanmış olur → sync hot-path yok.
+        return redisLazy.Value.GetAwaiter().GetResult();
+    });
 
     // ─── Response Compression ────────────────────────────────────────────────
     builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
 
     // ─── Options ─────────────────────────────────────────────────────────────
-    builder.Services.Configure<PlanOptions>(
-        builder.Configuration.GetSection(PlanOptions.SectionName));
+    // SVCR-008: PlanOptions startup'ta validate edilir — negatif limit/feature
+    // sızıntısı fail-fast.
+    builder.Services.AddOptions<PlanOptions>()
+        .Bind(builder.Configuration.GetSection(PlanOptions.SectionName))
+        .ValidateDataAnnotations()
+        .Validate(o =>
+        {
+            var ctx = new System.ComponentModel.DataAnnotations.ValidationContext(o);
+            var results = new List<System.ComponentModel.DataAnnotations.ValidationResult>();
+            return System.ComponentModel.DataAnnotations.Validator.TryValidateObject(o, ctx, results, true);
+        }, "PlanOptions geçersiz; bkz. application logs")
+        .ValidateOnStart();
 
     // ─── Repositories & Services ─────────────────────────────────────────────
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
@@ -188,6 +214,17 @@ try
     builder.Services.AddScoped<IAppConfigService, AppConfigService>();
     builder.Services.AddSingleton<IRedisCacheHelper, RedisCacheHelper>();
     builder.Services.AddScoped<IAssetNameLocalizer, AssetNameLocalizer>();
+    // F2.2-12: last_seen_at throttle penceresi process-local (in-memory map) tutulur;
+    // sticky session olmadan deploy edilse bile pencere ihlali kullanıcı için
+    // semantik kayıp yaratmaz — yalnız UPDATE sıklığı artar.
+    builder.Services.AddSingleton<ILastSeenThrottle, LastSeenThrottle>();
+    // SVCR-001/002/003 follow-up: AssetService'in static field cache'i kalktı.
+    // IAssetSymbolIndex singleton — içerik hash imzasıyla snapshot; atomik swap.
+    builder.Services.AddSingleton<IAssetSymbolIndex, AssetSymbolIndex>();
+    // F5 follow-up: endpoint katmanı repository'ye doğrudan erişmesin diye
+    // plan limitlerini çözen service. Sonar S107 ile birlikte handler parametre
+    // sayısı 8'den 6'ya iner.
+    builder.Services.AddScoped<IPlanLimitResolver, PlanLimitResolver>();
 
     // ─── GeoIP (IP → ülke/şehir çözümleme) ────────────────────────────────────
     builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();

@@ -25,6 +25,11 @@ public sealed class WhatIfCalculator(
     private const string WhatIfUsageKeyPrefix = "usage:whatif:";
     private const int    MaxPriceHistoryPoints = 60;
 
+    // Sonar S1192: `IStringLocalizer["FeatureDisabled"]` 4 yerde tekrarlanıyordu —
+    // tek sabite indirgendi. Resx key adı buradan referans alınır; key'i yeniden
+    // adlandırmak gerekirse tek yer güncellenir.
+    private const string FeatureDisabledKey = "FeatureDisabled";
+
     public async Task<WhatIfResponse> CalculateAsync(string deviceId, WhatIfRequest request, CancellationToken ct)
     {
         EnsureRequest(request);
@@ -36,8 +41,12 @@ public sealed class WhatIfCalculator(
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         var features = options.Value.GetTierOptions(user?.Tier).Features;
 
+        // F2.2-21 ([G-B-01]): Free plan kullanıcılarına `PriceHistoryMonths` sınırı
+        // dayatılır — BuyDate bu pencerenin gerisindeyse 400 döner. 0 = sınırsız.
+        EnsureWithinHistoryWindow(request.BuyDate, features.PriceHistoryMonths);
+
         if (request.IncludeInflation && !features.InflationAdjustment)
-            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "inflation");
 
         // Önce atomik reserve — TOCTOU race kapatıldı. Pahalı hesap öncesi limit dayatılır.
         await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
@@ -70,7 +79,7 @@ public sealed class WhatIfCalculator(
 
         var features = options.Value.GetTierOptions(user?.Tier).Features;
         if (!features.Comparison)
-            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "comparison");
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "comparison");
 
         // CompareAsync 5 sembolü tek kullanım sayar; ancak inflation tier kuralı CalculateAsync
         // ile aynı: özellik kapalıysa request bayrağını sessizce yok say.
@@ -84,6 +93,9 @@ public sealed class WhatIfCalculator(
 
         if (symbols.Count is < 2 or > 5)
             throw new ValidationException(localizer["CompareSymbolCount"], field: nameof(request.AssetSymbols));
+
+        // F2.2-21: Compare için de history sınırı uygulanır.
+        EnsureWithinHistoryWindow(request.BuyDate, features.PriceHistoryMonths);
 
         await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
 
@@ -133,8 +145,11 @@ public sealed class WhatIfCalculator(
         var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
         var features = options.Value.GetTierOptions(user?.Tier).Features;
 
+        // F2.2-21: Reverse What-If için de history sınırı uygulanır.
+        EnsureWithinHistoryWindow(request.BuyDate, features.PriceHistoryMonths);
+
         if (request.IncludeInflation && !features.InflationAdjustment)
-            throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "inflation");
 
         await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
         try
@@ -193,12 +208,17 @@ public sealed class WhatIfCalculator(
         var buyPrice  = buyPricePoint.Close;
         var sellPrice = sellPricePoint.Close;
 
+        // F2.2-23 ([G-B-04]): Servis sınırında non-positive fiyatları PriceNotFound
+        // ile reddet — bozuk veriyle 0 ya da negatif yatırım hesaplamasına izin verme.
+        if (buyPrice <= 0)
+            throw new PriceNotFoundException(symbol, request.BuyDate);
+
         // Ters hesaplama: hedef son değerden gereken başlangıç yatırımını bul
         decimal targetValueTry;
         decimal unitsAcquired;
         decimal requiredInvestmentTry;
 
-        if (sellPrice == 0)
+        if (sellPrice <= 0)
             throw new PriceNotFoundException(symbol, sellDate);
 
         switch (targetAmountType)
@@ -343,9 +363,12 @@ public sealed class WhatIfCalculator(
         var buyPrice  = buyPricePoint.Close;
         var sellPrice = sellPricePoint.Close;
 
-        // Bozuk veri / sıfır fiyat: divide-by-zero yerine PriceNotFound → 404 (review C-2).
-        if (buyPrice == 0)
+        // F2.2-23 ([G-B-04]): non-positive (≤0) fiyatları PriceNotFound olarak reddet.
+        // Bozuk veriyle divide-by-zero ya da negatif PnL üretmeyiz.
+        if (buyPrice <= 0)
             throw new PriceNotFoundException(symbol, request.BuyDate);
+        if (sellPrice <= 0)
+            throw new PriceNotFoundException(symbol, sellDate);
 
         decimal initialValueTry;
         decimal unitsAcquired;
@@ -489,6 +512,19 @@ public sealed class WhatIfCalculator(
     {
         if (value <= 0m)
             throw new ValidationException(localizer["AmountMustBePositive"], field: field);
+    }
+
+    /// <summary>
+    /// F2.2-21 ([G-B-01]): Tier'ın <c>PriceHistoryMonths</c> sınırı (0 = sınırsız)
+    /// alış tarihine dayatılır. BuyDate "bugünden <c>months</c> ay önceki tarihten önce"
+    /// ise <see cref="FeatureDisabledException"/> fırlatır (PaidUpgradeRequired semantiği).
+    /// </summary>
+    private void EnsureWithinHistoryWindow(DateOnly buyDate, int months)
+    {
+        if (months <= 0) return;
+        var earliestAllowed = DateOnly.FromDateTime(DateTime.UtcNow).AddMonths(-months);
+        if (buyDate < earliestAllowed)
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "extended_history");
     }
 
     private static IReadOnlyList<PriceHistoryPoint> SamplePriceHistory(

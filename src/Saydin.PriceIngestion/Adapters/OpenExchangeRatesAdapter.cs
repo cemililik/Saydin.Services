@@ -18,9 +18,18 @@ public sealed class OpenExchangeRatesAdapter(
 {
     public string Source => "openexchangerates";
 
-    // Gün bazlı cache: hem XAU hem XAG aynı OXR yanıtını paylaşır.
-    // Singleton adapter olduğu için backfill boyunca yaşar.
-    private readonly ConcurrentDictionary<DateOnly, string> _dayCache = new();
+    // F2.4-4 ([C-D-17]): Gün bazlı in-memory cache. Singleton adapter olduğu için
+    // backfill boyunca büyür — sınırsız büyümeyi engellemek için iki sınır:
+    //   1) Entry-level TTL (24 saat) — tarihsel kur değişmez ama process restart'lar
+    //      arasında bellek tüketimi bağlı kalmasın.
+    //   2) Toplam entry sınırı (MaxEntries) — sınır aşılınca en eski yarısı atılır.
+    // Backfill tipik olarak gün-tarafsızdır (XAU + XAG aynı yanıttan); 7300 entry =
+    // ~20 yıl backfill. 10k limit emniyet katmanı.
+    private const int MaxEntries = 10_000;
+    private static readonly TimeSpan EntryTtl = TimeSpan.FromHours(24);
+    private readonly ConcurrentDictionary<DateOnly, CachedJson> _dayCache = new();
+
+    private sealed record CachedJson(string Json, DateTimeOffset CachedAt);
 
     public async Task<IReadOnlyList<PricePoint>> FetchRangeAsync(
         Guid assetId, string assetSymbol, string sourceId,
@@ -77,8 +86,16 @@ public sealed class OpenExchangeRatesAdapter(
 
     private async Task<string?> GetOrFetchJsonAsync(HttpClient client, DateOnly date, string appId, CancellationToken ct)
     {
+        // F2.4-4: TTL kontrolü ile cache lookup. Süresi dolmuşsa cache'i bypass et,
+        // taze yanıtla yenile.
         if (_dayCache.TryGetValue(date, out var cached))
-            return cached;
+        {
+            if (DateTimeOffset.UtcNow - cached.CachedAt < EntryTtl)
+                return cached.Json;
+            // INGR-009: TTL miss — stale entry'yi sil; MaxEntries threshold'una
+            // stale entry'lerin katkıda bulunmaması için.
+            _dayCache.TryRemove(date, out _);
+        }
 
         // XAU, XAG ve TRY'yi tek istekte çek
         var url = $"historical/{date:yyyy-MM-dd}.json?app_id={appId}&symbols=XAU,XAG,TRY";
@@ -100,7 +117,40 @@ public sealed class OpenExchangeRatesAdapter(
         response.EnsureSuccessStatusCode();
 
         var json = await response.Content.ReadAsStringAsync(ct);
-        _dayCache[date] = json;
+        _dayCache[date] = new CachedJson(json, DateTimeOffset.UtcNow);
+
+        // F2.4-4: sınırı aştığımızda en eski yarıyı atarak temel LRU-benzeri davranış.
+        // INGR-008: paralel iki Fetch eviction'ı tetiklerse Interlocked flag ile
+        // yalnız bir tanesi geçer; diğeri no-op.
+        if (_dayCache.Count > MaxEntries
+            && Interlocked.CompareExchange(ref _evicting, 1, 0) == 0)
+        {
+            try
+            {
+                EvictOldestHalf();
+            }
+            finally
+            {
+                Volatile.Write(ref _evicting, 0);
+            }
+        }
         return json;
+    }
+
+    private int _evicting;
+
+    private void EvictOldestHalf()
+    {
+        // CachedAt'a göre sırala ve ilk yarıyı at. ConcurrentDictionary üzerinde tam
+        // tutarlı snapshot garantilenmez ama eviction yaklaşık doğrudur (en eski
+        // ~%50 atılır); bu mod-bilinçli adaptif değildir, dolayısıyla statistical fairness yeterli.
+        var snapshot = _dayCache.ToArray();
+        var threshold = snapshot
+            .OrderBy(kv => kv.Value.CachedAt)
+            .Take(snapshot.Length / 2)
+            .Select(kv => kv.Key)
+            .ToArray();
+        foreach (var key in threshold)
+            _dayCache.TryRemove(key, out _);
     }
 }

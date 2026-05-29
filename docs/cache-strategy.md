@@ -25,7 +25,7 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | Asset listesi | `assets:list` | 6 saat | `AssetService` |
 | Tek fiyat noktası | `price:{symbol}:{date}` | 24 saat | `AssetService` |
 | En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
-| Fiyat aralığı | `prices:{symbol}:{from}:{to}` | 1 saat | `AssetService` |
+| Fiyat aralığı | `prices:{symbol}:{from}:{to}:{interval}` | 1 saat | `AssetService` (F2.2-1: interval suffix Faz 2) |
 | En son fiyat tarihi | `latest_date:{symbol}` | 1 saat | `AssetService` |
 | DCA hesaplama | `dca:v1:{symbol}:{startDate}:{endDate}:{amount}:{period}:{amountType}{:inf?}:{lang}` | 1 saat | `DcaCalculator` |
 | Günlük kullanım sayacı (What-If) | `usage:whatif:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `DailyLimitGuard` |
@@ -36,6 +36,15 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 `whatif:v2:...` formatındaki `v2` prefix'i kasıtlıdır. Cache yapısını kıran bir değişiklik yapılırsa
 (yeni alan eklenmesi, format değişikliği) prefix'i `v3` olarak artır — eski key'ler TTL dolunca
 otomatik temizlenir, manuel flush gerekmez.
+
+### Faz 2 — Process-local Caches (Redis dışı)
+
+| Cache | Tip | Sınır | Eviction | Hedef |
+|---|---|---|---|---|
+| `IAssetSymbolIndex` symbol→asset snapshot | `FrozenDictionary<string, Asset>` (immutable snapshot, singleton) | asset listesi **içerik hash'i** (XOR / Count) ile versiyonlu | hash değişiminde `Interlocked.CompareExchange` ile snapshot atılır + yeni `FrozenDictionary` inşa edilir | F2.2-20 / SVCR-001..003 O(1) sembol lookup, content-aware invalidation |
+| `OpenExchangeRatesAdapter._dayCache` | `ConcurrentDictionary<DateOnly, CachedJson>` | 10_000 entry üst sınırı + 24sa entry TTL | TTL miss → entry silinir; sınır aşılınca `EvictOldestHalf` (CachedAt'a göre en eski yarısı atılır, `Interlocked.CompareExchange` flag ile tek seferlik) | F2.4-4 / INGR-008/009 bellek kontrolü, race-free eviction |
+| `TcmbAdapter` day-level XML | `ConcurrentDictionary<DateOnly, CachedXmlEntry>` | 10_000 entry üst sınırı + 60 dk entry TTL | TTL bazlı stale silme + sınır aşılınca en eski entry'ler atılır (CachedAt sıralı) | F1.1-2 day dedup |
+| `LastSeenThrottle` | `ConcurrentDictionary<Guid, DateTimeOffset>` (lock-free TryGetValue/TryAdd/TryUpdate loop) | **MaxEntries=100_000** sabit üst sınır | sınır aşılınca `MaybeEvict`: (a) pencere dışı (>5dk) entry'ler tek geçişte silinir, (b) hâlâ sınır üstündeyse en eski yarısı atılır (deterministik); `Interlocked.CompareExchange` flag ile tek seferlik | F2.2-12 / SVCR-009/010 last_seen UPDATE throttling, race-free + bounded |
 
 ---
 

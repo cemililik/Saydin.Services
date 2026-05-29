@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Localization;
-using Microsoft.Extensions.Options;
 using Saydin.Api.Middleware;
-using Saydin.Api.Options;
+using Saydin.Api.Models.Responses;
 using Saydin.Api.Services;
 using Saydin.Shared.Exceptions;
 
@@ -40,20 +39,31 @@ public static class AssetsEndpoints
 
         // Tüm asset endpoint'leri DeviceId ister: anonim enumeration + DB/Redis DoS
         // riskini kapatır. CLAUDE.md "Daily limit / device kontrolü" prensibine uyumlu.
-        group.MapGet("/", GetAllAsync)
+        // F2.1-6: MapGet("") trailing-slash bağımsız.
+        // APIR-016: anonim `object` wrapper kalktı — typed AssetListResponse / PriceRangeResponse.
+        group.MapGet("", GetAllAsync)
             .RequireDeviceId()
             .WithName("GetAssets")
-            .WithSummary("Desteklenen tüm asset'leri listeler");
+            .WithSummary("Desteklenen tüm asset'leri listeler")
+            .Produces<AssetListResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
+        // F7 follow-up: GetPriceAsync da domain entity yerine PricePointResponse döner.
         group.MapGet("/{symbol}/price/{date}", GetPriceAsync)
             .RequireDeviceId()
             .WithName("GetAssetPrice")
-            .WithSummary("Belirli tarihte fiyat döner");
+            .WithSummary("Belirli tarihte fiyat döner")
+            .Produces<PricePointResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
         group.MapGet("/{symbol}/price-range", GetPriceRangeAsync)
             .RequireDeviceId()
             .WithName("GetAssetPriceRange")
-            .WithSummary("Tarih aralığında fiyat serisi döner");
+            .WithSummary("Tarih aralığında fiyat serisi döner")
+            .Produces<PriceRangeResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
         return app;
     }
@@ -62,19 +72,19 @@ public static class AssetsEndpoints
         HttpContext httpContext,
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
-        IOptions<PlanOptions> plans,
+        IPlanLimitResolver planLimits,
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("assets_list");
         var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = plans.Value.Free.DailyAssetQueryLimit;
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
 
         await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
         try
         {
             var assets = await assetService.GetAllAssetInfoAsync(ct);
             log.WithData(new { assetCount = assets.Count });
-            return Results.Ok(new { assets });
+            return Results.Ok(new AssetListResponse(assets));
         }
         catch
         {
@@ -91,12 +101,12 @@ public static class AssetsEndpoints
         HttpContext httpContext,
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
-        IOptions<PlanOptions> plans,
+        IPlanLimitResolver planLimits,
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("asset_price");
         var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = plans.Value.Free.DailyAssetQueryLimit;
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
 
         await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
         try
@@ -108,7 +118,11 @@ public static class AssetsEndpoints
                 assetSymbol = symbol,
                 date = date.ToString("yyyy-MM-dd")
             });
-            return Results.Ok(price);
+            // F7 follow-up: domain `PricePoint` sızıntısı kalkar — public DTO map.
+            // AssetId / Asset navigation alanları response'a yansımaz.
+            var response = new PricePointResponse(price.PriceDate, price.Close,
+                price.Open, price.High, price.Low, price.Volume);
+            return Results.Ok(response);
         }
         catch
         {
@@ -126,7 +140,7 @@ public static class AssetsEndpoints
         HttpContext httpContext,
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
-        IOptions<PlanOptions> plans,
+        IPlanLimitResolver planLimits,
         IStringLocalizer<ErrorMessages> localizer,
         CancellationToken ct,
         string interval = "daily")
@@ -143,7 +157,7 @@ public static class AssetsEndpoints
 
         var log = httpContext.GetOrCreateActivityLog("asset_price_range");
         var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = plans.Value.Free.DailyAssetQueryLimit;
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
 
         await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
         try
@@ -158,7 +172,11 @@ public static class AssetsEndpoints
                 interval,
                 pointCount = points.Count
             });
-            return Results.Ok(new { symbol, interval, pricePoints = points });
+            // F7 follow-up: domain `PricePoint` sızıntısı kalkar — public DTO map.
+            var pricePoints = points
+                .Select(p => new PricePointResponse(p.PriceDate, p.Close, p.Open, p.High, p.Low, p.Volume))
+                .ToList();
+            return Results.Ok(new PriceRangeResponse(symbol, interval, pricePoints));
         }
         catch
         {

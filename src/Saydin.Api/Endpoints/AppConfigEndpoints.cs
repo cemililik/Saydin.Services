@@ -9,9 +9,12 @@ public static class AppConfigEndpoints
     {
         var group = app.MapGroup("/v1/config").WithTags("Config");
 
-        group.MapGet("/", GetConfigAsync)
+        // F2.1-6: trailing-slash bağımsız route.
+        group.MapGet("", GetConfigAsync)
             .WithName("GetAppConfig")
             .WithSummary("Kullanıcının plan konfigürasyonunu döner")
+            .Produces<Models.Responses.AppConfigResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
             .RequireDeviceId();
 
         return app;

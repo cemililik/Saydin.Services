@@ -9,10 +9,12 @@ public class CoinGeckoMapperTests
     private static readonly DateOnly From    = new(2021, 1, 1);
     private static readonly DateOnly To      = new(2021, 1, 3);
 
-    // Timestamp'ler: 2021-01-01 UTC = 1609459200000 ms
-    //               2021-01-02 UTC = 1609545600000 ms
-    //               2021-01-03 UTC = 1609632000000 ms
-    // Aynı gün için iki kayıt: son değer alınmalı (kapanış)
+    // Timestamp'ler: 2021-01-01 UTC = 1609459200000 ms (midnight)
+    //               2021-01-02 UTC = 1609545600000 ms (midnight)
+    //               2021-01-03 UTC = 1609632000000 ms (midnight)
+    //               1609459260000 ms = 2021-01-01 00:01 (midnight'tan 60_000 ms uzakta)
+    // F2.4-6 ([C-D-25]): Aynı gün için birden fazla gözlem varsa midnight'a en yakın olan
+    // kazanır — intra-day noise ile yanlış close yazımı engellenir.
     private const string ValidJson = """
         {
           "prices": [
@@ -46,12 +48,40 @@ public class CoinGeckoMapperTests
     }
 
     [Fact]
-    public void Map_SameDayMultipleEntries_KeepsLastValue()
+    public void Map_SameDayMultipleEntries_KeepsMidnightClosestValue()
     {
-        // 2021-01-01'de iki kayıt var: 29000.50 ve 29100.00 → son değer: 29100.00
+        // F2.4-6: 2021-01-01'de iki kayıt — 29000.50 (midnight) ve 29100.00 (midnight + 60s).
+        // Midnight'a en yakın olan kazanır → 29000.50.
         var result = CoinGeckoMapper.Map(ValidJson, AssetId, From, To);
 
-        result[0].Close.Should().Be(29100.00m);
+        result[0].Close.Should().Be(29000.50m);
+    }
+
+    [Fact]
+    public void Map_PreNoonAndPostNoon_KeepsClosestToMidnight()
+    {
+        // F2.4-6: Aynı tarih için 23:55 ve 00:05 girdileri. 00:05 (5 dakika) midnight'a daha
+        // yakın olduğu için kazanır; 23:55 (~1435 dakika) elenir.
+        const string json = """
+            {
+              "prices": [
+                [1609459500000, 100.00],
+                [1609545300000, 200.00],
+                [1609545900000, 300.00]
+              ]
+            }
+            """;
+        // 1609459500000 = 2021-01-01 00:05 UTC
+        // 1609545300000 = 2021-01-01 23:55 UTC (same day, far from midnight)
+        // 1609545900000 = 2021-01-02 00:05 UTC
+
+        var result = CoinGeckoMapper.Map(json, AssetId,
+            new DateOnly(2021, 1, 1), new DateOnly(2021, 1, 2));
+
+        result.Should().HaveCount(2);
+        // 2021-01-01: 00:05 close (100), not 23:55 close (200) — midnight'a 5dk vs 1435dk.
+        result.First(p => p.PriceDate == new DateOnly(2021, 1, 1)).Close.Should().Be(100.00m);
+        result.First(p => p.PriceDate == new DateOnly(2021, 1, 2)).Close.Should().Be(300.00m);
     }
 
     [Fact]

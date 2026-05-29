@@ -8,15 +8,26 @@ public sealed class IngestionJobConfiguration : IEntityTypeConfiguration<Ingesti
 {
     public void Configure(EntityTypeBuilder<IngestionJob> builder)
     {
-        builder.ToTable("ingestion_jobs");
+        // SHRD-001: 001 migration'da tanımlı CHECK constraint'ler EF tarafında modelleniyor;
+        // aksi halde Add-Migration "drop check constraint" üretebilirdi. Migration 011
+        // bu CHECK'leri `inflation_backfill | inflation_daily` ekleyerek genişletti.
+        builder.ToTable("ingestion_jobs", t =>
+        {
+            t.HasCheckConstraint(
+                "chk_ingestion_jobs_type",
+                $"job_type IN ('{IngestionJobTypes.HistoricalBackfill}', '{IngestionJobTypes.DailyUpdate}', 'inflation_backfill', 'inflation_daily')");
+            t.HasCheckConstraint(
+                "chk_ingestion_jobs_status",
+                $"status IN ('{IngestionJobStatuses.Running}', '{IngestionJobStatuses.Success}', '{IngestionJobStatuses.Failed}')");
+        });
         builder.HasKey(j => j.Id);
 
         builder.Property(j => j.JobType).HasMaxLength(50).IsRequired();
         builder.Property(j => j.Status).HasMaxLength(20).IsRequired();
         builder.Property(j => j.ErrorMessage).HasColumnType("text");
 
-        // started_at: DB tarafında DEFAULT NOW() var. Entity'de de varsayılan veriyoruz
-        // (StartedAt = UtcNow). Bilinçli: kod ve DB aynı anlamı verir, ek round-trip yok.
+        // SHRD-019: started_at DB-side DEFAULT NOW() — EF Configuration ile sync (drift yok).
+        builder.Property(j => j.StartedAt).HasDefaultValueSql("NOW()");
 
         builder.HasOne(j => j.Asset)
                .WithMany()

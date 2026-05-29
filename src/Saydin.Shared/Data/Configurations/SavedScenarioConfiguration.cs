@@ -1,5 +1,8 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 
 namespace Saydin.Shared.Data.Configurations;
@@ -8,7 +11,12 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
 {
     public void Configure(EntityTypeBuilder<SavedScenario> builder)
     {
-        builder.ToTable("saved_scenarios");
+        // F2.5-2 / F2.5-7 ([C-E-9], [G-E-02]): saved_scenarios.type CHECK constraint
+        // kod tarafında da modellenir. DB CHECK ile ScenarioTypes.All listesi
+        // birebir aynı olmalıdır.
+        builder.ToTable("saved_scenarios", t => t.HasCheckConstraint(
+            "chk_saved_scenarios_type",
+            $"type IN ({string.Join(", ", ScenarioTypes.All.Select(v => $"'{v}'"))})"));
         builder.HasKey(s => s.Id);
 
         builder.Property(s => s.Quantity).HasColumnType("numeric(18,8)").IsRequired();
@@ -17,8 +25,30 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
 
         builder.Property(s => s.AssetSymbol).HasMaxLength(100).IsRequired();
         builder.Property(s => s.AssetDisplayName).HasMaxLength(200).IsRequired();
-        builder.Property(s => s.Type).HasMaxLength(20).IsRequired().HasDefaultValue("what_if");
-        builder.Property(s => s.ExtraData).HasColumnType("jsonb");
+        builder.Property(s => s.Type).HasMaxLength(20).IsRequired().HasDefaultValue(ScenarioTypes.WhatIf);
+        // SHRD-012: JsonElement? için ValueComparer. EF Core'un default object
+        // identity karşılaştırması struct JsonElement için her zaman "değişti"
+        // diyebiliyor; bu ValueComparer raw text üzerinden equality sağlar.
+        // NOT: GetRawText() normalizasyon YAPMAZ — whitespace farkları ve
+        // property order'ı doğrudan etkiler. Üretici tarafında deterministik
+        // serializer kullanılırsa (System.Text.Json default) aynı C# objesi
+        // için aynı raw text üretilir; pratikte gereksiz UPDATE riski yoktur.
+        // Tam normalize karşılaştırma istenirse JsonNode tree'ye parse + sort
+        // gerekir (allocation pahalı) — şu an basit yaklaşım kabul edilebilir.
+        builder.Property(s => s.ExtraData)
+            .HasColumnType("jsonb")
+            .Metadata.SetValueComparer(new ValueComparer<JsonElement?>(
+                (a, b) => CompareJson(a, b),
+                v => v.HasValue ? v.Value.GetRawText().GetHashCode() : 0,
+                v => v));
+
+        // F2.5-3 ([C-E-10]): DB DEFAULT NOW() ile init-only CreatedAt arasındaki kayma
+        // EF'in farkındalığına alınır. Caller explicit DateTimeOffset.UtcNow geçerse
+        // o değer kullanılır; explicit değer yoksa DB tarafı NOW() ile doldurur.
+        // EF "Add-Migration" zamanı kolonun DEFAULT NOW() olduğunu schema'da görür,
+        // gereksiz "drop default" üretmez.
+        builder.Property(s => s.CreatedAt)
+            .HasDefaultValueSql("NOW()");
 
         builder.HasOne(s => s.User)
             .WithMany(u => u.SavedScenarios)
@@ -33,5 +63,18 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
 
         builder.HasIndex(s => new { s.UserId, s.CreatedAt })
             .HasDatabaseName("idx_saved_scenarios_user");
+    }
+
+    /// <summary>
+    /// SHRD-012: İki <c>JsonElement?</c>'i ham metin (raw text) üzerinden karşılaştır.
+    /// Null vs HasValue=false eşittir. Whitespace ve property order farkları
+    /// karşılaştırmayı etkiler — JsonElement.GetRawText() normalizasyon yapmaz;
+    /// deterministik serializer kullanmak çağıranın sorumluluğunda.
+    /// </summary>
+    private static bool CompareJson(JsonElement? a, JsonElement? b)
+    {
+        if (!a.HasValue && !b.HasValue) return true;
+        if (!a.HasValue || !b.HasValue) return false;
+        return string.Equals(a.Value.GetRawText(), b.Value.GetRawText(), StringComparison.Ordinal);
     }
 }

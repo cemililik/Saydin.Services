@@ -14,19 +14,38 @@ public static class WhatIfEndpoints
         var group = app.MapGroup("/v1/what-if")
             .WithTags("WhatIf");
 
+        // F2.1-4 ([C-A-13], [G-A-03]) + APIR-002/003: Typed Results — OpenAPI şeması
+        // her endpoint için explicit dönüş tipi + olası problem kodlarını taşır.
+        // 403 (FeatureDisabledException → extended_history / dca / inflation) ve
+        // 422 (ScenarioLimitExceededException) eklendi.
         group.MapPost("/calculate", CalculateAsync)
             .WithName("CalculateWhatIf")
             .WithSummary("Ya-alsaydım hesabı yapar")
+            .Produces<Models.Responses.WhatIfResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .RequireDeviceId();
 
         group.MapPost("/compare", CompareAsync)
             .WithName("CompareWhatIf")
             .WithSummary("Birden fazla varlık arasında ya-alsaydım karşılaştırması yapar (2-5 sembol)")
+            .Produces<Models.Responses.CompareResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .RequireDeviceId();
 
         group.MapPost("/reverse", ReverseCalculateAsync)
             .WithName("ReverseCalculateWhatIf")
             .WithSummary("Ters hesaplama: hedef tutardan gereken yatırımı hesaplar")
+            .Produces<Models.Responses.ReverseWhatIfResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .RequireDeviceId();
 
         return app;

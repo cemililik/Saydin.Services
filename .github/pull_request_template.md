@@ -14,7 +14,8 @@
 ## Test
 
 - [ ] Birim testler eklendi / güncellendi
-- [ ] `docker compose up --build` ile çalıştırıldı
+- [ ] `docker compose build && docker compose up -d` ile çalıştırıldı (CLAUDE.md uyumlu)
+- [ ] `docker compose run --rm saydin-api dotnet test` lokalde geçti
 - [ ] İlgili endpoint'ler manuel test edildi
 
 ## Kontrol Listesi
@@ -24,3 +25,4 @@
 - [ ] API key `appsettings.json`'a yazılmadı
 - [ ] Yeni endpoint varsa `api-contract.md` güncellendi
 - [ ] Mimari kurallar ihlal edilmedi (CLAUDE.md)
+- [ ] Cache key / TTL / Redis kullanımı değiştiyse `docs/cache-strategy.md` güncellendi (F2.9-10)
