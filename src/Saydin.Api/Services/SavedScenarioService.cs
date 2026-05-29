@@ -48,20 +48,22 @@ public sealed class SavedScenarioService(
     public async Task<ScenarioResponse> SaveScenarioAsync(
         string deviceId, SaveScenarioRequest request, CancellationToken ct)
     {
-        // Sonar S3776 follow-up: tek bir 100-satırlık metod yerine küçük doğrulayıcılar.
-        // Cognitive complexity 17 → 15 altına iner; kontrol akışı linear okunur.
+        // Codacy follow-up: Tüm request-shape validasyonu user upsert/last_seen
+        // touch'tan ÖNCE yapılır. Aksi halde malformed bir request (örn. invalid
+        // Type, negatif Amount) yine de users tablosuna bir kayıt yaratıyor +
+        // last_seen_at güncelliyordu (gereksiz DB yazma + telemetri kirliliği).
+        // EnforceScenarioLimitAsync user gerektirdiği için upsert SONRASI kalır.
         ValidateRequestNotNull(request);
-
-        // Save path'inde user atomik upsert + select.
-        var user = await repository.GetOrCreateUserAsync(deviceId, ct);
-        await TryTouchLastSeenAsync(user, ct);
-
-        await EnforceScenarioLimitAsync(user, ct);
-
         var normalizedType = NormalizeAndValidateType(request);
         var (trimmedSymbol, requiresAssetSymbol) = ValidateAssetSymbol(request, normalizedType);
         ValidateOptionalFields(request);
         ValidateQuantity(request);
+
+        // Save path'inde user atomik upsert + select — request artık geçerli.
+        var user = await repository.GetOrCreateUserAsync(deviceId, ct);
+        await TryTouchLastSeenAsync(user, ct);
+
+        await EnforceScenarioLimitAsync(user, ct);
 
         // F2.3-6 ([C-C-29]): client-tarafı AssetDisplayName artık güven kaynağı değil —
         // server-side resolve.

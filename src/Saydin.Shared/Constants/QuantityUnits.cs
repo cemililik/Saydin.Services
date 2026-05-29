@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace Saydin.Shared.Constants;
 
 /// <summary>
@@ -12,16 +14,14 @@ public static class QuantityUnits
     public const string Units  = "units";
     public const string Grams  = "grams";
 
-    /// <summary>WhatIf single-asset hesaplamaları için kabul edilen tipler (sıralı).</summary>
-    public static readonly IReadOnlyList<string> WhatIfAccepted = new[]
-    {
+    /// <summary>WhatIf single-asset hesaplamaları için kabul edilen tipler.</summary>
+    public static readonly ImmutableArray<string> WhatIfAccepted = ImmutableArray.Create(
         Grams,
         Try,
-        Units,
-    };
+        Units);
 
-    /// <summary>DB CHECK constraint için izin verilen tüm değerler (sıralı).</summary>
-    public static readonly IReadOnlyList<string> All = WhatIfAccepted;
+    /// <summary>DB CHECK constraint için izin verilen tüm değerler.</summary>
+    public static readonly ImmutableArray<string> All = WhatIfAccepted;
 
     /// <summary>O(1) membership kontrolü.</summary>
     public static readonly IReadOnlySet<string> Lookup =

@@ -48,11 +48,12 @@ public static class AssetsEndpoints
             .Produces<AssetListResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
+        // F7 follow-up: GetPriceAsync da domain entity yerine PricePointResponse döner.
         group.MapGet("/{symbol}/price/{date}", GetPriceAsync)
             .RequireDeviceId()
             .WithName("GetAssetPrice")
             .WithSummary("Belirli tarihte fiyat döner")
-            .Produces<Saydin.Shared.Entities.PricePoint>(StatusCodes.Status200OK)
+            .Produces<PricePointResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
@@ -117,7 +118,11 @@ public static class AssetsEndpoints
                 assetSymbol = symbol,
                 date = date.ToString("yyyy-MM-dd")
             });
-            return Results.Ok(price);
+            // F7 follow-up: domain `PricePoint` sızıntısı kalkar — public DTO map.
+            // AssetId / Asset navigation alanları response'a yansımaz.
+            var response = new PricePointResponse(price.PriceDate, price.Close,
+                price.Open, price.High, price.Low, price.Volume);
+            return Results.Ok(response);
         }
         catch
         {

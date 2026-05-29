@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace Saydin.Shared.Constants;
 
 /// <summary>
@@ -10,14 +12,12 @@ public static class UserTiers
     public const string Free    = "free";
     public const string Premium = "premium";
 
-    /// <summary>F13 follow-up: sıralı sabit liste — CHECK SQL deterministic.</summary>
-    public static readonly IReadOnlyList<string> All = new[]
-    {
+    /// <summary>F13 follow-up: gerçek immutable koleksiyon — CHECK SQL deterministik.</summary>
+    public static readonly ImmutableArray<string> All = ImmutableArray.Create(
         Free,
-        Premium,
-    };
+        Premium);
 
-    /// <summary>Case-insensitive membership kontrolü (kullanıcı kayıtlarındaki mixed-case).</summary>
+    /// <summary>Case-insensitive membership kontrolü.</summary>
     public static readonly IReadOnlySet<string> Lookup =
         new HashSet<string>(All, StringComparer.OrdinalIgnoreCase);
 }

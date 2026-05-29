@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace Saydin.Shared.Constants;
 
 /// <summary>
@@ -12,14 +14,12 @@ public static class ScenarioTypes
     public const string Portfolio  = "portfolio";
     public const string Dca        = "dca";
 
-    /// <summary>F13 follow-up: alfabetik sıralı sabit liste — CHECK SQL deterministic.</summary>
-    public static readonly IReadOnlyList<string> All = new[]
-    {
+    /// <summary>F13 follow-up: gerçek immutable koleksiyon — CHECK SQL deterministik.</summary>
+    public static readonly ImmutableArray<string> All = ImmutableArray.Create(
         Comparison,
         Dca,
         Portfolio,
-        WhatIf,
-    };
+        WhatIf);
 
     /// <summary>O(1) membership kontrolü.</summary>
     public static readonly IReadOnlySet<string> Lookup =

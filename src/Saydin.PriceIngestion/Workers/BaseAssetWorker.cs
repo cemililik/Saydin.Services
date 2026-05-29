@@ -1,7 +1,12 @@
+using System.Text.Json;
+using System.Xml;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Npgsql;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
 using Saydin.Shared.Entities;
+using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Workers;
 
@@ -92,6 +97,13 @@ public abstract class BaseAssetWorker(
             {
                 return;
             }
+            catch (Exception ex) when (IsTransient(ex))
+            {
+                // Codacy follow-up: ilk fetch için de aynı exponential backoff
+                // mantığı; transient olmayan bug/config error rethrow edilir.
+                if (!await TryRecoverWithBackoffAsync(ex, ct))
+                    return;
+            }
         }
 
         while (!ct.IsCancellationRequested)
@@ -109,19 +121,14 @@ public abstract class BaseAssetWorker(
             {
                 break;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (IsTransient(ex))
             {
-                // INGR-007: FetchTodayAsync non-shutdown exception (örn. transient DB
-                // hatası, dış API beklenmeyen geri dönüş) tüm worker'ı sessizce
-                // sonlandırmamalı. Loop'u kaldıran tek sebep shutdown token'ıdır.
-                //
-                // INGR-007 follow-up (Codacy uyarısı): basitçe `continue` yapmak
-                // GetDelayUntilNextRun()'in scheduled saatin geçtiğini görüp 24sa
-                // beklemesine yol açıyordu — günlük veri tamamen atlanırdı.
-                // Çözüm: exponential backoff ile aynı gün içinde sınırlı sayıda
-                // tekrar dene (5dk → 10dk → 20dk → 40dk → 80dk). Hepsi başarısız
-                // olursa bir sonraki scheduled saate düş (24sa yerine en fazla
-                // 155dk veri kaybı kabul edilebilir, "tamamen atlama" engellenir).
+                // INGR-007: Transient hatalar (HTTP/JSON/XML/EF transient/Polly
+                // ExternalApiException) exponential backoff ile aynı gün içinde
+                // 5 deneme — "scheduled time geçti, 24sa bekle" davranışı engellenir.
+                // Codacy follow-up: blanket Exception catch yerine specific filter
+                // — bug/config error (Null/Argument/InvalidOperation) loop'tan
+                // sızar ve fail-fast olur.
                 if (!await TryRecoverWithBackoffAsync(ex, ct))
                     break; // cancellation token tetiklendi
             }
@@ -183,6 +190,24 @@ public abstract class BaseAssetWorker(
         var scheduledToday = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
         return now >= scheduledToday;
     }
+
+    /// <summary>
+    /// Codacy follow-up: Transient ve "expected" dış kaynak hataları beyaz-listesi.
+    /// Sadece bu set retry pencereye alınır; bug (Null/Argument/InvalidOperation)
+    /// ve programlama hataları rethrow edilerek fail-fast davranışı korunur.
+    /// </summary>
+    private static bool IsTransient(Exception ex) => ex switch
+    {
+        ExternalApiException                   => true, // dış API beklenen hata (Polly tükenmiş)
+        HttpRequestException                   => true, // network/DNS, transient HTTP
+        TaskCanceledException                  => true, // per-attempt timeout (non-shutdown)
+        TimeoutException                       => true,
+        JsonException                          => true, // adapter payload schema drift
+        XmlException                           => true, // TCMB XML transient
+        DbUpdateException                      => true, // EF transient (deadlock, connection blink)
+        NpgsqlException                        => true, // Npgsql transient (server reset)
+        _                                      => false,
+    };
 
     /// <summary>
     /// FetchToday'ı backfill sonrası tetikleyip tetiklememeyi kararlaştırır.

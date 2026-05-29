@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace Saydin.Shared.Constants;
 
 /// <summary>
@@ -20,12 +22,11 @@ public static class ActivityActions
     public const string ConfigFetch     = "config_fetch";
 
     /// <summary>
-    /// F12 follow-up: HashSet yerine sıralı IReadOnlyList — `string.Join` çıktısı
-    /// deterministic olur (EF Configuration CHECK SQL stabil; Add-Migration drift yok).
-    /// Sıra alfabetik tutulur ki sembol eklendiğinde diff minimal kalsın.
+    /// F12 follow-up: gerçek immutable koleksiyon. Sıra alfabetik; caller `(string[])All`
+    /// downcast ile mutate edemez (önceki `IReadOnlyList<string> = new[]{...}` array
+    /// backing'i downcast'la elemana yazma yapabiliyordu).
     /// </summary>
-    public static readonly IReadOnlyList<string> All = new[]
-    {
+    public static readonly ImmutableArray<string> All = ImmutableArray.Create(
         AssetPrice,
         AssetPriceRange,
         AssetsList,
@@ -36,13 +37,9 @@ public static class ActivityActions
         WhatIfCalculate,
         WhatIfCompare,
         WhatIfDca,
-        WhatIfReverse,
-    };
+        WhatIfReverse);
 
-    /// <summary>
-    /// O(1) membership kontrolü için ayrı HashSet. `All` ile aynı değerleri taşır.
-    /// Caller'lar (Builder/ChannelActivityLogger) bunu kullanır.
-    /// </summary>
+    /// <summary>O(1) membership kontrolü için ayrı HashSet (immutable snapshot üzerinden).</summary>
     public static readonly IReadOnlySet<string> Lookup =
         new HashSet<string>(All, StringComparer.Ordinal);
 }

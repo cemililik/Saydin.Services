@@ -28,7 +28,13 @@ jobs:
       # CFGR-004: Third-party action'lar full-length commit SHA ile pinli; tag (v4)
       # mutable'dır. Dependabot/Renovate `# v4` yorumlarını okuyarak otomatik bump
       # yapabilir.
+      # Codacy follow-up: persist-credentials: false — checkout sonrası GITHUB_TOKEN
+      # .git/config'e yazılmaz. Workflow git push yapmıyor; tokenin orada kalması
+      # least-privilege ihlali (sonraki adımlarda kazara push yapılırsa veya 3rd-party
+      # action git API'sini kötüye kullanırsa risk).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: .NET SDK kur
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
@@ -118,7 +124,10 @@ jobs:
       contents: read
 
     steps:
+      # Codacy follow-up: persist-credentials: false (bkz. build-and-test job).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # F2.9-2 ([C-I-3]): Docker layer cache. BuildKit + GitHub Actions cache backend
       # (`type=gha`) ile sonraki run'lar `dotnet restore` ve `RUN` katmanlarını
