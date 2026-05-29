@@ -80,6 +80,6 @@ yeterli sinyal korunur; tek source-of-truth + kontrat testi.
 ## İlgili Dökümanlar
 
 - `Saydin.Shared/Constants/AmountBucket.cs` — bucket sınırları (source-of-truth)
-- `Saydın` meta repo `docs/architecture/activity-logging.md` — data payload şeması
+- [`docs/architecture/activity-logging.md`](../architecture/activity-logging.md) — data payload şeması (backend)
 - `Saydın` meta repo `docs/privacy-policy.html` — gizlilik metni (uyum)
 - Faz aksiyon planı: `docs/code-reviews/ACTION-PLAN.md` (F4-6)

@@ -200,4 +200,4 @@ Aşağıdaki durumlarda bu belgeyi güncelle:
 - **Timezone-aware limit sıfırlama:** Şu an UTC gece yarısı; Türk kullanıcı için UTC+3 daha doğal
 - **Cache hit/miss Prometheus metriği:** Şu an sadece log'da var
 - **`assets:list` invalidation:** Asset eklenince otomatik flush (şu an manuel)
-- Bkz. `/docs/high-traffic-checklist.md` → Redis bölümü
+- Bkz. [`high-traffic-checklist.md`](high-traffic-checklist.md) → Redis bölümü

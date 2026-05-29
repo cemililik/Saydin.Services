@@ -303,7 +303,9 @@ Cache anahtarı normalize edilmiş parametrelerle oluşturulur.
 - **Metrics:** OpenTelemetry + Prometheus scrape (`/metrics`)
 - **Health checks:** `/health` → PostgreSQL + Redis bağlantı kontrolleri
 
-Detaylar: [../../docs/architecture/observability.md](../../docs/architecture/observability.md)
+Detaylı referans: [architecture/observability.md](architecture/observability.md) ·
+İlgili: [architecture/database-schema.md](architecture/database-schema.md) ·
+[architecture/activity-logging.md](architecture/activity-logging.md)
 
 ## Faz 3 Sistemik Değişiklikler
 

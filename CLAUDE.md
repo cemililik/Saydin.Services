@@ -410,9 +410,12 @@ Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` d
 
 | Kapsam | Konum |
 |--------|-------|
+| Backend dokümantasyon haritası (başlangıç) | `docs/README.md` |
 | Servis mimarisi (katmanlar, sınırlar, resilience, cache, DB erişim) | `docs/architecture.md` |
+| Backend derin teknik referanslar (DB şeması, observability, activity-logging) | Bu repo `docs/architecture/` (backend-özgü) |
 | .NET geliştirme iş akışı (komutlar, Docker, migration, test, sorun giderme) | `docs/development-guide.md` |
-| Proje geneli mimari (istemci + servisler arası ilişki, API sözleşmesi, DB şeması) | Saydın meta repo kök `docs/` dizini |
+| Backend ölçeklendirme/ops kontrol listesi | `docs/high-traffic-checklist.md` |
+| İstemci↔backend API sözleşmesi (`api-contract.md`) + proje geneli mimari (istemci+servis, overview) | Saydın meta repo `docs/` dizini |
 | Backend/servis-özgü mimari kararlar (ADR) | Bu repo `docs/decisions/` (bağımsız `ADR-001+` uzayı) |
 | Ürün / çapraz-bileşen mimari kararlar (ADR) | Saydın meta repo `docs/decisions/` (bağımsız `ADR-001..ADR-014` uzayı) |
 
