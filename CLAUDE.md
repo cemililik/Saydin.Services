@@ -354,7 +354,17 @@ dotnet ef database update \
 - `Services/` katmanındaki her public method için unit test zorunludur
 - Test adlandırma: `MethodName_Scenario_ExpectedResult`
 - Dış adaptörler için en az deserializasyon testi (contract test) gerekir
-- Veritabanı testleri için real PostgreSQL (Docker) kullanılır — mock yasak
+- **Test türü → izolasyon stratejisi (mock politikası) — F4-9:**
+  - **Service unit testleri:** Collaborator bağımlılıkları (repository, cache,
+    `IDailyLimitGuard`, `IStringLocalizer`, `IDeviceContext`, dış adapter interface'leri)
+    **NSubstitute ile mock'lanır** — serbesttir. Determinizm için saat `FakeTimeProvider`
+    ile dondurulur. Hedef: iş mantığını DB/Redis olmadan hızlı ve izole test etmek.
+  - **Dış adapter contract testleri:** Yalnız HTTP katmanı sahtelenir
+    (`HttpMessageHandler` / fake handler ile sabit yanıt); deserializasyon, retry/backoff,
+    timeout ve hata→exception davranışı doğrulanır.
+  - **Veritabanı / integration testleri:** **mock YASAK** — gerçek PostgreSQL ve Redis
+    kullanılır (`tests` compose profili; compose ağındaki `postgres`/`redis` servisleri).
+    PG/Redis erişilemezse test `SkippableFact` ile Skipped olur, kırmızıya dönmez.
 
 ---
 
@@ -400,10 +410,14 @@ Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` d
 
 | Kapsam | Konum |
 |--------|-------|
+| Backend dokümantasyon haritası (başlangıç) | `docs/README.md` |
 | Servis mimarisi (katmanlar, sınırlar, resilience, cache, DB erişim) | `docs/architecture.md` |
+| Backend derin teknik referanslar (DB şeması, observability, activity-logging) | Bu repo `docs/architecture/` (backend-özgü) |
 | .NET geliştirme iş akışı (komutlar, Docker, migration, test, sorun giderme) | `docs/development-guide.md` |
-| Proje geneli mimari (istemci + servisler arası ilişki, API sözleşmesi, DB şeması) | Kök `docs/` dizini |
-| Mimari kararlar (ADR) | Kök `docs/decisions/` dizini |
+| Backend ölçeklendirme/ops kontrol listesi | `docs/high-traffic-checklist.md` |
+| İstemci↔backend API sözleşmesi (`api-contract.md`) + proje geneli mimari (istemci+servis, overview) | Saydın meta repo `docs/` dizini |
+| Backend/servis-özgü mimari kararlar (ADR) | Bu repo `docs/decisions/` (bağımsız `ADR-001+` uzayı) |
+| Ürün / çapraz-bileşen mimari kararlar (ADR) | Saydın meta repo `docs/decisions/` (bağımsız `ADR-001..ADR-014` uzayı) |
 
 ### Kurallar
 
@@ -411,6 +425,10 @@ Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` d
 - **Backend'e özgü** her doküman `docs/` içine gider — Saydın meta repo'sundaki kök `docs/` içine konmaz.
 - Kök `docs/`'a yalnızca birden fazla bileşeni (istemci + servisler) kapsayan belgeler eklenir.
 - Yeni endpoint, adapter veya servis eklendiğinde ilgili `docs/` dosyaları güncellenir.
-- Yeni API endpoint eklendiğinde kök `docs/architecture/api-contract.md` de güncellenir.
-- Büyük mimari karar alındığında kök `docs/decisions/ADR-XXX-<konu>.md` oluşturulur.
+- Yeni API endpoint eklendiğinde Saydın meta repo `docs/architecture/api-contract.md` de güncellenir.
+- **ADR yer seçimi (F4-10):** karar yalnızca backend'i mi yoksa istemci/ürünü de mi
+  ilgilendiriyor? Yalnız backend/altyapı → bu repo `docs/decisions/ADR-XXX-<konu>.md`
+  (bağımsız numaralandırma); istemci+servis veya ürün/UX/legal kapsıyorsa Saydın meta repo
+  `docs/decisions/`. İki ADR uzayı kasıtlı olarak ayrıdır; numara çakışması beklenir ve
+  sorun değildir. Detay: [`docs/decisions/README.md`](docs/decisions/README.md).
 - Dokümanlar kod değişikliğiyle aynı commit'te güncellenir; ayrı PR açılmaz.

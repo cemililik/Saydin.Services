@@ -1,11 +1,15 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Localization;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
 using OpenTelemetry.Exporter;
@@ -101,7 +105,12 @@ try
             .AddPrometheusExporter());
 
     // ─── Localization ──────────────────────────────────────────────────────────
-    builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
+    // ResourcesPath BİLEREK ayarlanmaz: resx dosyaları Resources/ErrorMessages.cs (namespace
+    // Saydin.Api) ile DependentUpon olduğundan "Saydin.Api.ErrorMessages.resources" olarak
+    // gömülür — "Resources" segmenti YOKTUR. ResourcesPath="Resources" verilirse factory
+    // "Saydin.Api.Resources.ErrorMessages" arar → her lookup ıskalar ve ham resx KEY'i döner
+    // (tr/en ayrımı kaybolur). Bkz. ErrorMessagesLocalizationTests (regresyon kilidi).
+    builder.Services.AddLocalization();
 
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();
@@ -292,6 +301,66 @@ try
             options.ForwardLimit = forwardLimit.Value;
     });
 
+    // ─── Rate Limiting (IP-bazlı, config-gated — ADR-003) ──────────────────────
+    // İki katmanlı throttling modeli:
+    //   (1) Cihaz-bazlı GÜNLÜK iş kotası → IDailyLimitGuard (Redis, usage:* key'leri) —
+    //       ürün adilliği / kötüye-kullanım (mevcut).
+    //   (2) IP-bazlı altyapı throttle → aşağıdaki RateLimiter (in-memory, sabit pencere) —
+    //       burst / DoS koruması (yeni).
+    // İkisi diktir; ikisi de korunur. Varsayılan KAPALI (RateLimiting:Enabled=false) →
+    // mevcut davranışı, local dev'i ve testleri etkilemez; ortam bazında açılır.
+    // Dağıtık (çok-instance) Redis-destekli limit, yatay ölçeklenince eklenecek
+    // dokümante edilmiş takip işidir (bkz. ADR-003).
+    var rateLimitingEnabled = builder.Configuration.GetValue<bool>("RateLimiting:Enabled");
+    if (rateLimitingEnabled)
+    {
+        var permitLimit   = builder.Configuration.GetValue<int?>("RateLimiting:PermitLimit") ?? 100;
+        var windowSeconds = builder.Configuration.GetValue<int?>("RateLimiting:WindowSeconds") ?? 60;
+
+        builder.Services.AddRateLimiter(rl =>
+        {
+            rl.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            rl.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+            {
+                // /health ve /metrics throttle dışında (OTel trace filtresiyle tutarlı, gürültü yok).
+                var path = httpContext.Request.Path;
+                if (path.StartsWithSegments("/health") || path.StartsWithSegments("/metrics"))
+                    return RateLimitPartition.GetNoLimiter("infra");
+
+                // İstemci IP'si UseForwardedHeaders SONRASI gerçek IP'dir (KnownProxies yapılandırılmışsa).
+                var clientIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = permitLimit,
+                    Window      = TimeSpan.FromSeconds(windowSeconds),
+                    QueueLimit  = 0,
+                });
+            });
+
+            // Reddetme yanıtı DailyLimitExceededExceptionHandler ile aynı RFC 7807 + i18n + traceId
+            // şeklini taşır; Retry-After header eklenir.
+            rl.OnRejected = async (context, ct) =>
+            {
+                var http = context.HttpContext;
+                var localizer = http.RequestServices.GetRequiredService<IStringLocalizer<Saydin.Api.ErrorMessages>>();
+
+                if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                    http.Response.Headers.RetryAfter =
+                        ((int)retryAfter.TotalSeconds).ToString(CultureInfo.InvariantCulture);
+
+                http.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                await http.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                {
+                    Type   = "https://saydin.app/errors/rate-limited",
+                    Title  = localizer["RateLimited"],
+                    Status = StatusCodes.Status429TooManyRequests,
+                    Detail = string.Format(localizer["RateLimitedDetail"], windowSeconds, permitLimit),
+                    Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier }
+                }, (JsonSerializerOptions?)null, "application/problem+json", ct);
+            };
+        });
+    }
+
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();
 
@@ -307,6 +376,11 @@ try
         SupportedUICultures = supportedCultures,
         ApplyCurrentCultureToResponseHeaders = true
     });
+
+    // UseForwardedHeaders SONRASI (gerçek IP) ve UseRequestLocalization SONRASI (429 mesajı
+    // Accept-Language'a göre lokalize) çalışır. Yalnız config açıkken pipeline'a girer.
+    if (rateLimitingEnabled)
+        app.UseRateLimiter();
 
     app.UseExceptionHandler();
     app.UseSerilogRequestLogging();

@@ -37,6 +37,8 @@ docker-compose up -d  # Saydin.Api
 
 ### Uygulamayı Çalıştır (Yerel .NET)
 
+> **Uyarı:** Bu repo Docker Compose tabanlıdır; lokal makinede .NET 10 SDK kurulu **olmayabilir**. SDK kurulu değilse aşağıdaki `dotnet` komutları çalışmaz — bunun yerine yukarıdaki **Uygulamayı Çalıştır (Docker)** akışını kullan. Ayrıntılar: [CLAUDE.md](CLAUDE.md).
+
 ```bash
 cd src/Saydin.Services
 
@@ -83,6 +85,9 @@ Saydin.Api (HTTP)          Saydin.PriceIngestion (Worker)
 **Temel kural:** `Saydin.Api` hiçbir dış finansal API'ye istek atmaz. `Saydin.PriceIngestion` hiçbir HTTP endpoint expose etmez. Servisler sadece veritabanı üzerinden haberleşir.
 
 Detaylı mimari: [docs/architecture.md](docs/architecture.md)
+
+Mimari karar kayıtları (ADR): [docs/decisions/](docs/decisions/README.md) ·
+Değişiklik geçmişi: [CHANGELOG.md](CHANGELOG.md)
 
 ## Geliştirme
 

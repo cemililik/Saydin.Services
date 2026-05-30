@@ -1,6 +1,7 @@
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
+using Saydin.Shared.Constants;
 
 namespace Saydin.Api.Endpoints;
 
@@ -61,18 +62,18 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CalculateAsync(request, ct);
 
+        // F4-6 (KVKK): ham tutar yerine kaba aralık; sonuç TL tutarı (ProfitLossTry) loglanmaz.
         log.WithData(new
         {
             request.AssetSymbol,
             buyDate = request.BuyDate.ToString(IsoDate),
             sellDate = request.SellDate?.ToString(IsoDate),
-            request.Amount,
+            amountBucket = AmountBucket.Coarse(request.Amount),
             request.AmountType,
             request.IncludeInflation,
             result = new
             {
                 result.ProfitLossPercent,
-                result.ProfitLossTry,
                 result.IsProfit,
                 result.RealProfitLossPercent,
                 actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
@@ -93,12 +94,13 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CompareAsync(request, ct);
 
+        // F4-6 (KVKK): ham tutar yerine kaba aralık. Sonuç zaten yalnız yüzde/rank içerir.
         log.WithData(new
         {
             request.AssetSymbols,
             buyDate = request.BuyDate.ToString(IsoDate),
             sellDate = request.SellDate?.ToString(IsoDate),
-            request.Amount,
+            amountBucket = AmountBucket.Coarse(request.Amount),
             request.AmountType,
             request.IncludeInflation,
             result = new
@@ -126,17 +128,17 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CalculateReverseAsync(request, ct);
 
+        // F4-6 (KVKK): ham hedef tutar yerine kaba aralık; gereken yatırım TL'si loglanmaz.
         log.WithData(new
         {
             request.AssetSymbol,
             buyDate = request.BuyDate.ToString(IsoDate),
             sellDate = request.SellDate?.ToString(IsoDate),
-            request.TargetAmount,
+            targetAmountBucket = AmountBucket.Coarse(request.TargetAmount),
             request.TargetAmountType,
             request.IncludeInflation,
             result = new
             {
-                result.RequiredInvestmentTry,
                 result.ProfitLossPercent,
                 result.IsProfit,
                 result.RealProfitLossPercent,

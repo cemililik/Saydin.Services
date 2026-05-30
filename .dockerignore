@@ -27,7 +27,6 @@ Thumbs.db
 # CI / sürüm kontrol
 .github/
 .coderabbit.yaml
-.sourcery.yaml
 *.md
 docs/
 infrastructure/

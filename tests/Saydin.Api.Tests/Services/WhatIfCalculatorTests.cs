@@ -680,16 +680,42 @@ public class WhatIfCalculatorTests
         result.AssetSymbol.Should().Be("USDTRY");
         result.BuyPrice.Should().Be(5.95m);
         result.SellPrice.Should().Be(8.50m);
-        result.TargetValueTry.Should().Be(100_000m);
 
         var expectedUnits = Math.Round(100_000m / 8.50m, 6, MidpointRounding.AwayFromZero);
         result.UnitsAcquired.Should().Be(expectedUnits);
 
+        // F4-3: targetValueTry forward-consistent türetilir (bu fiyatlarda 100.000,00'a yuvarlanır).
+        var expectedTarget = Math.Round(expectedUnits * 8.50m, 2, MidpointRounding.AwayFromZero);
+        result.TargetValueTry.Should().Be(expectedTarget);
+
         var expectedInvestment = Math.Round(expectedUnits * 5.95m, 2, MidpointRounding.AwayFromZero);
         result.RequiredInvestmentTry.Should().Be(expectedInvestment);
 
-        result.ProfitLossTry.Should().Be(100_000m - expectedInvestment);
+        result.ProfitLossTry.Should().Be(expectedTarget - expectedInvestment);
         result.IsProfit.Should().BeTrue();
+
+        // F4-3 forward-consistency kilidi: UnitsAcquired × SellPrice == TargetValueTry.
+        Math.Round(result.UnitsAcquired * result.SellPrice, 2, MidpointRounding.AwayFromZero)
+            .Should().Be(result.TargetValueTry);
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_TargetTypeTry_TargetValueIsForwardConsistent_NotRawEcho()
+    {
+        // sellPrice büyük + bölünme tam çıkmıyor → birim yuvarlaması (6 hane) ham hedeften
+        // ölçülebilir (kuruş üstü) bir sapma yaratır: 100.000 / 30.000 = 3,333333… birim,
+        // 3,333333 × 30.000 = 99.999,99. Forward-consistency targetValueTry'yi 99.999,99
+        // yapar (ham 100.000 echo'su DEĞİL); böylece UI'da UnitsAcquired × SellPrice uyuşur.
+        SetupPrices(buyPrice: 10_000m, sellPrice: 30_000m);
+
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 100_000m, "try");
+        var result  = await _sut.CalculateReverseAsync(request, CancellationToken.None);
+
+        result.UnitsAcquired.Should().Be(3.333333m);
+        result.TargetValueTry.Should().Be(99_999.99m);
+        result.TargetValueTry.Should().NotBe(100_000m); // ham echo olmadığını kanıtlar
+        Math.Round(result.UnitsAcquired * result.SellPrice, 2, MidpointRounding.AwayFromZero)
+            .Should().Be(result.TargetValueTry);
     }
 
     [Fact]
@@ -778,12 +804,11 @@ public class WhatIfCalculatorTests
     }
 
     [Fact]
-    public async Task CompareAsync_InflationTierDisabled_SilentlyDropsInflationFlag()
+    public async Task CompareAsync_InflationTierDisabled_ThrowsFeatureDisabled()
     {
         // Tier inflation kapalı + CompareRequest IncludeInflation=true →
-        // Calculator FeatureDisabled fırlatmak yerine flag'i drop eder
-        // (CalculateAsync ile aynı semantik koruma; review outside diff comment).
-        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        // CalculateAsync / CalculateReverseAsync ile TUTARLI: flag'i sessizce drop etmek
+        // yerine FeatureDisabled (4xx) fırlatılır (üç entry-point aynı davranır).
         var planOptions = new PlanOptions
         {
             Free = new TierOptions { Features = new FeatureOptions {
@@ -794,20 +819,12 @@ public class WhatIfCalculatorTests
         };
         var sut = CreateSutWithOptions(planOptions);
 
-        var request = new CompareRequest(["USDTRY", "USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try",
+        var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try",
             IncludeInflation: true);
 
-        // BTC için de asset bilgisi gerek
-        _assetService.GetBySymbolAsync("BTC", Arg.Any<CancellationToken>())
-                     .Returns(new Asset { Id = Guid.NewGuid(), Symbol = "BTC", DisplayName = "Bitcoin",
-                                          Category = AssetCategory.Crypto, Source = "coingecko", IsActive = true });
+        var act = () => sut.CompareAsync(request, CancellationToken.None);
 
-        var result = await sut.CompareAsync(request, CancellationToken.None);
-
-        // Inflation talep edildi ama disabled → InflationRepository hiç çağrılmamalı
-        await _inflationRepository.DidNotReceive()
-            .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
-        result.Results.Should().HaveCount(2);
+        await act.Should().ThrowAsync<FeatureDisabledException>();
     }
 
     // ── Amount Validation (F1.9-4) ─────────────────────────────────────────

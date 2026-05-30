@@ -48,6 +48,8 @@
   <data name="PriceRangeTooWide"><value>Fiyat aral&#x131;&#x11F;&#x131; &#x00E7;ok geni&#x15F;</value></data>
   <data name="PriceRangeTooWideDetail"><value>Tek istekte en fazla {0} g&#x00FC;nl&#x00FC;k fiyat aral&#x131;&#x11F;&#x131; sorgulanabilir.</value></data>
   <data name="AmountMustBePositive"><value>Tutar 0'dan b&#x00FC;y&#x00FC;k olmal&#x131;d&#x131;r.</value></data>
+  <data name="RateLimited"><value>&#x00C7;ok fazla istek</value></data>
+  <data name="RateLimitedDetail"><value>{0} saniyede en fazla {1} istek yap&#x131;labilir. L&#x00FC;tfen biraz sonra tekrar deneyin.</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dolar/TL</value></data>
   <data name="Asset_EURTRY"><value>Euro/TL</value></data>

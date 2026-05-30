@@ -58,7 +58,7 @@ docker exec saydin-postgres psql -U saydin -d saydin \
 
 > **Fresh init (tüm migration'lar):** `infrastructure/postgres/migrations/*.sql` dosyaları
 > docker-entrypoint tarafından **yalnız boş volume'da** alfabetik + `ON_ERROR_STOP` ile
-> çalışır. Tüm zinciri (001→013) temiz uygulamak için:
+> çalışır. Tüm zinciri (001→014) temiz uygulamak için:
 > ```bash
 > docker compose down -v && docker compose up -d   # DİKKAT: dev volume'larını sıfırlar
 > docker compose logs postgres | grep -E "running /docker-entrypoint|ERROR"  # abort yok mu?
@@ -70,28 +70,58 @@ docker exec saydin-postgres psql -U saydin -d saydin \
 > disable/re-enable penceresini koru. Zaten compress edilmiş **prod** tablolar için 011 üst
 > yorumundaki manuel runbook geçerlidir.
 
-### EF Core ile Yeni Migration Ekleme
+### Migration Stratejisi & İzleme (F4-1 / ADR-001 — Seçenek C hybrid)
+
+Aktif strateji **numaralandırılmış SQL** dosyalarıdır (EF Core'a tam geçiş post-MVP'ye
+ertelendi — TimescaleDB compression/hypertable EF'le modellenemez; bkz.
+[ADR-001](decisions/ADR-001-migration-strategy.md)). `014_schema_migrations.sql` hafif bir
+**izleme tablosu** ekler (`schema_migrations(version, applied_at, checksum)`); fresh init
+tüm sürümleri back-register eder. Uygulanmışları görmek için:
 
 ```bash
-cd src/Saydin.Services
-
-# Yeni migration oluştur (Saydin.Shared projesine, Saydin.Api startup projesi olarak)
-dotnet ef migrations add <MigrationAdı> \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
-
-# Veritabanını güncelle
-dotnet ef database update \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
-
-# Migration listesi
-dotnet ef migrations list \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
+docker compose exec postgres psql -U saydin -d saydin \
+  -c "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
 ```
 
-> **Not:** EF Core migrations için `Microsoft.EntityFrameworkCore.Design` paketi `Saydin.Api.csproj`'da mevcut.
+**Yeni migration ekleme:** Sıradaki numarayla yeni `.sql` dosyası ekle (`015_*.sql`);
+mevcut dosyaları **asla değiştirme**. Alfabetik sıralama 008b/013 compression penceresini
+bozmamalı (`014`+ güvenle 013 sonrası sıralanır).
+
+**Var olan (boş olmayan / prod) DB'ye deploy (F4-8):**
+
+```bash
+DATABASE_URL='postgres://user:pass@host:5432/db' infrastructure/postgres/apply-migrations.sh
+```
+
+Runner `schema_migrations`'a bakıp yalnız **kayıtlı olmayan** migration'ları uygular
+(initdb.d dışındadır → fresh init'te otomatik çalışmaz). 014-öncesi DB'lerde önce `014`
+elle uygulanmalı (geçmişi back-register eder).
+
+### EF Core ile Yeni Migration Ekleme (post-MVP — şu an KULLANILMIYOR)
+
+> **Durum (ADR-001 revizyonu):** EF Core Migrations'a tam geçiş **ertelenmiş gelecek
+> yoludur**; şu an aktif değildir (aktif strateji yukarıdaki numaralı SQL'dir). Aşağıdaki
+> komutlar geçiş yapıldığında geçerli olacaktır. `Microsoft.EntityFrameworkCore.Design`
+> paketi `Saydin.Api.csproj`'da geçişe hazır olarak mevcuttur.
+>
+> **Çalıştırma (Docker-Compose-only):** Lokal makinede .NET 10 SDK yoktur (CLAUDE.md) →
+> bu komutlar da diğer `dotnet` işlemleri gibi **SDK imajı + repo mount** içinde çalışır
+> (build komutuyla aynı desen). `dotnet-ef` global tool imajda yoktur, önce kurulur;
+> `database update` ayrıca DB için compose ağına (`saydin-services_default`) bağlanır.
+
+```bash
+# (Post-MVP) Yeni migration oluştur — SDK imajında (lokal `dotnet ef` YOK):
+docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh -c \
+  'dotnet tool install -g dotnet-ef >/dev/null 2>&1; export PATH="$PATH:/root/.dotnet/tools"; \
+   dotnet ef migrations add <MigrationAdı> --project src/Saydin.Shared --startup-project src/Saydin.Api'
+
+# (Post-MVP) Veritabanını güncelle — compose ağı + ConnectionStrings env ile:
+docker run --rm -v "$PWD":/src -w /src --network saydin-services_default \
+  -e ConnectionStrings__Postgres="Host=postgres;Database=saydin;Username=saydin;Password=$POSTGRES_PASSWORD" \
+  mcr.microsoft.com/dotnet/sdk:10.0 sh -c \
+  'dotnet tool install -g dotnet-ef >/dev/null 2>&1; export PATH="$PATH:/root/.dotnet/tools"; \
+   dotnet ef database update --project src/Saydin.Shared --startup-project src/Saydin.Api'
+```
 
 ## 3. Saydin.Api Çalıştırma
 
@@ -145,6 +175,33 @@ dotnet run --project src/Saydin.PriceIngestion
 ```
 
 > **Not:** API key eksikse ilgili adapter graceful skip yapar (servisi durdurmaz). CoinGecko key olmadan 403 alınır ve adapter atlanır. OpenExchangeRates ücretsiz planda aylık 1000 istek sınırı vardır.
+
+### Worker Seçici Aktivasyonu (F4-11)
+
+İngestion worker'ları **her katmanda varsayılan KAPALI** (disabled-by-default):
+`appsettings.json` baseline `Enabled=false`, `IngestionOrchestrator` fallback `?? false`
+(eksik/typo'lu config → fail-closed). Aktivasyon **env tek opt-in kaynağıdır** — `.env`:
+
+```bash
+WORKER_TCMB_ENABLED=true        # TCMB (key gerektirmez)
+WORKER_EVDS_ENABLED=true        # EVDS enflasyon (key gerektirmez)
+WORKER_COINGECKO_ENABLED=false  # key gerektirir
+WORKER_OXR_ENABLED=false        # key gerektirir
+WORKER_TWELVEDATA_ENABLED=false # key gerektirir
+```
+
+Fresh-checkout `.env.example` TCMB + EVDS'i açık gönderir (key-free ulusal-veri kaynakları);
+key gerektiren kaynaklar kapalıdır — böylece kazara dış API / rate-limit tüketilmez. Bare
+binary (env'siz) çalıştırma da güvenlidir: hiçbir worker çalışmaz, `IngestionOrchestrator`
+"Hiçbir worker aktif değil" uyarısı verir.
+
+### GeoIP (opsiyonel, F4-7)
+
+`activity_logs` coğrafi zenginleştirmesi MaxMind **GeoLite2-City** ile yapılır. `.mmdb`
+**repoya commit edilmez** (lisans); `infrastructure/geoip/README.md`'deki komutla
+`GEOIP_ACCOUNT_ID`/`GEOIP_LICENSE_KEY` kullanılarak indirilir. Dosya yoksa GeoIP devre dışı
+kalır (`LogWarning` + `country`/`city` null) — **istek başarısız olmaz**. Detay:
+[ADR-004](decisions/ADR-004-geoip-distribution.md).
 
 ## 5. Testleri Çalıştırma
 
@@ -293,8 +350,21 @@ curl http://localhost:5080/metrics
 | `ExternalApis__CoinGecko__ApiKey` | CoinGecko API anahtarı | (key yoksa graceful skip) |
 | `ExternalApis__OpenExchangeRates__AppId` | Open Exchange Rates App ID | (key yoksa graceful skip) |
 | `ExternalApis__TwelveData__ApiKey` | Twelve Data API anahtarı | (key yoksa graceful skip) |
+| `RateLimiting__Enabled` | IP-bazlı rate limiter (F4-5, varsayılan kapalı) | `false` |
+| `RateLimiting__PermitLimit` | Pencere başına izin verilen istek | `100` |
+| `RateLimiting__WindowSeconds` | Sabit pencere uzunluğu (sn) | `60` |
+| `ForwardedHeaders__KnownProxies` | Güvenilen reverse-proxy IP'leri (CSV) | `10.0.0.5` |
+| `ForwardedHeaders__KnownNetworks` | Güvenilen subnet'ler (CIDR, CSV) | `10.0.0.0/8` |
+| `GeoIp__DatabasePath` | MaxMind GeoLite2 `.mmdb` yolu (opsiyonel) | `/app/geoip/GeoLite2-City.mmdb` |
 
-> **Güvenlik:** API key'leri asla `appsettings.json`'a yazmayın. Geliştirmede `dotnet user-secrets`, production'da environment variable kullanın.
+> **Rate limiting (F4-5 / [ADR-003](decisions/ADR-003-rate-limiting.md)):** IP-bazlı katman
+> varsayılan **kapalıdır**. Production'da açmak için `RateLimiting:Enabled=true` ver ve
+> reverse-proxy arkasındaysan doğru istemci IP'si için `ForwardedHeaders:KnownProxies` /
+> `KnownNetworks`'ü mutlaka yapılandır (aksi halde limiter proxy IP'sine göre partition eder).
+
+> **Güvenlik:** API key'leri asla `appsettings.json`'a yazmayın. Geliştirmede `dotnet user-secrets`,
+> production'da environment variable kullanın. Tam strateji (dev/CI/prod katmanları + rotation
+> runbook): [ADR-005](decisions/ADR-005-secrets-management.md).
 
 ## 9. CI/CD — GitHub Actions
 
@@ -305,6 +375,11 @@ Her `push` ve `pull_request`'te otomatik çalışır:
 3. **Docker Build** — `saydin-api` ve `saydin-price-ingestion` image'larını oluşturur
 
 CI pipeline `.github/workflows/` dizininde tanımlıdır.
+
+**Otomatik PR incelemesi (F4-12):** Pull request'ler **CodeRabbit** ile incelenir
+(yapılandırma: `.coderabbit.yaml`; `base_branches: main + development`; SQL migration'lar ve
+`docs/**` review kapsamındadır). Sourcery kullanılmaz (.NET için anlamlı değil — F1.8-4 ile
+kaldırıldı). Ek statik analiz: Codacy (`.codacy.yaml`).
 
 ---
 

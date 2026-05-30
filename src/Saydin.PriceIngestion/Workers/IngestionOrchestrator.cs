@@ -4,8 +4,13 @@ namespace Saydin.PriceIngestion.Workers;
 
 /// <summary>
 /// Tüm veri çekme worker'larını başlatan ana orchestrator.
-/// Hangi worker'ların çalışacağı appsettings.json → IngestionWorkers:{Worker}:Enabled ile belirlenir.
-/// Varsayılan: tümü aktif.
+/// Hangi worker'ların çalışacağı <c>IngestionWorkers:{Worker}:Enabled</c> ile belirlenir.
+/// F4-11: Varsayılan <b>kapalı</b> (disabled-by-default) — config'te anahtar yoksa worker
+/// çalışmaz (<c>?? false</c>). Aktivasyon env (<c>WORKER_*_ENABLED</c> → compose/.env) ya da
+/// appsettings ile açıkça yapılır; böylece bare-binary çalıştırma kazara dış API/rate-limit
+/// tüketmez (fail-closed). Eksik/typo'lu config sessizce worker'ı açmak yerine kapalı bırakır.
+/// <b>HİÇBİR</b> worker etkin değilse orchestrator fail-fast yapar (host başlatılmaz) — boş
+/// bir worker servisinin "running" görünmesi yapılandırma hatasını maskelemesin.
 /// </summary>
 public sealed class IngestionOrchestrator(
     TcmbWorker tcmbWorker,
@@ -22,7 +27,8 @@ public sealed class IngestionOrchestrator(
 
         void AddIfEnabled(string key, Func<Task> runAsync)
         {
-            var enabled = configuration.GetValue<bool?>($"IngestionWorkers:{key}:Enabled") ?? true;
+            // F4-11: anahtar yoksa fail-closed (?? false) — worker kapalı kalır, loglanır.
+            var enabled = configuration.GetValue<bool?>($"IngestionWorkers:{key}:Enabled") ?? false;
             if (enabled)
                 tasks.Add(RunSafelyAsync(key, runAsync, stoppingToken));
             else
@@ -37,8 +43,15 @@ public sealed class IngestionOrchestrator(
 
         if (tasks.Count == 0)
         {
-            logger.LogWarning("Hiçbir worker aktif değil. IngestionWorkers config'ini kontrol et.");
-            return;
+            // F4-11 per-worker default'u fail-closed (?? false). Ancak HİÇBİR worker
+            // etkin değilse bu bir yapılandırma hatasıdır — hosted service'in "running"
+            // görünüp hiç iş yapmaması (aşağıdaki "tümü beklenmedik sonlandı" anti-pattern'i
+            // gibi) sessizce maskelenmemeli. Fail-fast: host başlatılamasın.
+            logger.LogCritical(
+                "Hiçbir ingestion worker etkin değil — orchestrator başlatılamıyor. " +
+                "En az bir worker'ı 'IngestionWorkers:*:Enabled' (örn. WORKER_TCMB_ENABLED) ile etkinleştir.");
+            throw new InvalidOperationException(
+                "No ingestion workers enabled; check IngestionWorkers:*:Enabled configuration.");
         }
 
         logger.LogInformation("IngestionOrchestrator başlatıldı ({Count} aktif worker)", tasks.Count);

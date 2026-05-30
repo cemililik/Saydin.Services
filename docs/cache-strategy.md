@@ -22,7 +22,7 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | Amaç | Key Formatı | TTL | Servis |
 |---|---|---|---|
 | What-if hesaplama | `whatif:v3:{symbol}:{buyDate}:{sellDate}:{amountStr}:{amountType}{:inf?}:{lang}` | 1 saat | `WhatIfCalculator` (E-Info-2: v2→v3; amount kültür-bağımsız `amountStr`, inflation suffix + dil eklendi) |
-| Reverse what-if | `whatif:reverse:v1:{symbol}:{buyDate}:{sellDate}:{amountStr}:{targetAmountType}{:inf?}:{lang}` | 1 saat | `WhatIfCalculator` |
+| Reverse what-if | `whatif:reverse:v2:{symbol}:{buyDate}:{sellDate}:{amountStr}:{targetAmountType}{:inf?}:{lang}` | 1 saat | `WhatIfCalculator` (F4-3: v1→v2 — `targetValueTry` forward-consistency, eski entry'ler invalidate) |
 | Asset listesi | `assets:list:{sig}` / `assets:info:{sig}:{lang}` | 6 saat / 1 saat | `AssetService` |
 | Tek fiyat noktası | `price:{symbol}:{date}` | 24 saat | `AssetService` |
 | En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
@@ -121,6 +121,13 @@ cache'inden bağımsız olduğundan ayrım yapılmıyor. Kabul edilebilir.
 
 **Prefix'ler:** `usage:whatif:` (WhatIfCalculator), `usage:dca:` (DcaCalculator)
 
+**Hangi işlem hangi sayaca düşer (ADR-002):** Tek What-If (`/calculate`), Reverse What-If
+(`/reverse`) ve Karşılaştırma (`/compare`) **aynı** `usage:whatif:` sayacını paylaşır;
+DCA (`/dca`) ayrı `usage:dca:` sayacını kullanır. **Compare**, sembol sayısından (2-5)
+bağımsız olarak sayaçtan **yalnız 1** düşer (tek atomik acquire). Per-feature alt-kotalar
+(roadmap'teki compare=5 / reverse=3 / dca=3) post-MVP'ye ertelendi — bkz.
+[ADR-002](decisions/ADR-002-compare-quota.md).
+
 **Nasıl çalışır:**
 Her iki prefix de `DailyLimitGuard` servisi tarafından yönetilir:
 1. `CheckAsync` — key'i okur (INCR yapmaz), eşik aşıldıysa 429 döner
@@ -193,4 +200,4 @@ Aşağıdaki durumlarda bu belgeyi güncelle:
 - **Timezone-aware limit sıfırlama:** Şu an UTC gece yarısı; Türk kullanıcı için UTC+3 daha doğal
 - **Cache hit/miss Prometheus metriği:** Şu an sadece log'da var
 - **`assets:list` invalidation:** Asset eklenince otomatik flush (şu an manuel)
-- Bkz. `/docs/high-traffic-checklist.md` → Redis bölümü
+- Bkz. [`high-traffic-checklist.md`](high-traffic-checklist.md) → Redis bölümü
