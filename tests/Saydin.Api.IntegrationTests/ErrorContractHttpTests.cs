@@ -4,7 +4,10 @@ using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Saydin.Shared.Data;
 
 namespace Saydin.Api.IntegrationTests;
 
@@ -25,6 +28,11 @@ public sealed class ErrorContractWebAppFactory : WebApplicationFactory<Program>
 
     public ErrorContractWebAppFactory()
     {
+        // Bulgu 7: env VARLIĞI kontrol edilir, erişilebilirlik değil — compose `tests` profili
+        // postgres/redis'i `depends_on: service_healthy` ile garanti eder, dolayısıyla env set
+        // iken altyapı erişilebilirdir. Env set ama (compose dışı bir koşuda) altyapı erişilemezse
+        // CreateClient() Program.cs fail-fast ile fırlatır (Skip yerine Error) — bu uç durum
+        // bilinçli kabul edilir; DatabaseFixture'daki bağlantı-probe'unu burada tekrarlamayız.
         var pg    = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
         var redis = Environment.GetEnvironmentVariable("ConnectionStrings__Redis");
         InfraAvailable = !string.IsNullOrWhiteSpace(pg) && !string.IsNullOrWhiteSpace(redis);
@@ -46,7 +54,11 @@ public sealed class ErrorContractWebAppFactory : WebApplicationFactory<Program>
     }
 }
 
-[Collection("error-contract-http")]
+// Bulgu 6: Eşleşen [CollectionDefinition] olmadan [Collection] dangling olur; kaldırıldı.
+// İzolasyon, her case'in benzersiz X-Device-ID'si (itest-{Guid}) ile sağlanır — diğer
+// integration test koleksiyonlarıyla paralel koşsa bile paylaşılan PG/Redis state'ine
+// (usage sayaçları, activity_logs satırları) cihaz-id bazında çakışmaz. IClassFixture
+// factory'yi bu sınıfa scope'lar (tek server instance, testler arası paylaşılır).
 public sealed class ErrorContractHttpTests(ErrorContractWebAppFactory factory)
     : IClassFixture<ErrorContractWebAppFactory>
 {
@@ -84,6 +96,9 @@ public sealed class ErrorContractHttpTests(ErrorContractWebAppFactory factory)
         var root = await ReadProblemAsync(resp);
         root.GetProperty("type").GetString().Should().Be("https://saydin.app/errors/missing-device-id");
         root.GetProperty("code").GetString().Should().Be("missing_device_id");
+        // Bulgu 2: DeviceId guard yanıtları da traceId taşımalı (api-contract.md sözleşmesi).
+        root.TryGetProperty("traceId", out var traceId).Should().BeTrue();
+        traceId.GetString().Should().NotBeNullOrWhiteSpace();
     }
 
     [SkippableFact]
@@ -106,6 +121,9 @@ public sealed class ErrorContractHttpTests(ErrorContractWebAppFactory factory)
         var root = await ReadProblemAsync(resp);
         root.GetProperty("type").GetString().Should().Be("https://saydin.app/errors/invalid-device-id");
         root.GetProperty("code").GetString().Should().Be("invalid_device_id");
+        // Bulgu 2: invalid-device-id yanıtı da traceId taşımalı.
+        root.TryGetProperty("traceId", out var traceId).Should().BeTrue();
+        traceId.GetString().Should().NotBeNullOrWhiteSpace();
     }
 
     [SkippableFact]
@@ -123,6 +141,9 @@ public sealed class ErrorContractHttpTests(ErrorContractWebAppFactory factory)
         var resp = await client.SendAsync(req);
 
         // Free tier (bilinmeyen cihaz → null user) PriceHistoryMonths=12; 2000 yılı pencere dışı.
+        // Bulgu 5: 403 beklentisi, history-gate'in (WhatIfCalculator.EnsureWithinHistoryWindow)
+        // price-lookup'tan ÖNCE çalışmasına bağlıdır; bu sıra bozulursa price-not-found (404)
+        // alınır (USDTRY için 2000 yılında seed fiyat yoktur). Sıra korunmalı.
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
         resp.Content.Headers.ContentType!.MediaType.Should().Be(ProblemJson);
 
@@ -160,5 +181,60 @@ public sealed class ErrorContractHttpTests(ErrorContractWebAppFactory factory)
         tr.Should().NotBeNullOrWhiteSpace();
         en.Should().NotBeNullOrWhiteSpace();
         tr.Should().NotBe(en, "title Accept-Language'e göre lokalize olmalı (tr ≠ en)");
+    }
+
+    /// <summary>
+    /// Bulgu 1 (regresyon kilidi): Endpoint exception fırlatan bir istekte activity_logs satırı
+    /// istemciye giden ÇEVRİLMİŞ status'ü (403) yazmalı — varsayılan 200'ü DEĞİL. Bu, middleware
+    /// sırasının `Serilog → ActivityLog → ExceptionHandler → endpoint` olmasını doğrular:
+    /// ActivityLogMiddleware UseExceptionHandler'ın DIŞINDA olduğundan, handler exception'ı 403'e
+    /// çevirip rethrow etmeden döndükten SONRA finally'si çalışır ve doğru status'ü okur. (Önceki
+    /// sıralamada — ActivityLog ExceptionHandler'ın içinde — bu satır 200 yazıyordu.)
+    /// activity_logs arka plan ActivityLogWriter ile asenkron yazıldığından satır poll edilir.
+    /// </summary>
+    [SkippableFact]
+    public async Task FeatureDisabled_ActivityLog_RecordsConvertedStatus_Not200()
+    {
+        Skip.IfNot(factory.InfraAvailable, factory.SkipReason);
+        var client = factory.CreateClient();
+
+        var deviceId = $"itest-actlog-{Guid.NewGuid():N}";
+        var req = new HttpRequestMessage(HttpMethod.Post, CalculatePath)
+        {
+            Content = JsonContent.Create(OldBuyDatePayload()),
+        };
+        req.Headers.TryAddWithoutValidation("X-Device-ID", deviceId);
+
+        var resp = await client.SendAsync(req);
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+
+        // Arka plan writer satırı batch'leyerek yazar; ~15 sn poll (compose ağında ms mertebesi).
+        short? recordedStatus = null;
+        for (var attempt = 0; attempt < 75 && recordedStatus is null; attempt++)
+        {
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<SaydinDbContext>();
+            recordedStatus = await db.ActivityLogs
+                .Where(a => a.DeviceId == deviceId)
+                .Select(a => (short?)a.StatusCode)
+                .FirstOrDefaultAsync();
+            if (recordedStatus is null)
+                await Task.Delay(200);
+        }
+
+        try
+        {
+            recordedStatus.Should().NotBeNull(
+                "endpoint handler activity log builder'ı oluşturdu (calculate ilk satır) → satır yazılmalı");
+            recordedStatus.Should().Be((short)HttpStatusCode.Forbidden,
+                "activity_logs istemciye giden çevrilmiş status'ü (403) yazmalı, varsayılan 200'ü değil (Bulgu 1)");
+        }
+        finally
+        {
+            // Paylaşılan tabloyu kirletme — bu testin satır(lar)ını sil.
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<SaydinDbContext>();
+            await db.ActivityLogs.Where(a => a.DeviceId == deviceId).ExecuteDeleteAsync();
+        }
     }
 }

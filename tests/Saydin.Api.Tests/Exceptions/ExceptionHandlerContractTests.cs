@@ -24,7 +24,9 @@ namespace Saydin.Api.Tests.Exceptions;
 /// <list type="bullet">
 ///   <item><b>Content-Type = application/problem+json</b> (EC-4).</item>
 ///   <item><b>Extensions["code"]</b> kararlı, lokalden bağımsız makine kodu (EC-3).</item>
-///   <item>Her yanıt <c>traceId</c> taşır; <c>title</c> lokalize çözülür (ham key değil).</item>
+///   <item>Her yanıt <c>traceId</c> taşır; <c>title</c> boş değildir (gerçek <b>key-varlığı</b>
+///         doğrulaması — ham KEY mi lokalize değer mi — <c>ErrorMessagesLocalizationTests</c>'tedir,
+///         orada handler key'leri <c>ResourceNotFound==false</c> ile kilitlenir).</item>
 ///   <item>GlobalExceptionHandler teknik mesajı/stack'i gövdeye <b>sızdırmaz</b>.</item>
 ///   <item>ExternalApiExceptionHandler upstream <c>source</c>'u gövdeye <b>koymaz</b> (EC-9).</item>
 /// </list>

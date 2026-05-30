@@ -123,10 +123,10 @@ API, `Accept-Language` header'ına göre yanıt dilini belirler. `.resx` kaynak 
 
 ```mermaid
 flowchart LR
-    I["İstek"] --> RC["ResponseCompression"] --> RL["RequestLocalization"] --> SL["Serilog"] --> EH["ExceptionHandler"] --> EP["Endpoint"]
+    I["İstek"] --> RC["ResponseCompression"] --> RL["RequestLocalization"] --> SL["Serilog"] --> AL["ActivityLog"] --> EH["ExceptionHandler"] --> EP["Endpoint"]
 ```
 
-`RequestLocalizationMiddleware` (`UseRequestLocalization`) `Accept-Language` header'ını parse eder ve `CultureInfo.CurrentUICulture`'ı ayarlar. `ExceptionHandler`'dan önce çalışır — hata yanıtları da lokalize edilir.
+`RequestLocalizationMiddleware` (`UseRequestLocalization`) `Accept-Language` header'ını parse eder ve `CultureInfo.CurrentUICulture`'ı ayarlar. `ExceptionHandler`'dan önce çalışır — hata yanıtları da lokalize edilir. **Serilog ve ActivityLog `ExceptionHandler`'ın DIŞINDADIR** (önünde): ExceptionHandler exception'ı 4xx/5xx'e çevirip rethrow etmeden döndüğü için ikisi de yanıtın **nihai** status'ünü gözlemler (bkz. "Exception Handling Zinciri" → EC-5).
 
 **Kaynak dosyaları:**
 
@@ -277,14 +277,23 @@ teknik mesaj/stack **sızdırmaz**; `ExternalApiExceptionHandler` upstream kayna
 **koymaz** (yalnız log'da, EC-9). Kararlı kodlar + tip→kod eşlemesi meta repo
 `docs/architecture/api-contract.md` "Hata Taksonomisi"nde yayınlanır.
 
-**Middleware sırası (EC-5):** `UseSerilogRequestLogging` `UseExceptionHandler`'ın **dışında**
-(önünde) kayıtlıdır → request log'u handler'ın çevirdiği **nihai** status'ü (403/404/429/500)
-yansıtır; istisnayı handler 4xx'e çevirmeden gören yanıltıcı "500" log artefaktı oluşmaz
-(gerçek 5xx exception detayı `GlobalExceptionHandler.LogError`'da traceId ile korunur).
-`ActivityLogMiddleware` orijinal exception'ı yutmaz. Hata-sözleşmesi regresyonu
-`Saydin.Api.Tests/Exceptions/ExceptionHandlerContractTests.cs` (altyapısız, deterministik) +
-`Saydin.Api.IntegrationTests/ErrorContractHttpTests.cs` (`WebApplicationFactory`, `SkippableFact`)
-ile kilitlenir.
+**Middleware sırası (EC-5 + EC-FU):** Sıra `Serilog → ActivityLog → ExceptionHandler → endpoint`;
+**Serilog ve ActivityLog'un ikisi de `UseExceptionHandler`'ın dışında (önünde)** durur. Bu KRİTİK:
+ExceptionHandler endpoint istisnasını 4xx/5xx'e çevirip yanıtı yazar ve (handler `true` döndüğü
+için) rethrow ETMEZ → dıştaki middleware'lerin `await next()`'i normal tamamlanır ve **nihai**
+status'ü (403/404/429/502/500) görür.
+- **Serilog:** request log'u doğru status'ü yansıtır; istisnayı handler çevirmeden gören yanıltıcı
+  "500" artefaktı oluşmaz (gerçek 5xx exception detayı `GlobalExceptionHandler.LogError`'da
+  traceId ile korunur).
+- **ActivityLogMiddleware:** `finally`'si çevrilmiş status'ü okuyup `activity_logs`'a doğru kodu
+  yazar (EC-FU: önceki sürümde ActivityLog ExceptionHandler'ın İÇİNDEYDİ → finally response
+  çevrilmeden, `StatusCode` hâlâ 200 iken çalışıyor ve hatalı isteklere `200` yazıyordu). İç
+  try/catch yalnız log-gönderim hatasını sarar; istek exception'ını **yutmaz**.
+
+Hata-sözleşmesi regresyonu `Saydin.Api.Tests/Exceptions/ExceptionHandlerContractTests.cs`
+(altyapısız, deterministik) + `Saydin.Api.IntegrationTests/ErrorContractHttpTests.cs`
+(`WebApplicationFactory`, `SkippableFact` — feature-disabled sonrası `activity_logs.http_status`
+== 403 dahil) ile kilitlenir.
 
 ## Cache Stratejisi (Redis)
 

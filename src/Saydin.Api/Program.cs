@@ -387,21 +387,23 @@ try
     if (rateLimitingEnabled)
         app.UseRateLimiter();
 
-    // EC-5: Serilog request-logging, UseExceptionHandler'ın DIŞINDA (önünde/üstünde) durur.
-    // Önceden Serilog içerideydi → endpoint exception'ı handler 403/404'e ÇEVİRMEDEN önce
-    // Serilog görüp "StatusCode 500" logluyordu (yanıltıcı; istemci aslında 403 alıyordu).
-    // Dışta olunca: ExceptionHandler exception'ı çevirip yanıtı yazar (rethrow yok) → Serilog
-    // finally'de NİHAİ status'ü (403/404/429/500) doğru loglar. Gerçek 500'lerin exception
-    // detayı GlobalExceptionHandler'ın LogError'unda (traceId ile) korunur.
+    // Middleware sırası (EC-5 + EC-FU ActivityLog status düzeltmesi):
+    //   Serilog → ActivityLog → ExceptionHandler → endpoint.
+    // İkisi de UseExceptionHandler'ın DIŞINDADIR (önünde) — bu sıralama KRİTİKTİR:
+    //  • Serilog: request log'u handler'ın çevirdiği NİHAİ status'ü (403/404/429/502/500)
+    //    yansıtır; istisnayı handler 4xx'e çevirmeden gören yanıltıcı "500" artefaktı oluşmaz.
+    //    Gerçek 500 exception detayı GlobalExceptionHandler.LogError'da (traceId ile) korunur.
+    //  • ActivityLogMiddleware: endpoint exception fırlattığında ExceptionHandler onu 4xx/5xx'e
+    //    çevirip yanıtı yazar ve (handler `true` döndüğü için) rethrow ETMEZ → ActivityLog'un
+    //    `await next()`'i NORMAL tamamlanır; finally'si ÇEVRİLMİŞ status'ü okuyup activity_logs'a
+    //    doğru kodu yazar. (Önceki sıralamada ActivityLog ExceptionHandler'ın İÇİNDEYDİ → finally
+    //    response henüz çevrilmeden, StatusCode hâlâ 200 iken çalışıyor ve activity_logs'a yanlış
+    //    200 yazıyordu. Regresyon kilidi: ErrorContractHttpTests
+    //    `FeatureDisabled_ActivityLog_RecordsConvertedStatus_Not200`.) İç try/catch yalnız
+    //    log-gönderim hatasını sarmalar; istek exception'ını YUTMAZ.
     app.UseSerilogRequestLogging();
-    app.UseExceptionHandler();
-
-    // Activity log middleware exception handler'dan SONRA, endpoint mapping'den ÖNCE çalışır.
-    // Pipeline tamamlandığında builder.StatusCode = Response.StatusCode atanır → 4xx/5xx
-    // hatalı isteklerde de activity_logs'a doğru kayıt düşer (review C-3). ActivityLogMiddleware
-    // orijinal exception'ı YUTMAZ — finally'deki iç try/catch yalnız log-gönderim hatasını
-    // sarmalar, istek exception'ı handler zincirine değişmeden propagate olur (EC-5 doğrulaması).
     app.UseMiddleware<ActivityLogMiddleware>();
+    app.UseExceptionHandler();
 
     if (app.Environment.IsDevelopment())
     {

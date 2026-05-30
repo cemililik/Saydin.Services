@@ -35,6 +35,25 @@ istemcinin jenerik "Sunucu hatası" göstermesi (beklenen: `403` paywall).
   status'ü (403/404/429/500) yansıtır — yanıltıcı "StatusCode 500" artefaktı kalkar.
   `ActivityLogMiddleware` orijinal exception'ı yutmadığı doğrulandı.
 
+#### İnceleme sonrası düzeltmeler (EC-FU — code review bulguları, 2026-05-30)
+
+- **🟠 ActivityLog yanlış-status (Bulgu 1) — GERÇEK BUG düzeltildi:** `ActivityLogMiddleware`
+  `UseExceptionHandler`'ın **içindeyken** (sonra) finally'si, exception 4xx/5xx'e çevrilmeden
+  ÖNCE çalışıp `activity_logs`'a varsayılan **200** yazıyordu (istemci 403/404/… alırken). Sıra
+  `Serilog → ActivityLog → ExceptionHandler → endpoint` yapıldı (ikisi de handler'ın dışında) →
+  artık çevrilmiş status yazılır. Regresyon kilidi:
+  `ErrorContractHttpTests.FeatureDisabled_ActivityLog_RecordsConvertedStatus_Not200` (gerçek PG).
+- **🟡 DeviceId 400 yanıtlarında eksik `traceId` (Bulgu 2):** `RequireDeviceId` guard'ın iki
+  `Results.Problem` yanıtına `traceId` eklendi (9 handler deseniyle birebir). Device-id testlerine
+  `traceId` assert'i eklendi.
+- **🟡 Key-varlığı koruması (Bulgu 3):** `ErrorMessagesLocalizationTests` tüm handler/guard
+  title+detail key'lerini kapsayacak şekilde genişletildi (silinen key `ResourceNotFound`'la CI'da
+  yakalanır); kontrat testi docstring'i "title boş değil" iddiasına indirildi.
+- **🟢 api-contract.md örneklerine `code` (Bulgu 4):** price-not-found/daily-limit/scenario-limit/
+  validation/scenario-not-found örneklerine `code` alanı eklendi (prose ile tutarlılık).
+- **ℹ️ Test temizliği (Bulgu 5/6/7):** feature-disabled testine gate↔lookup sıra-bağımlılığı notu;
+  dangling `[Collection]` kaldırıldı + izolasyon notu; env-varlığı tespiti gerekçesi.
+
 #### Güvenlik
 
 - **Upstream `source` sızıntısı kapatıldı (EC-9):** `ExternalApiException` 502 gövdesindeki
@@ -44,9 +63,9 @@ istemcinin jenerik "Sunucu hatası" göstermesi (beklenen: `403` paywall).
 
 - Meta repo `docs/architecture/api-contract.md`: tam hata taksonomisi (12 tip + `code` + ek alanlar
   + content-type notu, EC-10/EC-8), DeviceId 400 tipleri (EC-8), `Share` yalnız-istemci gating
-  notu (EC-7).
-- `architecture.md`: middleware sırası diyagramı (Serilog/ExceptionHandler) + exception zinciri
-  `code`/problem+json notu.
+  notu (EC-7) + örneklere `code` alanı (Bulgu 4).
+- `architecture.md`: middleware sırası diyagramı (`Serilog → ActivityLog → ExceptionHandler`) +
+  exception zinciri `code`/problem+json/ActivityLog-status notu (EC-5 + EC-FU).
 
 #### İnsan/Ops kararı bekleyen
 
