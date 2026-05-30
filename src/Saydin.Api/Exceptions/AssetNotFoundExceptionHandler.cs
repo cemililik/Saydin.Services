@@ -33,7 +33,7 @@ public sealed class AssetNotFoundExceptionHandler(
             Detail = string.Format(localizer["AssetNotFoundDetail"], ex.Symbol),
             Extensions =
             {
-                ["traceId"] = Activity.Current?.TraceId.ToString(),
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
                 ["code"] = ApiErrorCodes.AssetNotFound,
             }
         }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);

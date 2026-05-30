@@ -70,7 +70,7 @@ public sealed class ErrorContractHttpTests(ErrorContractWebAppFactory factory)
     {
         assetSymbol = "USDTRY",
         buyDate     = "2000-01-01",
-        amount      = 1000,
+        amount      = 1000m,
         amountType  = "try",
     };
 

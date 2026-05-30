@@ -15,7 +15,7 @@
 ```bash
 # docker-compose.yml repo kökünde bulunur
 cp .env.example .env
-# .env dosyasını düzenle — API key'leri doldur (CoinGecko, OpenExchangeRates, Twelve Data, EVDS — TCMB key gerektirmez)
+# .env dosyasını düzenle — API key'leri doldur. Key gerektiren: CoinGecko, OpenExchangeRates, Twelve Data. Key GEREKTİRMEYEN: EVDS, TCMB.
 
 docker-compose up -d
 ```

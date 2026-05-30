@@ -33,7 +33,7 @@ public sealed class ScenarioLimitExceededExceptionHandler(
             Detail = string.Format(localizer["ScenarioLimitExceededDetail"], ex.Limit),
             Extensions =
             {
-                ["traceId"] = Activity.Current?.TraceId.ToString(),
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
                 ["code"] = ApiErrorCodes.ScenarioLimitExceeded,
                 ["limit"] = ex.Limit
             }

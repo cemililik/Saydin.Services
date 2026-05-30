@@ -33,7 +33,7 @@ public sealed class ScenarioNotFoundExceptionHandler(
             Detail = string.Format(localizer["ScenarioNotFoundDetail"], ex.ScenarioId),
             Extensions =
             {
-                ["traceId"] = Activity.Current?.TraceId.ToString(),
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
                 ["code"] = ApiErrorCodes.ScenarioNotFound,
             }
         }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);

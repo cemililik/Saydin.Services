@@ -297,7 +297,7 @@ Hata-sözleşmesi regresyonu `Saydin.Api.Tests/Exceptions/ExceptionHandlerContra
 
 ## Cache Stratejisi (Redis)
 
-```
+```text
 price:{symbol}:{date}                            → TTL 24 saat  (tek gün fiyatı)
 nearest-price:{symbol}:{date}                    → TTL 24 saat  (en yakın işlem günü fiyatı)
 prices:{symbol}:{from}:{to}:{interval}           → TTL 1 saat   (tarih aralığı)
