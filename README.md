@@ -6,7 +6,7 @@
 
 | Servis | Açıklama | Port |
 |---|---|---|
-| `Saydin.Api` | Flutter uygulamasına Minimal API sunar | 5000 |
+| `Saydin.Api` | Flutter uygulamasına Minimal API sunar | 5080 |
 | `Saydin.PriceIngestion` | Dış finansal API'lerden fiyat verisi çeker | — |
 | `Saydin.Shared` | Ortak entity, exception, diagnostics | — |
 
@@ -20,28 +20,19 @@
 ### Altyapıyı Başlat
 
 ```bash
-# Proje kökünden (Saydın/)
-docker-compose up -d
-
-# Veritabanı migration'ını uygula
-docker exec -i saydin-postgres psql -U saydin -d saydin \
-  < src/Saydin.Services/infrastructure/postgres/migrations/001_initial.sql
+# Repo kökünden — kod değişikliğinden sonra image'ı yeniden derle ve servisleri başlat
+docker compose build && docker compose up -d
 ```
 
-### Uygulamayı Çalıştır (Docker)
-
-```bash
-cd src/Saydin.Services
-docker-compose up -d  # Saydin.Api
-```
+Migration'lar fresh (boş volume) başlatmada `docker-entrypoint-initdb.d` üzerinden otomatik
+uygulanır (`infrastructure/postgres/migrations` klasörü mount edilir). Var olan / dolu bir
+DB'ye yeni migration uygulama akışı için bkz. [development-guide.md](docs/development-guide.md).
 
 ### Uygulamayı Çalıştır (Yerel .NET)
 
-> **Uyarı:** Bu repo Docker Compose tabanlıdır; lokal makinede .NET 10 SDK kurulu **olmayabilir**. SDK kurulu değilse aşağıdaki `dotnet` komutları çalışmaz — bunun yerine yukarıdaki **Uygulamayı Çalıştır (Docker)** akışını kullan. Ayrıntılar: [CLAUDE.md](CLAUDE.md).
+> **Uyarı:** Bu repo Docker Compose tabanlıdır; lokal makinede .NET 10 SDK kurulu **olmayabilir**. SDK kurulu değilse aşağıdaki `dotnet` komutları çalışmaz — bunun yerine yukarıdaki **Altyapıyı Başlat** akışını kullan. Ayrıntılar: [CLAUDE.md](CLAUDE.md).
 
 ```bash
-cd src/Saydin.Services
-
 # User secrets ile bağlantı dizelerini ayarla
 dotnet user-secrets set "ConnectionStrings:Postgres" "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
   --project src/Saydin.Api
@@ -53,13 +44,13 @@ dotnet run --project src/Saydin.Api
 
 ```bash
 # Sağlık kontrolü
-curl http://localhost:5000/health
+curl http://localhost:5080/health
 
 # Asset listesi
-curl http://localhost:5000/v1/assets
+curl http://localhost:5080/v1/assets
 
 # "Ya alsaydım" hesaplama
-curl -X POST http://localhost:5000/v1/what-if/calculate \
+curl -X POST http://localhost:5080/v1/what-if/calculate \
   -H "Content-Type: application/json" \
   -H "X-Device-ID: test-device-123" \
   -d '{
@@ -71,15 +62,21 @@ curl -X POST http://localhost:5000/v1/what-if/calculate \
   }'
 ```
 
+> Tüm endpoint örnekleri (DCA, Compare, Reverse What-If, Scenarios) için:
+> [development-guide.md](docs/development-guide.md) → "API Test Örnekleri".
+
 ## Mimari
 
-```
-Saydin.Api (HTTP)          Saydin.PriceIngestion (Worker)
-     │                              │
-     │         PostgreSQL           │
-     └──────────────────────────────┘
-                    │
-              Saydin.Shared
+```mermaid
+flowchart TD
+    API["Saydin.Api (HTTP)"]
+    ING["Saydin.PriceIngestion (Worker)"]
+    PG[("PostgreSQL — paylaşılan DB")]
+    SH["Saydin.Shared (ortak tipler)"]
+    API --> PG
+    ING --> PG
+    API -.-> SH
+    ING -.-> SH
 ```
 
 **Temel kural:** `Saydin.Api` hiçbir dış finansal API'ye istek atmaz. `Saydin.PriceIngestion` hiçbir HTTP endpoint expose etmez. Servisler sadece veritabanı üzerinden haberleşir.
@@ -103,7 +100,7 @@ Altyapı ayağa kalktıktan sonra:
 | pgAdmin | http://localhost:5050 | PostgreSQL yönetimi |
 | Redis Insight | http://localhost:5540 | Redis izleme |
 | Prometheus | http://localhost:9090 | Metrik sorgulama |
-| Swagger UI | http://localhost:5000/openapi/v1 | API dökümantasyonu |
+| Scalar | http://localhost:5080/scalar/v1 | API dökümantasyonu (ham OpenAPI JSON: /openapi/v1) |
 
 ## Mimari Kurallar
 

@@ -13,9 +13,9 @@
 ## 1. Altyapıyı Başlatma
 
 ```bash
-# docker-compose.yml bu dizinde (src/Saydin.Services/) bulunur
+# docker-compose.yml repo kökünde bulunur
 cp .env.example .env
-# .env dosyasını düzenle — API key'leri doldur (CoinGecko, GoldAPI, Twelve Data)
+# .env dosyasını düzenle — API key'leri doldur (CoinGecko, OpenExchangeRates, Twelve Data, EVDS — TCMB key gerektirmez)
 
 docker-compose up -d
 ```
@@ -44,14 +44,13 @@ Başlatılan servisler:
 
 ## 2. Veritabanı Migration
 
-### İlk Kurulum (SQL dosyası ile)
+### İlk Kurulum (fresh init — otomatik)
+
+Fresh (boş volume) `docker compose up -d` sonrası migration'lar **otomatik** uygulanır
+(aşağıdaki "Fresh init" notu) — elle `001_initial.sql` çalıştırmaya gerek yoktur. Şema
+kurulumunu doğrula:
 
 ```bash
-# Temel şemayı (TimescaleDB extension, enum, tablolar) uygula
-docker exec -i saydin-postgres psql -U saydin -d saydin \
-  < src/Saydin.Services/infrastructure/postgres/migrations/001_initial.sql
-
-# Başarı doğrulama
 docker exec saydin-postgres psql -U saydin -d saydin \
   -c "\dt" | grep -E "assets|price_points|users"
 ```
@@ -128,7 +127,7 @@ docker run --rm -v "$PWD":/src -w /src --network saydin-services_default \
 ### Docker ile
 
 ```bash
-cd src/Saydin.Services
+# Repo kökünden
 docker build -f src/Saydin.Api/Dockerfile -t saydin-api .
 docker run -p 5080:8080 \
   -e ConnectionStrings__Postgres="Host=host.docker.internal;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
@@ -140,9 +139,7 @@ docker run -p 5080:8080 \
 ### .NET SDK ile (Yerel)
 
 ```bash
-cd src/Saydin.Services
-
-# User secrets kurulumu (ilk seferinde)
+# Repo kökünden — User secrets kurulumu (ilk seferinde)
 dotnet user-secrets init --project src/Saydin.Api
 dotnet user-secrets set "ConnectionStrings:Postgres" \
   "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
@@ -151,8 +148,8 @@ dotnet user-secrets set "ConnectionStrings:Redis" "localhost:6379" \
   --project src/Saydin.Api
 
 dotnet run --project src/Saydin.Api
-# → http://localhost:5080
-# → Scalar API dokümantasyonu: http://localhost:5080/scalar/v1 (Development modunda)
+# → http://localhost:5203 (HTTP) / https://localhost:7008 (HTTPS) — launchSettings.json
+# → Scalar API dokümantasyonu: http://localhost:5203/scalar/v1 (Development modunda)
 ```
 
 ## 4. Saydin.PriceIngestion Çalıştırma
@@ -191,9 +188,11 @@ WORKER_TWELVEDATA_ENABLED=false # key gerektirir
 ```
 
 Fresh-checkout `.env.example` TCMB + EVDS'i açık gönderir (key-free ulusal-veri kaynakları);
-key gerektiren kaynaklar kapalıdır — böylece kazara dış API / rate-limit tüketilmez. Bare
-binary (env'siz) çalıştırma da güvenlidir: hiçbir worker çalışmaz, `IngestionOrchestrator`
-"Hiçbir worker aktif değil" uyarısı verir.
+key gerektiren kaynaklar kapalıdır — böylece kazara dış API / rate-limit tüketilmez. Hiçbir
+worker etkin değilse `IngestionOrchestrator` **fail-fast** yapar (`LogCritical` +
+`InvalidOperationException` → host başlatılmaz); en az bir worker `IngestionWorkers:*:Enabled`
+(örn. `WORKER_TCMB_ENABLED`) ile açılmalıdır — böylece "boş" bir ingestion servisi sessizce
+çalışıyormuş gibi görünmez.
 
 ### GeoIP (opsiyonel, F4-7)
 
@@ -233,14 +232,17 @@ docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
 ## 6. Sık Kullanılan Komutlar
 
 ```bash
+# Aşağıdaki dotnet komutları yalnız lokalde .NET 10 SDK kuruluysa çalışır; kurulu
+# değilse SDK imajı + repo mount kullan (bkz. Adım 5 build doğrulaması).
+
 # Bağımlılıkları yükle
 dotnet restore
 
 # Build
 dotnet build
 
-# Tüm container'ları durdur (src/Saydin.Services/ dizininden)
-docker-compose down
+# Tüm container'ları durdur (repo kökünden)
+docker compose down
 
 # PostgreSQL'e bağlan
 docker exec -it saydin-postgres psql -U saydin -d saydin

@@ -2,43 +2,32 @@
 
 ## Servis Haritası
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Flutter Client                        │
-│                  (Saydin.Client)                         │
-└────────────────────────┬────────────────────────────────┘
-                         │ HTTP (REST)
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│                    Saydin.Api                            │
-│              (.NET 10 Minimal API)                       │
-│  Endpoints/ → Services/ → Repositories/ → PostgreSQL    │
-└────────────────────────────────────────────────────────┘
-                         │ PostgreSQL (shared DB)
-┌───────────────────────────────────────────────────────────┐
-│                Saydin.PriceIngestion                      │
-│              (.NET 10 Background Worker)                  │
-│  IngestionOrchestrator → Adapters → Mappers → PostgreSQL  │
-└───────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    FC["Flutter Client (Saydin.Client)"]
+    API["Saydin.Api — .NET 10 Minimal API<br/>Endpoints → Services → Repositories"]
+    ING["Saydin.PriceIngestion — .NET 10 Worker<br/>IngestionOrchestrator → Adapters → Mappers"]
+    PG[("PostgreSQL — paylaşılan DB")]
+    SH["Saydin.Shared (entity, exception, diagnostics)"]
 
-         Ortak: Saydin.Shared (entity, exception, diagnostics)
+    FC -->|HTTP REST| API
+    API -->|okur / yazar| PG
+    ING -->|UPSERT| PG
+    API -. ortak tipler .-> SH
+    ING -. ortak tipler .-> SH
 ```
 
 ## Katman Kuralları
 
 ### Saydin.Api — İç Katmanlar
 
-```
-Endpoints (IEndpointRouteBuilder extension methods)
-    │
-    ▼
-Services (IWhatIfCalculator, IAssetService)
-    │
-    ▼
-Repositories (IPriceRepository, IAssetRepository)
-    │
-    ▼
-PostgreSQL + Redis
+```mermaid
+flowchart TD
+    E["Endpoints<br/>(IEndpointRouteBuilder extension methods)"]
+    S["Services<br/>(IWhatIfCalculator, IAssetService)"]
+    R["Repositories<br/>(IPriceRepository, IAssetRepository)"]
+    DB[("PostgreSQL + Redis")]
+    E --> S --> R --> DB
 ```
 
 - **Endpoints:** Route tanımları, request validation, response şekillendirme. İş mantığı yok.
@@ -47,20 +36,14 @@ PostgreSQL + Redis
 
 ### Saydin.PriceIngestion — İç Katmanlar
 
-```
-IngestionOrchestrator (BackgroundService)
-    │
-    ▼
-Workers (TcmbWorker, CoinGeckoWorker, ...)
-    │
-    ▼
-Adapters (IExternalPriceAdapter implementasyonları)
-    │
-    ▼
-Mappers (Ham API yanıtı → PricePoint)
-    │
-    ▼
-PostgreSQL (price_points tablosu, UPSERT)
+```mermaid
+flowchart TD
+    O["IngestionOrchestrator (BackgroundService)"]
+    W["Workers (TcmbWorker, CoinGeckoWorker, ...)"]
+    A["Adapters (IExternalPriceAdapter implementasyonları)"]
+    M["Mappers (Ham API yanıtı → PricePoint)"]
+    DB[("PostgreSQL — price_points, UPSERT")]
+    O --> W --> A --> M --> DB
 ```
 
 ## Dış Veri Kaynakları
@@ -102,13 +85,20 @@ Bu kural kasıtlı olarak uygulanır. Bir servisin diğerini doğrudan çağırm
 
 ## Resilience Katmanı
 
-Her `IExternalPriceAdapter` implementasyonu şu Polly pipeline'ını zorunlu olarak kullanır:
+Her `IExternalPriceAdapter` implementasyonu `Microsoft.Extensions.Http.Resilience`
+(`AddStandardResilienceHandler`, Polly v8) ile merkezi resilience pipeline'ı kullanır:
 
-```
-Request → Timeout(30s) → Retry(3, exponential) → CircuitBreaker(5 fail → open) → Adapter
+```mermaid
+flowchart LR
+    Req["Request"] --> T["AttemptTimeout 30s<br/>(TotalRequestTimeout 3 dk)"]
+    T --> Rt["Retry ×3<br/>(exponential + jitter)"]
+    Rt --> CB["CircuitBreaker<br/>MinThroughput=2 · FailureRatio=1.0 · Sampling=120s"]
+    CB --> Ad["Adapter / dış API"]
 ```
 
-`Microsoft.Extensions.Http.Resilience` paketi ile `IHttpClientFactory` üzerinden yapılandırılır.
+`IHttpClientFactory` üzerinden `HttpResilienceExtensions.AddSaydinResilience` ile uygulanır.
+Düşük-trafik worker'larda (örn. EVDS aylık) circuit breaker pratikte ~2 ardışık hatada 120 sn
+açılır (eski "5 ardışık" hedefinden ödün; rationale `HttpResilienceExtensions` içi yorumda).
 
 ## Veritabanı Erişim Deseni
 
@@ -131,8 +121,9 @@ API, `Accept-Language` header'ına göre yanıt dilini belirler. `.resx` kaynak 
 
 **Middleware zinciri:**
 
-```
-İstek → ResponseCompression → RequestLocalization → ExceptionHandler → Serilog → Endpoint
+```mermaid
+flowchart LR
+    I["İstek"] --> RC["ResponseCompression"] --> RL["RequestLocalization"] --> SL["Serilog"] --> EH["ExceptionHandler"] --> EP["Endpoint"]
 ```
 
 `RequestLocalizationMiddleware` (`UseRequestLocalization`) `Accept-Language` header'ını parse eder ve `CultureInfo.CurrentUICulture`'ı ayarlar. `ExceptionHandler`'dan önce çalışır — hata yanıtları da lokalize edilir.
@@ -276,16 +267,42 @@ lokalize eder ve RFC 7807 `ProblemDetails` + `traceId` döner. HTTP kod konvansi
 domain-kuralı ihlali, ör. senaryo kotası) · 429 (günlük kota / rate-limit) · 502 (dış API)
 · 500 (beklenmeyen, catch-all).
 
+**Hata zarfı sözleşmesi (EC-3/EC-4/EC-9):** Tüm handler'lar `Content-Type:
+application/problem+json` döner ve `Extensions`'a **kararlı, lokalden bağımsız `code`** alanı
+ekler (`Saydin.Api/Exceptions/ApiErrorCodes.cs`; ör. `feature_disabled`, `daily_limit_exceeded`,
+`missing_device_id`) — istemci `type` URI'sine değil **`code`'a göre** dallanır. RateLimiter
+`OnRejected` ve DeviceId guard (`Results.Problem`) da aynı zarfı (`rate_limited` /
+`missing_device_id` / `invalid_device_id`) kullanır. `GlobalExceptionHandler` 5xx gövdesine
+teknik mesaj/stack **sızdırmaz**; `ExternalApiExceptionHandler` upstream kaynak adını gövdeye
+**koymaz** (yalnız log'da, EC-9). Kararlı kodlar + tip→kod eşlemesi meta repo
+`docs/architecture/api-contract.md` "Hata Taksonomisi"nde yayınlanır.
+
+**Middleware sırası (EC-5):** `UseSerilogRequestLogging` `UseExceptionHandler`'ın **dışında**
+(önünde) kayıtlıdır → request log'u handler'ın çevirdiği **nihai** status'ü (403/404/429/500)
+yansıtır; istisnayı handler 4xx'e çevirmeden gören yanıltıcı "500" log artefaktı oluşmaz
+(gerçek 5xx exception detayı `GlobalExceptionHandler.LogError`'da traceId ile korunur).
+`ActivityLogMiddleware` orijinal exception'ı yutmaz. Hata-sözleşmesi regresyonu
+`Saydin.Api.Tests/Exceptions/ExceptionHandlerContractTests.cs` (altyapısız, deterministik) +
+`Saydin.Api.IntegrationTests/ErrorContractHttpTests.cs` (`WebApplicationFactory`, `SkippableFact`)
+ile kilitlenir.
+
 ## Cache Stratejisi (Redis)
 
 ```
-price:{symbol}:{date}                  → TTL 24 saat   (tek gün fiyatı)
-prices:{symbol}:{from}:{to}            → TTL 1 saat    (tarih aralığı)
-whatif:v3:{symbol}:{buy}:{sell}:...:{lang} → TTL 1 saat (hesaplama sonucu; v3: lokalize displayName)
-assets:sig                             → TTL 5 dakika  (aktif asset sayısı — imza)
-assets:list:{count}                    → TTL 6 saat    (tüm asset listesi — sadece temel alanlar)
-assets:info:{sig}:{lang}              → TTL 1 saat    (zenginleştirilmiş liste, dil bazlı cache)
+price:{symbol}:{date}                            → TTL 24 saat  (tek gün fiyatı)
+nearest-price:{symbol}:{date}                    → TTL 24 saat  (en yakın işlem günü fiyatı)
+prices:{symbol}:{from}:{to}:{interval}           → TTL 1 saat   (tarih aralığı)
+latest-date:{symbol}                             → TTL 1 saat   (en son fiyat tarihi)
+whatif:v3:{symbol}:{buy}:{sell}:{amount}:{amountType}{:inf?}:{lang}        → TTL 1 saat (hesaplama; v3: lokalize displayName)
+whatif:reverse:v2:{symbol}:{buy}:{sell}:{amount}:{targetType}{:inf?}:{lang} → TTL 1 saat (ters hesaplama)
+dca:v1:{symbol}:{start}:{end}:{periodicAmount}:{period}:{amountType}{:inf?}:{lang} → TTL 1 saat (DCA)
+assets:sig                                       → TTL 5 dakika (aktif asset listesi içerik imzası)
+assets:list:{sig}                                → TTL 6 saat   (tüm asset listesi — temel alanlar)
+assets:info:{sig}:{lang}                         → TTL 1 saat   (zenginleştirilmiş liste, dil bazlı)
 ```
+
+> Tam ve yetkili cache key referansı (TTL gerekçeleri, fail-open politikası dahil):
+> [`cache-strategy.md`](cache-strategy.md).
 
 Cache anahtarı normalize edilmiş parametrelerle oluşturulur.
 
