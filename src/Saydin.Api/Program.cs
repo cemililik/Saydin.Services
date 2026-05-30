@@ -356,7 +356,7 @@ try
                     Status = StatusCodes.Status429TooManyRequests,
                     Detail = string.Format(localizer["RateLimitedDetail"], windowSeconds, permitLimit),
                     Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier }
-                }, ct);
+                }, (JsonSerializerOptions?)null, "application/problem+json", ct);
             };
         });
     }

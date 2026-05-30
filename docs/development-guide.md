@@ -103,17 +103,24 @@ elle uygulanmalı (geçmişi back-register eder).
 > yoludur**; şu an aktif değildir (aktif strateji yukarıdaki numaralı SQL'dir). Aşağıdaki
 > komutlar geçiş yapıldığında geçerli olacaktır. `Microsoft.EntityFrameworkCore.Design`
 > paketi `Saydin.Api.csproj`'da geçişe hazır olarak mevcuttur.
+>
+> **Çalıştırma (Docker-Compose-only):** Lokal makinede .NET 10 SDK yoktur (CLAUDE.md) →
+> bu komutlar da diğer `dotnet` işlemleri gibi **SDK imajı + repo mount** içinde çalışır
+> (build komutuyla aynı desen). `dotnet-ef` global tool imajda yoktur, önce kurulur;
+> `database update` ayrıca DB için compose ağına (`saydin-services_default`) bağlanır.
 
 ```bash
-# (Post-MVP) Yeni migration oluştur (Saydin.Shared projesine, Saydin.Api startup projesi olarak)
-dotnet ef migrations add <MigrationAdı> \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
+# (Post-MVP) Yeni migration oluştur — SDK imajında (lokal `dotnet ef` YOK):
+docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh -c \
+  'dotnet tool install -g dotnet-ef >/dev/null 2>&1; export PATH="$PATH:/root/.dotnet/tools"; \
+   dotnet ef migrations add <MigrationAdı> --project src/Saydin.Shared --startup-project src/Saydin.Api'
 
-# (Post-MVP) Veritabanını güncelle
-dotnet ef database update \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
+# (Post-MVP) Veritabanını güncelle — compose ağı + ConnectionStrings env ile:
+docker run --rm -v "$PWD":/src -w /src --network saydin-services_default \
+  -e ConnectionStrings__Postgres="Host=postgres;Database=saydin;Username=saydin;Password=$POSTGRES_PASSWORD" \
+  mcr.microsoft.com/dotnet/sdk:10.0 sh -c \
+  'dotnet tool install -g dotnet-ef >/dev/null 2>&1; export PATH="$PATH:/root/.dotnet/tools"; \
+   dotnet ef database update --project src/Saydin.Shared --startup-project src/Saydin.Api'
 ```
 
 ## 3. Saydin.Api Çalıştırma
