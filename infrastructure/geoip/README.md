@@ -41,4 +41,4 @@ License key fork PR CI'sına verilmez.
 Deploy/init adımı (veya `geoipupdate` cron/sidecar) mount'lu volume'a güncel DB'yi indirir;
 license key deploy ortamının **secret store**'undan gelir (bkz.
 [`ADR-005-secrets-management.md`](../../docs/decisions/ADR-005-secrets-management.md)).
-MaxMind GeoLite2 ~haftalık güncellenir; bu kadansta tazelenmesi önerilir.
+MaxMind GeoLite2 ~haftalık güncellenir; bu sıklıkta tazelenmesi önerilir.

@@ -42,9 +42,15 @@ run_psql() {
     fi
 }
 
-# schema_migrations yoksa oluştur (014 öncesi DB'ler için güvenli; 014 zaten IF NOT EXISTS).
-run_psql -q -c \
-    "CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now(), checksum text NULL);"
+# schema_migrations VAR OLMALI — otomatik oluşturma YOK (fail-fast). 014 öncesi DB'lerde
+# ÖNCE `014_schema_migrations.sql` elle uygulanmalı (001..014 geçmişini back-register eder;
+# bkz. ADR-001 / docs). Tablo yoksa burada boş oluşturmak, KAYITLI OLMAYAN tüm migration'ların
+# (001+) re-run'ına ve dolu DB'de kafa karıştırıcı "already exists" hatasına yol açardı.
+schema_migrations_exists="$(run_psql -tA -c "SELECT 1 WHERE to_regclass('schema_migrations') IS NOT NULL;")"
+if [[ "${schema_migrations_exists}" != "1" ]]; then
+    echo "✗ HATA: schema_migrations tablosu yok. 014 öncesi bir DB ise ÖNCE '014_schema_migrations.sql' migration'ını elle uygula (001..014 geçmişini back-register eder), sonra bu runner'ı yeniden çalıştır." >&2
+    exit 1
+fi
 
 applied_count=0
 for path in "${MIGRATIONS_DIR}"/*; do

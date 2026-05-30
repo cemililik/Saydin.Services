@@ -32,7 +32,7 @@ public class AmountBucketTests
     }
 
     [Fact]
-    public void Coarse_NeverReturnsRawAmount()
+    public void Coarse_WhenInvoked_NeverReturnsRawAmount()
     {
         // KVKK garantisi: çıktı hiçbir zaman ham tutarın ondalık temsili değildir.
         var bucket = AmountBucket.Coarse(123_456.78m);

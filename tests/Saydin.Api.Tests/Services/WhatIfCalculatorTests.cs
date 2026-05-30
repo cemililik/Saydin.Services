@@ -804,12 +804,11 @@ public class WhatIfCalculatorTests
     }
 
     [Fact]
-    public async Task CompareAsync_InflationTierDisabled_SilentlyDropsInflationFlag()
+    public async Task CompareAsync_InflationTierDisabled_ThrowsFeatureDisabled()
     {
         // Tier inflation kapalı + CompareRequest IncludeInflation=true →
-        // Calculator FeatureDisabled fırlatmak yerine flag'i drop eder
-        // (CalculateAsync ile aynı semantik koruma; review outside diff comment).
-        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        // CalculateAsync / CalculateReverseAsync ile TUTARLI: flag'i sessizce drop etmek
+        // yerine FeatureDisabled (4xx) fırlatılır (üç entry-point aynı davranır).
         var planOptions = new PlanOptions
         {
             Free = new TierOptions { Features = new FeatureOptions {
@@ -820,20 +819,12 @@ public class WhatIfCalculatorTests
         };
         var sut = CreateSutWithOptions(planOptions);
 
-        var request = new CompareRequest(["USDTRY", "USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try",
+        var request = new CompareRequest(["USDTRY", "BTC"], BuyDate, SellDate, 1000m, "try",
             IncludeInflation: true);
 
-        // BTC için de asset bilgisi gerek
-        _assetService.GetBySymbolAsync("BTC", Arg.Any<CancellationToken>())
-                     .Returns(new Asset { Id = Guid.NewGuid(), Symbol = "BTC", DisplayName = "Bitcoin",
-                                          Category = AssetCategory.Crypto, Source = "coingecko", IsActive = true });
+        var act = () => sut.CompareAsync(request, CancellationToken.None);
 
-        var result = await sut.CompareAsync(request, CancellationToken.None);
-
-        // Inflation talep edildi ama disabled → InflationRepository hiç çağrılmamalı
-        await _inflationRepository.DidNotReceive()
-            .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
-        result.Results.Should().HaveCount(2);
+        await act.Should().ThrowAsync<FeatureDisabledException>();
     }
 
     // ── Amount Validation (F1.9-4) ─────────────────────────────────────────

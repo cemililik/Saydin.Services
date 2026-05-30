@@ -86,9 +86,12 @@ public sealed class WhatIfCalculator(
             throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "comparison");
 
         // Karar: ADR-002-compare-quota.md — Compare = 1 hesaplama (paylaşılan usage:whatif:
-        // havuzu, 2-5 sembol fark etmez). inflation tier kuralı CalculateAsync ile aynı:
-        // özellik kapalıysa request bayrağını sessizce yok say.
-        var includeInflation = request.IncludeInflation && features.InflationAdjustment;
+        // havuzu, 2-5 sembol fark etmez).
+        // inflation tier kuralı CalculateAsync / CalculateReverseAsync ile TUTARLI: özellik
+        // kapalıyken IncludeInflation set edilmişse bayrağı sessizce yok saymak yerine
+        // FeatureDisabled (4xx) fırlat — üç entry-point'in davranışı aynı olmalı.
+        if (request.IncludeInflation && !features.InflationAdjustment)
+            throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "inflation");
 
         // Tekrarlanan semboller kaldırıldıktan sonra 2-5 arasında unique sembol gerekli
         var symbols = request.AssetSymbols
@@ -123,7 +126,7 @@ public sealed class WhatIfCalculator(
                     SellDate:          request.SellDate,
                     Amount:            request.Amount,
                     AmountType:        request.AmountType,
-                    IncludeInflation:  includeInflation), ct));
+                    IncludeInflation:  request.IncludeInflation), ct));
             }
 
             // Karlılığa göre sırala (en yüksek ProfitLossPercent → Rank 1)
