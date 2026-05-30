@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -39,10 +40,11 @@ public sealed class DailyLimitExceededExceptionHandler(
             Extensions =
             {
                 ["traceId"] = Activity.Current?.TraceId.ToString(),
+                ["code"]    = ApiErrorCodes.DailyLimitExceeded,
                 ["limit"]   = ex.Limit,
                 ["resetAt"] = resetAt
             }
-        }, ct);
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);
 
         return true;
     }

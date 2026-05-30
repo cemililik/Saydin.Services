@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -36,6 +37,9 @@ public sealed class ExternalApiExceptionHandler(
 
         httpContext.Response.StatusCode = StatusCodes.Status502BadGateway;
 
+        // EC-9: `source` (iç upstream kimliği: twelvedata/coingecko vb.) gövdeye KONULMAZ —
+        // bilgi-ifşası önlenir. Yalnız yukarıdaki LogWarning'de (server-side) tutulur; istemci
+        // 502'yi jenerik upstream hatası olarak görür.
         await httpContext.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type = "https://saydin.app/errors/external-api",
@@ -45,9 +49,9 @@ public sealed class ExternalApiExceptionHandler(
             Extensions =
             {
                 ["traceId"] = traceId,
-                ["source"]  = ex.ApiSource,
+                ["code"]    = ApiErrorCodes.ExternalApi,
             }
-        }, cancellationToken);
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, cancellationToken);
 
         return true;
     }

@@ -6,6 +6,58 @@ Bu dosya backend servislerindeki önemli değişiklikleri izler. Format
 
 ## [Unreleased]
 
+### Hata Sözleşmesi Sertleştirme (Error Contract — EC-1..EC-10) (2026-05-30)
+
+`docs/code-reviews/ERROR-CONTRACT-BACKEND-ACTION-PLAN.md` bulgularının backend kalemleri ele
+alındı. Tetikleyen olay: `POST /v1/what-if/calculate` Serilog'da `StatusCode 500` görünürken
+istemcinin jenerik "Sunucu hatası" göstermesi (beklenen: `403` paywall).
+
+#### Eklendi
+
+- **Kararlı makine-okunur hata kodları (EC-3):** `ApiErrorCodes` sınıfı + her hata yanıtının
+  `ProblemDetails.Extensions["code"]` alanı (`validation`, `feature_disabled`, `price_not_found`,
+  `daily_limit_exceeded`, `missing_device_id`, `invalid_device_id`, `rate_limited`, … — 12 kod).
+  İstemci locale/`type`'tan bağımsız bu koda göre dallanır.
+- **HTTP-sınırı hata-sözleşmesi regresyon ağı (EC-2):**
+  - `Saydin.Api.Tests/Exceptions/ExceptionHandlerContractTests.cs` — 9 handler için altyapısız,
+    deterministik kontrat kilidi (content-type, `code`, `traceId`, lokalize başlık, sızıntı yok).
+  - `Saydin.Api.IntegrationTests/ErrorContractHttpTests.cs` — `WebApplicationFactory<Program>` ile
+    gerçek pipeline (device-id 400, feature-disabled 403, `Accept-Language` lokalizasyon);
+    PG/Redis erişilemezse `SkippableFact`. `Microsoft.AspNetCore.Mvc.Testing` eklendi.
+
+#### Değişti
+
+- **Content-Type → `application/problem+json` (EC-4):** 9 `IExceptionHandler` ve RateLimiter
+  `OnRejected` artık RFC 7807 media-type'ını döner (önceden `application/json`). DeviceId guard'lar
+  zaten `Results.Problem` ile problem+json üretiyordu → 3 yönlü tutarsızlık giderildi.
+- **Serilog ↔ `UseExceptionHandler` sırası (EC-5):** `UseSerilogRequestLogging` artık
+  `UseExceptionHandler`'ın **dışında** (önünde); request log'u handler'ın çevirdiği **nihai**
+  status'ü (403/404/429/500) yansıtır — yanıltıcı "StatusCode 500" artefaktı kalkar.
+  `ActivityLogMiddleware` orijinal exception'ı yutmadığı doğrulandı.
+
+#### Güvenlik
+
+- **Upstream `source` sızıntısı kapatıldı (EC-9):** `ExternalApiException` 502 gövdesindeki
+  iç kaynak kimliği (`twelvedata`/`coingecko` vb.) kaldırıldı; yalnız server-side log'da tutulur.
+
+#### Dokümantasyon
+
+- Meta repo `docs/architecture/api-contract.md`: tam hata taksonomisi (12 tip + `code` + ek alanlar
+  + content-type notu, EC-10/EC-8), DeviceId 400 tipleri (EC-8), `Share` yalnız-istemci gating
+  notu (EC-7).
+- `architecture.md`: middleware sırası diyagramı (Serilog/ExceptionHandler) + exception zinciri
+  `code`/problem+json notu.
+
+#### İnsan/Ops kararı bekleyen
+
+- **EC-1:** Canlıda gerçek wire-status ölçümü + (gerekirse) HEAD'den temiz imaj redeploy
+  (deploy skew teşhisi). Kaynak kod doğrulandı: handler zinciri, kayıt sırası, `UseExceptionHandler`
+  ve `FeatureDisabledExceptionHandler` (403) **temiz** — kesin backend bug'ı yok; aksiyon ops.
+
+#### Doğrulama
+
+- Build: 0 uyarı / 0 hata (SDK 10.0).
+
 ### Faz 4 — Code Review Aksiyon Planı: ADR / Karar Bekleyenler (2026-05-29)
 
 Code-review aksiyon planının (`docs/code-reviews/ACTION-PLAN.md`) **Faz 4** kalemleri:

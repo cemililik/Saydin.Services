@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Localization;
+using Saydin.Api.Exceptions;
 using Saydin.Api.Services;
 
 namespace Saydin.Api.Endpoints;
@@ -45,7 +46,8 @@ internal static partial class EndpointExtensions
                     title: localizer["DeviceIdRequired"],
                     detail: localizer["DeviceIdRequiredDetail"],
                     statusCode: StatusCodes.Status400BadRequest,
-                    type: "https://saydin.app/errors/missing-device-id");
+                    type: "https://saydin.app/errors/missing-device-id",
+                    extensions: new Dictionary<string, object?> { ["code"] = ApiErrorCodes.MissingDeviceId });
             }
 
             var deviceId = headerValues[0]!.Trim();
@@ -56,7 +58,8 @@ internal static partial class EndpointExtensions
                     title: localizer["DeviceIdInvalid"],
                     detail: string.Format(localizer["DeviceIdInvalidDetail"], MaxDeviceIdLength),
                     statusCode: StatusCodes.Status400BadRequest,
-                    type: "https://saydin.app/errors/invalid-device-id");
+                    type: "https://saydin.app/errors/invalid-device-id",
+                    extensions: new Dictionary<string, object?> { ["code"] = ApiErrorCodes.InvalidDeviceId });
             }
 
             ctx.HttpContext.Items[DeviceIdItemKey] = deviceId;

@@ -21,6 +21,12 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- EC-2: Exception handler kontrat testleri DefaultHttpContext / IExceptionHandler (ASP.NET Core
+       shared framework) kullanır. Non-Web SDK test projesinde bu tipler için açık FrameworkReference. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\Saydin.Api\Saydin.Api.csproj" />
   </ItemGroup>

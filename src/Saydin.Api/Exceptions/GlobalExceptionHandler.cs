@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -32,8 +33,12 @@ public sealed class GlobalExceptionHandler(
             Title = localizer["ServerError"],
             Status = StatusCodes.Status500InternalServerError,
             Detail = localizer["UnexpectedError"],
-            Extensions = { ["traceId"] = traceId }
-        }, ct);
+            Extensions =
+            {
+                ["traceId"] = traceId,
+                ["code"] = ApiErrorCodes.InternalError,
+            }
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);
 
         return true;
     }

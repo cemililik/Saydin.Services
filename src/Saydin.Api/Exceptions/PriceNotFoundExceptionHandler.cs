@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -37,9 +38,10 @@ public sealed class PriceNotFoundExceptionHandler(
             Extensions =
             {
                 ["traceId"] = Activity.Current?.TraceId.ToString(),
+                ["code"] = ApiErrorCodes.PriceNotFound,
                 ["nearestDates"] = ex.NearestAvailableDates
             }
-        }, ct);
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);
 
         return true;
     }
