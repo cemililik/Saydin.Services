@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -30,8 +31,12 @@ public sealed class AssetNotFoundExceptionHandler(
             Title = localizer["AssetNotFound"],
             Status = StatusCodes.Status404NotFound,
             Detail = string.Format(localizer["AssetNotFoundDetail"], ex.Symbol),
-            Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() }
-        }, ct);
+            Extensions =
+            {
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
+                ["code"] = ApiErrorCodes.AssetNotFound,
+            }
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);
 
         return true;
     }

@@ -81,7 +81,7 @@ Build veya test başarısız olursa commit atma, önce hatayı düzelt.
 
 ### Servis Sınırları
 
-- `Saydin.Api` hiçbir dış finansal API'ye (TCMB, CoinGecko, GoldAPI, Twelve Data) HTTP isteği ATMAZ
+- `Saydin.Api` hiçbir dış finansal API'ye (TCMB, CoinGecko, OpenExchangeRates, Twelve Data, EVDS) HTTP isteği ATMAZ
 - `Saydin.PriceIngestion` hiçbir HTTP endpoint EXPOSE ETMEZ (`Microsoft.AspNetCore` referansı yasak)
 - Servisler arasındaki iletişim **yalnızca PostgreSQL veritabanı** üzerinden gerçekleşir
 - Ortak tipler `Saydin.Shared`'de yaşar; servisler birbirini referans almaz
@@ -217,8 +217,13 @@ Log seviyesi kuralları:
 ### Exception Handling (IExceptionHandler Zinciri)
 
 ```
-PriceNotFoundExceptionHandler → ValidationExceptionHandler → ExternalApiExceptionHandler → GlobalExceptionHandler
+ValidationExceptionHandler → FeatureDisabledExceptionHandler → PriceNotFoundExceptionHandler
+  → AssetNotFoundExceptionHandler → ScenarioNotFoundExceptionHandler
+  → ScenarioLimitExceededExceptionHandler → DailyLimitExceededExceptionHandler
+  → ExternalApiExceptionHandler → GlobalExceptionHandler
 ```
+
+(Kayıt sırası `Program.cs`'tedir; spesifik handler'lar önce, `GlobalExceptionHandler` her zaman en sonda. HTTP kodları: 400 · 403 · 404 · 422 · 429 · 502 · 500.)
 
 **Her domain exception için ayrı `IExceptionHandler` sınıfı yazılır.**
 
@@ -275,9 +280,17 @@ activity?.SetTag("buy.date", request.BuyDate.ToString());
 ### Health Checks
 
 ```csharp
-// Program.cs
+// Program.cs — PostgreSQL paylaşılan NpgsqlDataSource üzerinden manuel async kontrol
+// (SELECT 1); Redis için AddRedis. AspNetCore.HealthChecks.Npgsql AddNpgSql KULLANILMAZ.
 builder.Services.AddHealthChecks()
-    .AddNpgSql(connectionString, name: "postgresql", tags: ["db"])
+    .AddAsyncCheck("postgresql", async ct =>
+    {
+        await using var conn = await npgsqlDataSource.OpenConnectionAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1";
+        await cmd.ExecuteScalarAsync(ct);
+        return HealthCheckResult.Healthy();
+    }, tags: ["db"])
     .AddRedis(redisConnectionString, name: "redis", tags: ["cache"]);
 
 app.MapHealthChecks("/health");
@@ -290,19 +303,25 @@ app.MapHealthChecks("/health");
 Her adaptör şu kuralları izler:
 
 ```csharp
-public interface IExternalApiAdapter
+public interface IExternalPriceAdapter
 {
+    string Source { get; }   // "tcmb", "coingecko", "openexchangerates", "twelvedata"
+
     Task<IReadOnlyList<PricePoint>> FetchRangeAsync(
+        Guid assetId,
         string assetSymbol,
+        string sourceId,
         DateOnly from,
         DateOnly to,
         CancellationToken ct);
 }
+// EVDS (enflasyon) ayrı `IInflationAdapter`'ı uygular — price adapter sözleşmesini değil.
 ```
 
-- Polly ile **retry** (3 deneme, exponential backoff)
-- Polly ile **circuit breaker** (5 ardışık hata → devre açılır)
-- Her istekte 30 saniye timeout
+- `Microsoft.Extensions.Http.Resilience` (Polly v8) `AddStandardResilienceHandler` ile merkezi pipeline (`HttpResilienceExtensions.AddSaydinResilience`)
+- **retry** (3 deneme, exponential backoff + jitter)
+- **circuit breaker** — `MinimumThroughput=2`, `FailureRatio=1.0`, `SamplingDuration=120s` → düşük-trafik worker'larda (örn. EVDS aylık) pratikte ~2 ardışık hatada devre 120 sn açılır (rationale: `HttpResilienceExtensions` içi yorum)
+- Her istekte 30 saniye AttemptTimeout (+ 3 dk TotalRequestTimeout)
 - 429 (rate limit) alındığında exponential backoff uygulanır
 
 ---
@@ -380,7 +399,7 @@ Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` d
 3. Service interface'i ve implementasyonunu yaz
 4. Kullanıcıya dönecek string'ler için `IStringLocalizer<ErrorMessages>` kullan, hardcoded Türkçe string YASAK
 5. Unit test yaz
-6. `docs/architecture/api-contract.md`'ı güncelle
+6. Saydın meta repo `docs/architecture/api-contract.md`'ı güncelle (bu repo'da değil — bkz. Dokümantasyon Standardı tablosu)
 
 ---
 

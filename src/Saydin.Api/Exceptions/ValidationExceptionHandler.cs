@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -40,7 +41,8 @@ public sealed class ValidationExceptionHandler(
 
         var extensions = new Dictionary<string, object?>
         {
-            ["traceId"] = traceId
+            ["traceId"] = traceId,
+            ["code"] = ApiErrorCodes.Validation,
         };
         if (field is not null)
             extensions["field"] = field;
@@ -52,7 +54,7 @@ public sealed class ValidationExceptionHandler(
             Status = StatusCodes.Status400BadRequest,
             Detail = detailMessage,
             Extensions = extensions,
-        }, cancellationToken);
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, cancellationToken);
 
         return true;
     }

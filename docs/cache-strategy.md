@@ -28,14 +28,14 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 | En yakın fiyat noktası | `nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
 | Fiyat aralığı | `prices:{symbol}:{from}:{to}:{interval}` | 1 saat | `AssetService` (F2.2-1: interval suffix Faz 2; F3.1-2: `interval` değeri artık `Saydin.Shared.Constants.PriceIntervals` sabitinden — key formatı değişmedi) |
 | En son fiyat tarihi | `latest-date:{symbol}` | 1 saat | `AssetService` (F1.3-5: kod tarafı `latest-date:` — tire) |
-| DCA hesaplama | `dca:v1:{symbol}:{startDate}:{endDate}:{amount}:{period}:{amountType}{:inf?}:{lang}` | 1 saat | `DcaCalculator` |
+| DCA hesaplama | `dca:v1:{symbol}:{startDate}:{endDate}:{periodicAmount}:{period}:{amountType}{:inf?}:{lang}` | 1 saat | `DcaCalculator` (`{periodicAmount}` = her periyotta yatırılan tutar) |
 | Günlük kullanım sayacı (What-If) | `usage:whatif:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `DailyLimitGuard` |
 | Günlük kullanım sayacı (DCA) | `usage:dca:{userId}:{yyyy-MM-dd}` | Gece yarısına kadar | `DailyLimitGuard` |
 
 ### Key Versiyonlama
 
-`whatif:v2:...` formatındaki `v2` prefix'i kasıtlıdır. Cache yapısını kıran bir değişiklik yapılırsa
-(yeni alan eklenmesi, format değişikliği) prefix'i `v3` olarak artır — eski key'ler TTL dolunca
+`whatif:v3:...` formatındaki `v3` prefix'i kasıtlıdır. Cache yapısını kıran bir değişiklik yapılırsa
+(yeni alan eklenmesi, format değişikliği) prefix'i `v4` olarak artır — eski key'ler TTL dolunca
 otomatik temizlenir, manuel flush gerekmez.
 
 ### Faz 2 — Process-local Caches (Redis dışı)
@@ -51,7 +51,7 @@ otomatik temizlenir, manuel flush gerekmez.
 
 ## Yanıt Cache'i
 
-### What-If Hesaplama (`whatif:v2:...`)
+### What-If Hesaplama (`whatif:v3:...`)
 
 **Neden cache'leniyor:** Hesaplama birden fazla DB sorgusu içeriyor (buy price, sell price, price range).
 Aynı parametrelerle gelen istek (farklı kullanıcıdan bile olsa) aynı matematiksel sonucu verir.
@@ -77,12 +77,15 @@ Cache'te var mı?
 "bugünün fiyatı" kullanılıyor; bu durumda gün içinde fiyat güncellenirse 1 saate kadar
 eski veri dönebilir. Kabul edilebilir bir trade-off.
 
-### Asset Listesi (`assets:list`)
+### Asset Listesi (`assets:list:{sig}` / `assets:info:{sig}:{lang}`)
 
-**TTL seçimi:** 6 saat — Asset ekleme/çıkarma nadir, sık değişmiyor.
-Yeni asset eklendiğinde manuel olarak bu key silinebilir:
+**TTL seçimi:** 6 saat (`assets:list`) / 1 saat (`assets:info`) — Asset ekleme/çıkarma nadir.
+`{sig}` aktif asset listesinin **içerik imzasıdır** (`assets:sig`, 5 dk TTL): asset
+eklenir/çıkarılınca imza değişir ve yeni key otomatik üretilir (content-aware invalidation),
+eski key TTL ile düşer. Elle temizlemek gerekirse (çıplak `assets:list` artık kullanılmaz):
 ```bash
-redis-cli DEL assets:list
+redis-cli --scan --pattern 'assets:list:*' | xargs -r redis-cli DEL
+redis-cli DEL assets:sig
 ```
 
 ### DCA Hesaplama (`dca:v1:...`)
@@ -90,7 +93,7 @@ redis-cli DEL assets:list
 **Neden cache'leniyor:** DCA hesaplaması geniş tarih aralığında fiyat verisi çeker (haftalık/aylık).
 Aynı parametrelerle gelen istek aynı sonucu verir.
 
-**Key formatı:** `dca:v1:{SYMBOL}:{START}:{END}:{AMOUNT}:{PERIOD}:{AMOUNT_TYPE}{:inf?}:{LANG}`
+**Key formatı:** `dca:v1:{SYMBOL}:{START}:{END}:{PERIODIC_AMOUNT}:{PERIOD}:{AMOUNT_TYPE}{:inf?}:{LANG}`
 - `:inf` suffix'i yalnızca `IncludeInflation == true` olduğunda eklenir
 - `PERIOD`: `weekly` veya `monthly`
 
@@ -110,7 +113,7 @@ sonucu döner.
 **Davranış:** İstek edilen tarihe ≤ olan en yakın işlem günü önce denenir (geriye doğru);
 bulunamazsa > olan ilk işlem günü döner (ileriye doğru). Sonuç `PricePoint` olarak cache'lenir.
 
-**TTL seçimi:** 24 saat — Tarihi piyasa tatilleri değişmez. Bugünün fiyatı `whatif:v2:...`
+**TTL seçimi:** 24 saat — Tarihi piyasa tatilleri değişmez. Bugünün fiyatı `whatif:v3:...`
 cache'inden bağımsız olduğundan ayrım yapılmıyor. Kabul edilebilir.
 
 ---
@@ -130,21 +133,38 @@ bağımsız olarak sayaçtan **yalnız 1** düşer (tek atomik acquire). Per-fea
 
 **Nasıl çalışır:**
 Her iki prefix de `DailyLimitGuard` servisi tarafından yönetilir:
-1. `CheckAsync` — key'i okur (INCR yapmaz), eşik aşıldıysa 429 döner
-2. `IncrementAsync` — Lua script ile atomik INCR yapar, ilk artışta TTL set eder
+1. `CheckAsync` — key'i okur (INCR yapmaz), eşik aşıldıysa `DailyLimitExceededException` (429) fırlatır
+2. `TryAcquireAsync` (alias: `IncrementAsync`) — **atomik check-then-INCR** Lua script ile rezervasyon
+   yapar: limitteyse `0` döner → 429, değilse `INCR` + ilk artışta TTL set → `1` döner
+3. `ReleaseAsync` — best-effort atomik `DECR` (başarısız hesapta kotayı iade eder)
 
-**TTL:** Gece yarısına kalan milisaniye (`DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow`)
-Türkiye saati UTC+3; "günlük limit" UTC bazlı sıfırlanıyor. İleride timezone-aware yapılabilir.
+**TTL:** Gece yarısına kalan milisaniye. `timeProvider.GetUtcNow()` **tek noktada** okunur;
+key tarihi ile TTL aynı `now`'dan türetilir → gün-dönümü race'i kapalı. Türkiye saati UTC+3;
+"günlük limit" UTC bazlı sıfırlanıyor. İleride timezone-aware yapılabilir.
 
-**Lua script (atomik INCR + PEXPIRE):**
+**Acquire Lua script (atomik check-then-INCR; `ARGV[1]`=limit, `ARGV[2]`=ttlMs):**
 ```lua
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current >= tonumber(ARGV[1]) then
+  return 0                                   -- limit dolu → reddet (429)
+end
 local count = redis.call('INCR', KEYS[1])
 if count == 1 then
-  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])    -- TTL yalnız ilk INCR'da
 end
-return count
+return 1                                      -- izin verildi
 ```
-İlk INCR'da TTL set edilir; sonraki INCR'lar TTL'yi değiştirmez.
+`0` = reddet (limit), `1` = izin. F1.3-7: eski INCR-then-DECR şişirmesi kaldırıldı; script
+atomik olduğu için race yok.
+
+**Release Lua script (best-effort iade):**
+```lua
+local count = redis.call('GET', KEYS[1])
+if count and tonumber(count) > 0 then
+  return redis.call('DECR', KEYS[1])
+end
+return 0
+```
 
 **Premium kullanıcılar:** `user.Tier == "premium"` ise ne limit kontrolü ne de INCR yapılır.
 

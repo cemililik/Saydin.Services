@@ -29,9 +29,33 @@ public class ErrorMessagesLocalizationTests
     }
 
     [Theory]
+    // EC-3 follow-up (review Bulgu 3): IExceptionHandler / DeviceId guard / RateLimiter'ın
+    // kullandığı TÜM title/detail key'leri burada doğrulanır — biri resx'ten silinirse
+    // (IStringLocalizer ham KEY döner, boş değil; ResourceNotFound=true) test KIRILIR.
+    // Kontrat testi (ExceptionHandlerContractTests) yalnız "title boş değil" der; gerçek
+    // key-varlığı koruması burasıdır.
     [InlineData("DeviceIdRequired")]
+    [InlineData("DeviceIdRequiredDetail")]
+    [InlineData("DeviceIdInvalid")]
+    [InlineData("DeviceIdInvalidDetail")]
     [InlineData("AmountMustBePositive")]
     [InlineData("PriceNotFound")]
+    [InlineData("PriceNotFoundDetail")]
+    [InlineData("AssetNotFound")]
+    [InlineData("AssetNotFoundDetail")]
+    [InlineData("ScenarioNotFound")]
+    [InlineData("ScenarioNotFoundDetail")]
+    [InlineData("ScenarioLimitExceeded")]
+    [InlineData("ScenarioLimitExceededDetail")]
+    [InlineData("DailyLimitExceeded")]
+    [InlineData("DailyLimitExceededDetail")]
+    [InlineData("FeatureDisabledTitle")]
+    [InlineData("FeatureDisabled")]
+    [InlineData("ValidationFailed")]
+    [InlineData("ServerError")]
+    [InlineData("UnexpectedError")]
+    [InlineData("RateLimited")]
+    [InlineData("RateLimitedDetail")]
     public void GetString_WithValidKey_ReturnsLocalizedValueNotKey(string key)
     {
         var localizer = CreateLocalizer();

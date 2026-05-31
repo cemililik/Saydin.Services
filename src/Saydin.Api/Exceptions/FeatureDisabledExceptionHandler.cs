@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -29,7 +30,8 @@ public sealed class FeatureDisabledExceptionHandler(
 
         var extensions = new Dictionary<string, object?>
         {
-            ["traceId"] = traceId
+            ["traceId"] = traceId,
+            ["code"] = ApiErrorCodes.FeatureDisabled,
         };
         if (ex.FeatureKey is not null)
             extensions["feature"] = ex.FeatureKey;
@@ -41,7 +43,7 @@ public sealed class FeatureDisabledExceptionHandler(
             Status = StatusCodes.Status403Forbidden,
             Detail = ex.Detail,
             Extensions = extensions,
-        }, cancellationToken);
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, cancellationToken);
 
         return true;
     }

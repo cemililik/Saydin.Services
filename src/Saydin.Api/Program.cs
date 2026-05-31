@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.Mime;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
@@ -355,8 +356,12 @@ try
                     Title  = localizer["RateLimited"],
                     Status = StatusCodes.Status429TooManyRequests,
                     Detail = string.Format(localizer["RateLimitedDetail"], windowSeconds, permitLimit),
-                    Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier }
-                }, (JsonSerializerOptions?)null, "application/problem+json", ct);
+                    Extensions =
+                    {
+                        ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier,
+                        ["code"]    = ApiErrorCodes.RateLimited,
+                    }
+                }, (JsonSerializerOptions?)null, MediaTypeNames.Application.ProblemJson, ct);
             };
         });
     }
@@ -382,13 +387,23 @@ try
     if (rateLimitingEnabled)
         app.UseRateLimiter();
 
-    app.UseExceptionHandler();
+    // Middleware sırası (EC-5 + EC-FU ActivityLog status düzeltmesi):
+    //   Serilog → ActivityLog → ExceptionHandler → endpoint.
+    // İkisi de UseExceptionHandler'ın DIŞINDADIR (önünde) — bu sıralama KRİTİKTİR:
+    //  • Serilog: request log'u handler'ın çevirdiği NİHAİ status'ü (403/404/429/502/500)
+    //    yansıtır; istisnayı handler 4xx'e çevirmeden gören yanıltıcı "500" artefaktı oluşmaz.
+    //    Gerçek 500 exception detayı GlobalExceptionHandler.LogError'da (traceId ile) korunur.
+    //  • ActivityLogMiddleware: endpoint exception fırlattığında ExceptionHandler onu 4xx/5xx'e
+    //    çevirip yanıtı yazar ve (handler `true` döndüğü için) rethrow ETMEZ → ActivityLog'un
+    //    `await next()`'i NORMAL tamamlanır; finally'si ÇEVRİLMİŞ status'ü okuyup activity_logs'a
+    //    doğru kodu yazar. (Önceki sıralamada ActivityLog ExceptionHandler'ın İÇİNDEYDİ → finally
+    //    response henüz çevrilmeden, StatusCode hâlâ 200 iken çalışıyor ve activity_logs'a yanlış
+    //    200 yazıyordu. Regresyon kilidi: ErrorContractHttpTests
+    //    `FeatureDisabled_ActivityLog_RecordsConvertedStatus_Not200`.) İç try/catch yalnız
+    //    log-gönderim hatasını sarmalar; istek exception'ını YUTMAZ.
     app.UseSerilogRequestLogging();
-
-    // Activity log middleware exception handler'dan SONRA, endpoint mapping'den ÖNCE çalışır.
-    // Pipeline tamamlandığında builder.StatusCode = Response.StatusCode atanır → 4xx/5xx
-    // hatalı isteklerde de activity_logs'a doğru kayıt düşer (review C-3).
     app.UseMiddleware<ActivityLogMiddleware>();
+    app.UseExceptionHandler();
 
     if (app.Environment.IsDevelopment())
     {

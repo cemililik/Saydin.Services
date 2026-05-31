@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -30,8 +31,12 @@ public sealed class ScenarioNotFoundExceptionHandler(
             Title = localizer["ScenarioNotFound"],
             Status = StatusCodes.Status404NotFound,
             Detail = string.Format(localizer["ScenarioNotFoundDetail"], ex.ScenarioId),
-            Extensions = { ["traceId"] = Activity.Current?.TraceId.ToString() }
-        }, ct);
+            Extensions =
+            {
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
+                ["code"] = ApiErrorCodes.ScenarioNotFound,
+            }
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);
 
         return true;
     }

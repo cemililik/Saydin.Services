@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -32,10 +33,11 @@ public sealed class ScenarioLimitExceededExceptionHandler(
             Detail = string.Format(localizer["ScenarioLimitExceededDetail"], ex.Limit),
             Extensions =
             {
-                ["traceId"] = Activity.Current?.TraceId.ToString(),
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
+                ["code"] = ApiErrorCodes.ScenarioLimitExceeded,
                 ["limit"] = ex.Limit
             }
-        }, ct);
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);
 
         return true;
     }
