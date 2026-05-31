@@ -7,7 +7,9 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Saydin.Shared.Data;
+using StackExchange.Redis;
 
 namespace Saydin.Api.IntegrationTests;
 
@@ -28,17 +30,52 @@ public sealed class ErrorContractWebAppFactory : WebApplicationFactory<Program>
 
     public ErrorContractWebAppFactory()
     {
-        // Bulgu 7: env VARLIĞI kontrol edilir, erişilebilirlik değil — compose `tests` profili
-        // postgres/redis'i `depends_on: service_healthy` ile garanti eder, dolayısıyla env set
-        // iken altyapı erişilebilirdir. Env set ama (compose dışı bir koşuda) altyapı erişilemezse
-        // CreateClient() Program.cs fail-fast ile fırlatır (Skip yerine Error) — bu uç durum
-        // bilinçli kabul edilir; DatabaseFixture'daki bağlantı-probe'unu burada tekrarlamayız.
+        // Bulgu 7 (re-raised): env VARLIĞI yeterli değil — gerçek ERİŞİLEBİLİRLİK probe edilir
+        // (DatabaseFixture/RedisFixture deseniyle birebir). Env set ama altyapı erişilemezse
+        // (compose dışı koşu / yarış) artık CreateClient() boot'unda belirsiz hata yerine test
+        // temiz biçimde Skip olur. Tüm exception'lar "erişilemez" sayılır, dışarı sızmaz.
         var pg    = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
         var redis = Environment.GetEnvironmentVariable("ConnectionStrings__Redis");
-        InfraAvailable = !string.IsNullOrWhiteSpace(pg) && !string.IsNullOrWhiteSpace(redis);
-        SkipReason = InfraAvailable
-            ? string.Empty
-            : "ConnectionStrings__Postgres/__Redis env yok (compose `tests` profili gerekli).";
+        (InfraAvailable, SkipReason) = ProbeInfra(pg, redis);
+    }
+
+    /// <summary>
+    /// PG + Redis erişilebilirliğini kısa timeout'la dener; ikisi de bağlanırsa
+    /// <c>(true, "")</c>, değilse <c>(false, sebep)</c> döner. Her hata yutulur — probe
+    /// asla fırlatmaz (CreateClient() çağrılmadan önce constructor'da güvenle çalışır).
+    /// </summary>
+    private static (bool Available, string SkipReason) ProbeInfra(string? pg, string? redis)
+    {
+        if (string.IsNullOrWhiteSpace(pg) || string.IsNullOrWhiteSpace(redis))
+            return (false, "ConnectionStrings__Postgres/__Redis env yok (compose `tests` profili gerekli).");
+
+        try
+        {
+            // Timeout kısa tutulur — altyapı yoksa test asılı kalmasın.
+            var pgConn = new NpgsqlConnectionStringBuilder(pg) { Timeout = 3, CommandTimeout = 3 }.ConnectionString;
+            using var conn = new NpgsqlConnection(pgConn);
+            conn.Open();
+        }
+        catch (Exception ex)
+        {
+            return (false, $"PostgreSQL erişilemez: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        try
+        {
+            var opts = ConfigurationOptions.Parse(redis);
+            opts.AbortOnConnectFail = false;
+            opts.ConnectTimeout = 3000;
+            using var mux = ConnectionMultiplexer.Connect(opts);
+            if (!mux.IsConnected)
+                return (false, "Redis bağlantısı kurulamadı (IsConnected=false).");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Redis erişilemez: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        return (true, string.Empty);
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
