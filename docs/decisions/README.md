@@ -39,10 +39,11 @@ flowchart TD
 | [ADR-004](ADR-004-geoip-distribution.md) | GeoIP (MaxMind GeoLite2) dağıtımı (commit yok, best-effort) | Kabul edildi |
 | [ADR-005](ADR-005-secrets-management.md) | Secrets management (katmanlı; rotation insan onayı) | Kabul edildi |
 | [ADR-006](ADR-006-activity-log-financial-policy.md) | Activity-log finansal tutar politikası (bucketing, KVKK) | Önerilen (legal onayı) |
+| [ADR-007](ADR-007-hosting-deployment.md) | Production hosting & deployment (Oracle Cloud A1 lift-and-shift, kalıcı $0) | Kabul edildi (MVP) |
 
 ## Yeni ADR ekleme
 
-1. Sıradaki numarayı al (`ADR-007`).
+1. Sıradaki numarayı al (`ADR-008`).
 2. ADR-001'in formatını izle: **Durum / Tarih / Karar verenler / İlgili bulgular** başlığı,
    ardından **Bağlam → Değerlendirilen Seçenekler → Karar → Sonuçlar/Risk → İlgili
    Dökümanlar** bölümleri. Diyagram gerekiyorsa Mermaid kullan (ASCII art YASAK — CLAUDE.md).
