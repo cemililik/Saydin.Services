@@ -9,15 +9,17 @@ belgeleri içerir. Yerel geliştirme iş akışı için [`../development-guide.m
 | Doküman | İçerik |
 |---|---|
 | [`hosting-comparison.md`](hosting-comparison.md) | **Karar süreci.** Tüm hosting seçeneklerinin (Oracle/AWS/Azure/GCP/Firebase/managed-DB/serverless/ücretli-VPS) karşılaştırması, TimescaleDB lisans kısıtı analizi, karar matrisi ve kaynaklar. |
-| [`oci-migration-plan.md`](oci-migration-plan.md) | **Geçiş runbook'u.** Oracle Cloud A1'e fazlı (Faz 0–9) lift-and-shift planı: provisioning, sertleştirme, ARM build, fresh-init migration, Caddy/TLS, yedekleme, cutover. Kopyala-çalıştır config'ler (prod compose, Caddyfile, backup script, prod `.env`). |
+| [`oci-migration-plan.md`](oci-migration-plan.md) | **Arşivlenmiş karar/tarihçe.** İlk Oracle A1 lift-and-shift tasarımı; inline komut ve config'ler güncel production kaynağı değildir. |
+| [`../runbooks/`](../runbooks/README.md) | **Kanonik operasyon yolu.** İmzalı release promotion/rollback, alert response, backup/PITR ve restore drill. |
+| [`../../infrastructure/deployment/compose.production.yml`](../../infrastructure/deployment/compose.production.yml) | **Kanonik production manifest'i.** Digest-only image, private network, external secret/volume ve runtime hardening sözleşmesi. |
 | [ADR-007](../decisions/ADR-007-hosting-deployment.md) | **Karar kaydı.** Hosting/deployment kararının resmî ADR'ı (bağlam, seçenekler, karar, sonuçlar/risk). |
 
 ## Özet karar
 
-> Backend, **Oracle Cloud Always Free Ampere A1** (ARM, 4 OCPU / 24 GB, kalıcı **$0**) VM'ine
-> mevcut `docker-compose` **lift-and-shift** edilir; kod/migration değişmez, TimescaleDB tam
-> korunur. Önüne TLS için **Caddy + Let's Encrypt** konur (ngrok'un yerini alır). Oracle
-> kapasite vermezse yedek plan: **Hetzner CAX11 (≈ €3.79/ay)**.
+> Self-hosted TimescaleDB + Caddy sınırı korunur; cloud/region/domain seçimi dış operator
+> kararıdır. Üretim, development Compose'u taşımak yerine signed/digest-only release manifest'i
+> ve bağımsız production Compose kullanır. Aynı imajlar amd64/arm64 için bir kez build edilip
+> staging'de doğrulanan exact digest'lerle promote edilir.
 >
 > **Neden VM (managed değil):** Projenin TimescaleDB **compression** bağımlılığı (TSL lisansı)
 > hiçbir ücretsiz *managed* PostgreSQL'de mevcut değil → $0 + TimescaleDB için tek yol
@@ -27,13 +29,16 @@ belgeleri içerir. Yerel geliştirme iş akışı için [`../development-guide.m
 
 1. Kararın *neden*'i → [ADR-007](../decisions/ADR-007-hosting-deployment.md)
 2. Karşılaştırmanın *detayı* → [`hosting-comparison.md`](hosting-comparison.md)
-3. *Nasıl* uygulanır → [`oci-migration-plan.md`](oci-migration-plan.md)
+3. *Nasıl* uygulanır → [`../runbooks/release-promotion.md`](../runbooks/release-promotion.md),
+   [`../runbooks/restore-drill.md`](../runbooks/restore-drill.md) ve kanonik production manifest'i
 
 ## Durum
 
 | Faz | Durum |
 |---|---|
-| Karar + dokümantasyon | ✅ Tamamlandı (2026-05-31) |
-| OCI provisioning → cutover (Faz 1–9) | ⏳ Uygulama bekliyor (runbook hazır) |
+| Production manifest/release/runbook artefaktları | ✅ Repository'de, fail-closed validator sahibi |
+| Registry/domain/KMS/bucket/on-call ve backup role/HBA | ⏳ Operator girdisi; placeholder ile deploy reddedilir |
+| Staging/prod publish, restore drill ve cutover | ⏳ Dış ortam kabul kanıtı bekliyor |
 
-> Geçiş tamamlandıkça `oci-migration-plan.md` master checklist'i ve bu tablo güncellenir.
+> Arşiv plan değiştirilmez; güncel acceptance ve incident kanıtı signed release manifest'i ve
+> ilgili runbook kaydına eklenir.

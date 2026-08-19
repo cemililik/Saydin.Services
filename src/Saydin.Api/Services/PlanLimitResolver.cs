@@ -15,16 +15,18 @@ namespace Saydin.Api.Services;
 public interface IPlanLimitResolver
 {
     /// <summary>Asset query endpoint'leri için günlük limit.</summary>
-    Task<int> ResolveDailyAssetQueryLimitAsync(string deviceId, CancellationToken ct);
+    Task<int> ResolveDailyAssetQueryLimitAsync(CancellationToken ct);
 }
 
 public sealed class PlanLimitResolver(
     ISavedScenarioRepository scenarioRepository,
+    IInstallationPrincipalContext principalContext,
     IOptions<PlanOptions> options) : IPlanLimitResolver
 {
-    public async Task<int> ResolveDailyAssetQueryLimitAsync(string deviceId, CancellationToken ct)
+    public async Task<int> ResolveDailyAssetQueryLimitAsync(CancellationToken ct)
     {
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        return options.Value.GetTierOptions(user?.Tier).DailyAssetQueryLimit;
+        var user = await scenarioRepository.GetUserByIdAsync(principalContext.PrincipalId, ct)
+            ?? throw new InvalidOperationException("Authenticated installation principal is missing.");
+        return options.Value.GetTierOptions(user.Tier).DailyAssetQueryLimit;
     }
 }

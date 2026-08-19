@@ -29,15 +29,11 @@ public class ErrorMessagesLocalizationTests
     }
 
     [Theory]
-    // EC-3 follow-up (review Bulgu 3): IExceptionHandler / DeviceId guard / RateLimiter'ın
+    // EC-3 follow-up (review Bulgu 3): IExceptionHandler / auth guard'ın
     // kullandığı TÜM title/detail key'leri burada doğrulanır — biri resx'ten silinirse
     // (IStringLocalizer ham KEY döner, boş değil; ResourceNotFound=true) test KIRILIR.
     // Kontrat testi (ExceptionHandlerContractTests) yalnız "title boş değil" der; gerçek
     // key-varlığı koruması burasıdır.
-    [InlineData("DeviceIdRequired")]
-    [InlineData("DeviceIdRequiredDetail")]
-    [InlineData("DeviceIdInvalid")]
-    [InlineData("DeviceIdInvalidDetail")]
     [InlineData("AmountMustBePositive")]
     [InlineData("PriceNotFound")]
     [InlineData("PriceNotFoundDetail")]
@@ -56,6 +52,23 @@ public class ErrorMessagesLocalizationTests
     [InlineData("UnexpectedError")]
     [InlineData("RateLimited")]
     [InlineData("RateLimitedDetail")]
+    [InlineData("PayloadTooLarge")]
+    [InlineData("PayloadTooLargeDetail")]
+    [InlineData("UnsupportedJsonContentType")]
+    [InlineData("UnsupportedJsonContentTypeDetail")]
+    [InlineData("MalformedJsonBody")]
+    [InlineData("DuplicateJsonProperty")]
+    [InlineData("ExtraDataMustBeObject")]
+    [InlineData("ExtraDataTooLarge")]
+    [InlineData("ExtraDataTooDeep")]
+    [InlineData("ExtraDataTooManyProperties")]
+    [InlineData("ExtraDataTooManyNodes")]
+    [InlineData("ExtraDataTooManyArrayItems")]
+    [InlineData("ExtraDataStringTooLong")]
+    [InlineData("ExtraDataUnknownField")]
+    [InlineData("ExtraDataInvalidFieldType")]
+    [InlineData("ScenarioCursorInvalid")]
+    [InlineData("ScenarioPageLimitInvalid")]
     public void GetString_WithValidKey_ReturnsLocalizedValueNotKey(string key)
     {
         var localizer = CreateLocalizer();
@@ -79,8 +92,8 @@ public class ErrorMessagesLocalizationTests
 
         string tr;
         string en;
-        using (new CultureScope("tr")) tr = localizer["DeviceIdRequired"].Value;
-        using (new CultureScope("en")) en = localizer["DeviceIdRequired"].Value;
+        using (new CultureScope("tr")) tr = localizer["InstallationCredentialInvalid"].Value;
+        using (new CultureScope("en")) en = localizer["InstallationCredentialInvalid"].Value;
 
         tr.Should().NotBe(en, "tr ve en çevirileri farklı olmalı (lokalizasyon gerçekten çalışıyor)");
     }
@@ -105,7 +118,7 @@ public class ErrorMessagesLocalizationTests
         var localizer = CreateLocalizer(o => o.ResourcesPath = "Resources");
 
         using var _ = new CultureScope("tr");
-        localizer["DeviceIdRequired"].ResourceNotFound.Should().BeTrue(
+        localizer["InstallationCredentialInvalid"].ResourceNotFound.Should().BeTrue(
             "ResourcesPath='Resources' embedding ile uyuşmaz; Program.cs onu KULLANMAMALI");
     }
 

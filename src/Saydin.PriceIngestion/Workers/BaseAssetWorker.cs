@@ -1,442 +1,433 @@
-using System.Text.Json;
-using System.Xml;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
-using Npgsql;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
+using Saydin.Shared.Diagnostics;
 
 namespace Saydin.PriceIngestion.Workers;
 
-/// <summary>
-/// Tüm asset worker'larının ortak backfill + zamanlama mantığı.
-/// Her worker BackfillStartDate, ChunkDays ve DailyRunUtcTime'ı override eder.
-/// appsettings.json → IngestionWorkers:{WorkerConfigKey}:DailyRunUtcHour/Minute ile saatler override edilebilir.
-///
-/// Her veri çekme operasyonu `ingestion_jobs` tablosuna start/finish kaydı yazar
-/// (CLAUDE.md "ingestion_jobs tablosuna başarı ve hata durumları yazılır" zorunluluğu).
-/// </summary>
+/// <summary>Durable ingestion-window ledger tabanlı ortak price worker.</summary>
 public abstract class BaseAssetWorker(
     IExternalPriceAdapter adapter,
-    IPriceIngestionRepository repository,
-    IIngestionJobRepository jobs,
+    IPriceIngestionRepository assets,
+    IIngestionWindowRepository windows,
     IConfiguration configuration,
+    TimeProvider timeProvider,
     ILogger logger)
 {
+    private readonly string _leaseOwner =
+        $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.CreateVersion7():N}";
+    protected IConfiguration Configuration => configuration;
+
     protected abstract DateOnly BackfillStartDate { get; }
     protected abstract int ChunkDays { get; }
-
-    /// <summary>Config section adı: "Tcmb", "CoinGecko", "OpenExchangeRates", "TwelveData"</summary>
     protected abstract string WorkerConfigKey { get; }
-
-    /// <summary>
-    /// Varsayılan günlük çalışma saati. appsettings ile override edilebilir.
-    /// </summary>
     protected abstract TimeOnly DefaultDailyRunUtcTime { get; }
+    protected virtual int ContractVersion => 1;
+    protected virtual TimeSpan ChunkDelay => TimeSpan.Zero;
+    protected virtual TimeSpan LogicalRetryDelay => TimeSpan.FromMinutes(5);
+    protected virtual TimeSpan LeaseDuration => TimeSpan.FromMinutes(30);
+    protected virtual TimeSpan FailureFinalizeTimeout => TimeSpan.FromSeconds(5);
+    protected virtual DateOnly TargetDate(DateTime utcNow) => DateOnly.FromDateTime(utcNow.Date);
+    protected virtual DateOnly BackfillThrough(DateTimeOffset utcNow) =>
+        DateOnly.FromDateTime(utcNow.UtcDateTime.Date.AddDays(-1));
+    internal DateOnly ResolveTargetDate(DateTime utcNow) => TargetDate(utcNow);
 
     private TimeOnly DailyRunUtcTime
     {
         get
         {
             var section = configuration.GetSection($"IngestionWorkers:{WorkerConfigKey}");
-            var hour    = section.GetValue<int?>("DailyRunUtcHour");
-            var minute  = section.GetValue<int?>("DailyRunUtcMinute");
-            return (hour.HasValue || minute.HasValue)
-                ? new TimeOnly(hour ?? DefaultDailyRunUtcTime.Hour, minute ?? DefaultDailyRunUtcTime.Minute)
-                : DefaultDailyRunUtcTime;
+            return new TimeOnly(
+                section.GetValue<int?>("DailyRunUtcHour") ?? DefaultDailyRunUtcTime.Hour,
+                section.GetValue<int?>("DailyRunUtcMinute") ?? DefaultDailyRunUtcTime.Minute);
         }
     }
 
-    /// <summary>
-    /// Chunk'lar arası bekleme süresi. Rate-limit'i olan API'ler override eder.
-    /// </summary>
-    protected virtual TimeSpan ChunkDelay => TimeSpan.Zero;
-
-    /// <summary>
-    /// "Today" anlamı kaynağa göre değişebilir (review F1.1-10).
-    /// TCMB / TwelveData / OpenExchangeRates: UTC bugün — son yayın gün-içi gelir.
-    /// CoinGecko: UTC kapanışı 00:00 UTC iken; 02:00 UTC çekimde "yesterday"
-    /// son kapanmış kripto gününü verir. Adapter-specific worker bu metodu override eder.
-    /// </summary>
-    protected virtual DateOnly TargetDate(DateTime utcNow) =>
-        DateOnly.FromDateTime(utcNow.Date);
-
-    /// <summary>
-    /// F2.4-9 ([G-D-04]): Varsayılan olarak <c>false</c> — backfill yalnız "latestDate
-    /// sonrasını" kovalar (orijinal davranış). Override edilirse <see cref="BackfillAsync"/>
-    /// `[BackfillStartDate, yesterday]` aralığındaki tüm boşlukları DB'de var olmayan
-    /// tarih kümesinden hedefler. Hafta sonu/tatil "boş" olduğu kaynaklar (TCMB, OXR)
-    /// bunu açmamalı — gereksiz API çağrısı yaratır. Crypto (CoinGecko, 7/24 piyasa)
-    /// için uygundur.
-    /// </summary>
-    protected virtual bool EnableGapAwareBackfill => false;
-
     public async Task RunAsync(CancellationToken ct)
     {
-        await BackfillAsync(ct);
+        while (!ct.IsCancellationRequested && !await BackfillAsync(ct))
+            await DelayUntilRetryAsync(ct);
 
-        // F1.1-11 / P1R-005: Backfill bittiğinde TargetDate'in verisi henüz yoksa
-        // derhal çek. Önceki kod yalnızca `IsScheduledTimePassedToday()` kontrolü
-        // yapıyordu; uzun bir backfill gece yarısını aşarsa (örn. 23:00→04:00 ertesi
-        // gün) scheduled time hâlâ bugün gelmemiş gibi görünür ve günlük veri 24 saate
-        // kadar eksik kalırdı. Persisted-state tabanlı kontrol (latestStored < target)
-        // saat-bağımsız ve idempotent.
-        if (!ct.IsCancellationRequested && await IsImmediateFetchNeededAsync(ct))
-        {
-            try
-            {
-                await FetchTodayAsync(ct);
-            }
-            // PR #11 follow-up: yalnızca shutdown token tetiklenmişse worker'ı durdur.
-            // Non-shutdown OperationCanceledException (örn. internal HttpClient/Polly
-            // timeout) burada yutulursa worker kalıcı olarak durur ve ertesi günler
-            // hiç veri akmaz; transient cancel sebeplerini orchestrator'a sızdır.
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex) when (IsTransient(ex))
-            {
-                // Codacy follow-up: ilk fetch için de aynı exponential backoff
-                // mantığı; transient olmayan bug/config error rethrow edilir.
-                if (!await TryRecoverWithBackoffAsync(ex, ct))
-                    return;
-            }
-        }
+        if (!ct.IsCancellationRequested && IsScheduledTimePassedToday())
+            await FetchDailyAsync(ct);
 
         while (!ct.IsCancellationRequested)
         {
-            var delay = GetDelayUntilNextRun();
-            logger.LogInformation("{Source} sonraki çekim: {NextRun:HH:mm} UTC ({Delay:hh\\:mm} içinde)",
-                adapter.Source, DateTime.UtcNow.Add(delay), delay);
-
             try
             {
-                await Task.Delay(delay, ct);
-                await FetchTodayAsync(ct);
+                await Task.Delay(GetDelayUntilNextRun(), timeProvider, ct);
+                if (await BackfillAsync(ct))
+                    await FetchDailyAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
-            catch (Exception ex) when (IsTransient(ex))
-            {
-                // INGR-007: Transient hatalar (HTTP/JSON/XML/EF transient/Polly
-                // ExternalApiException) exponential backoff ile aynı gün içinde
-                // 5 deneme — "scheduled time geçti, 24sa bekle" davranışı engellenir.
-                // Codacy follow-up: blanket Exception catch yerine specific filter
-                // — bug/config error (Null/Argument/InvalidOperation) loop'tan
-                // sızar ve fail-fast olur.
-                if (!await TryRecoverWithBackoffAsync(ex, ct))
-                    break; // cancellation token tetiklendi
-            }
         }
     }
 
-    /// <summary>
-    /// INGR-007 follow-up: Transient hatadan exponential backoff ile kurtulmayı dener.
-    /// Aynı gün içinde en fazla 5 deneme yapar; her biri başarılı olursa <c>true</c>
-    /// döner ve döngü normal scheduled cycle'a geri döner. Cancellation token
-    /// tetiklenirse <c>false</c> döner (caller break eder).
-    /// </summary>
-    private async Task<bool> TryRecoverWithBackoffAsync(Exception cause, CancellationToken ct)
+    private async Task<bool> BackfillAsync(CancellationToken ct)
     {
-        var backoff = TimeSpan.FromMinutes(5);
-        const int maxAttempts = 5;
-        // Sonar S6646: aynı block içinde 2 LogError vardı (giriş + tükenme). Giriş
-        // mesajı transient hata için "henüz error değil" → LogWarning'e indirildi.
-        // Asıl LogError sadece tüm denemeler tükendiğinde atılır.
-        logger.LogWarning(cause,
-            "{Source} günlük çekim sırasında beklenmeyen hata — exponential backoff ile {Max} deneme",
-            adapter.Source, maxAttempts);
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        var activeAssets = await assets.GetActiveAssetsBySourceAsync(adapter.Source, ct);
+        var completedDay = BackfillThrough(timeProvider.GetUtcNow());
+        foreach (var asset in activeAssets)
         {
-            try { await Task.Delay(backoff, ct); }
-            catch (OperationCanceledException) { return false; }
-
-            try
-            {
-                await FetchTodayAsync(ct);
-                logger.LogInformation(
-                    "{Source} transient hatadan kurtulundu (deneme {Attempt}/{Max})",
-                    adapter.Source, attempt, maxAttempts);
-                return true;
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
+            var scope = Scope(asset, IngestionJobTypes.HistoricalBackfill);
+            if (!await EnsureCalendarReadyAsync(scope, BackfillStartDate, completedDay, ct))
                 return false;
-            }
-            catch (Exception retryEx)
-            {
-                logger.LogWarning(retryEx,
-                    "{Source} retry {Attempt}/{Max} başarısız; {Backoff:hh\\:mm} bekle",
-                    adapter.Source, attempt, maxAttempts, backoff);
-                backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-            }
+            await windows.PlanWindowsAsync(scope, BackfillStartDate, completedDay,
+                ChunkDays, IngestionCadence.Daily, ct);
+            if (!await DrainAsync(asset, scope, ct))
+                return false;
         }
-
-        logger.LogError(
-            "{Source} {MaxAttempts} deneme sonrasında günlük veri çekilemedi; bir sonraki scheduled cycle'a düşülüyor",
-            adapter.Source, maxAttempts);
-        return true; // caller döngüye dönsün; bir sonraki cycle planla.
+        return true;
     }
 
-    private bool IsScheduledTimePassedToday()
+    internal async Task<bool> BackfillChunkedAsync(
+        Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
-        var scheduledToday = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
-        return now >= scheduledToday;
-    }
-
-    /// <summary>
-    /// Codacy follow-up: Transient ve "expected" dış kaynak hataları beyaz-listesi.
-    /// Sadece bu set retry pencereye alınır; bug (Null/Argument/InvalidOperation)
-    /// ve programlama hataları rethrow edilerek fail-fast davranışı korunur.
-    /// </summary>
-    private static bool IsTransient(Exception ex) => ex switch
-    {
-        ExternalApiException                   => true, // dış API beklenen hata (Polly tükenmiş)
-        HttpRequestException                   => true, // network/DNS, transient HTTP
-        TaskCanceledException                  => true, // per-attempt timeout (non-shutdown)
-        TimeoutException                       => true,
-        JsonException                          => true, // adapter payload schema drift
-        XmlException                           => true, // TCMB XML transient
-        DbUpdateException                      => true, // EF transient (deadlock, connection blink)
-        NpgsqlException                        => true, // Npgsql transient (server reset)
-        _                                      => false,
-    };
-
-    /// <summary>
-    /// FetchToday'ı backfill sonrası tetikleyip tetiklememeyi kararlaştırır.
-    /// İki koşul: (1) bugünün scheduled saati geçmiş; (2) herhangi bir aktif
-    /// asset için en son saklanan tarih TargetDate'in gerisinde — yani backfill
-    /// gece yarısını aşmış ve dünün günlük çekimi atlanmış olabilir (review P1R-005).
-    /// </summary>
-    private async Task<bool> IsImmediateFetchNeededAsync(CancellationToken ct)
-    {
-        if (IsScheduledTimePassedToday())
-            return true;
-
-        var target = TargetDate(DateTime.UtcNow);
-        var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
-        foreach (var asset in assets)
+        var ranges = new List<IngestionWindowRange>();
+        for (var start = from; start <= to; start = start.AddDays(ChunkDays))
         {
-            var latest = await repository.GetLatestPriceDateAsync(asset.Id, ct);
-            if (latest is null || latest.Value < target)
-                return true;
+            var end = start.AddDays(ChunkDays - 1);
+            if (end > to) end = to;
+            ranges.Add(new IngestionWindowRange(start, end));
         }
+        var scope = Scope(asset, IngestionJobTypes.HistoricalBackfill);
+        if (!await EnsureCalendarReadyAsync(scope, from, to, ct))
+            return false;
+        await windows.EnsureWindowsAsync(scope, ranges, ct);
+        return await DrainAsync(asset, scope, ct);
+    }
+
+    private async Task FetchDailyAsync(CancellationToken ct)
+    {
+        var target = TargetDate(timeProvider.GetUtcNow().UtcDateTime);
+        var activeAssets = await assets.GetActiveAssetsBySourceAsync(adapter.Source, ct);
+        foreach (var asset in activeAssets)
+        {
+            var scope = Scope(asset, IngestionJobTypes.DailyUpdate);
+            if (!await EnsureCalendarReadyAsync(scope, target, target, ct))
+                return;
+            await windows.EnsureWindowsAsync(scope, [new IngestionWindowRange(target, target)], ct);
+            if (!await DrainAsync(asset, scope, ct)) return;
+        }
+    }
+
+    private async Task<bool> DrainAsync(Asset asset, IngestionWindowScope scope, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var result = await windows.ClaimNextAsync(scope, _leaseOwner, LeaseDuration, ct);
+            switch (result.Status)
+            {
+                case WindowClaimStatus.Complete:
+                    return true;
+                case WindowClaimStatus.Busy:
+                case WindowClaimStatus.NotDue:
+                    return false;
+                case WindowClaimStatus.CalendarNotReady:
+                    RecordCalendarNotReady(result.OutcomeCode ?? "calendar_not_ready");
+                    return false;
+                case WindowClaimStatus.PermanentBlocked:
+                    throw new PermanentIngestionWindowException(
+                        adapter.Source, asset.Id, default, default,
+                        result.OutcomeCode ?? "permanent_failed");
+                case WindowClaimStatus.Claimed:
+                    if (!await ProcessClaimAsync(asset, result.Claim!, ct)) return false;
+                    if (ChunkDelay > TimeSpan.Zero)
+                        await Task.Delay(ChunkDelay, timeProvider, ct);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+        }
+        ct.ThrowIfCancellationRequested();
         return false;
     }
 
-    private async Task BackfillAsync(CancellationToken ct)
+    private async Task<bool> ProcessClaimAsync(
+        Asset asset, IngestionWindowClaim claim, CancellationToken ct)
     {
-        var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
-
-        foreach (var asset in assets)
-        {
-            var to = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-1));
-
-            // F2.4-9: Gap-aware mode (yalnız 7/24 piyasalar için) tüm aralıkta var
-            // olmayan tarihleri hedefler. Default davranış (latestDate sonrası tek blok)
-            // hafta sonu/tatil "boş" olan kaynaklarda gereksiz API çağrısı yaratmaz.
-            if (EnableGapAwareBackfill)
-            {
-                await BackfillGapsAsync(asset, BackfillStartDate, to, ct);
-                continue;
-            }
-
-            var latestDate = await repository.GetLatestPriceDateAsync(asset.Id, ct);
-            var from = latestDate?.AddDays(1) ?? BackfillStartDate;
-
-            if (from > to)
-            {
-                logger.LogInformation("{Symbol} için backfill gerekmiyor (mevcut: {Latest})",
-                    asset.Symbol, latestDate);
-                continue;
-            }
-
-            logger.LogInformation("{Symbol} backfill başlıyor: {From} → {To}", asset.Symbol, from, to);
-            await BackfillChunkedAsync(asset, from, to, ct);
-        }
-    }
-
-    private async Task BackfillGapsAsync(Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
-    {
-        if (from > to) return;
-        var existing = await repository.GetExistingDatesAsync(asset.Id, from, to, ct);
-        var missingRanges = ComputeMissingRanges(from, to, existing);
-
-        if (missingRanges.Count == 0)
-        {
-            logger.LogInformation("{Symbol} için backfill gerekmiyor (tüm aralık DB'de mevcut)", asset.Symbol);
-            return;
-        }
-
-        logger.LogInformation(
-            "{Symbol} gap-aware backfill: {RangeCount} eksik blok ({From}..{To})",
-            asset.Symbol, missingRanges.Count, from, to);
-
-        foreach (var (rangeFrom, rangeTo) in missingRanges)
-        {
-            if (ct.IsCancellationRequested) break;
-            await BackfillChunkedAsync(asset, rangeFrom, rangeTo, ct);
-        }
-    }
-
-    private async Task BackfillChunkedAsync(Asset asset, DateOnly from, DateOnly to, CancellationToken ct)
-    {
-        var chunkFrom = from;
-        while (chunkFrom <= to && !ct.IsCancellationRequested)
-        {
-            var chunkTo = chunkFrom.AddDays(ChunkDays - 1);
-            if (chunkTo > to) chunkTo = to;
-
-            await FetchAndUpsertAsync(asset, chunkFrom, chunkTo,
-                IngestionJobTypes.HistoricalBackfill, ct);
-            chunkFrom = chunkTo.AddDays(1);
-
-            if (ChunkDelay > TimeSpan.Zero && chunkFrom <= to)
-                await Task.Delay(ChunkDelay, ct);
-        }
-    }
-
-    /// <summary>
-    /// F2.4-9: <paramref name="existing"/> kümesi temel alınarak <paramref name="from"/> ↔
-    /// <paramref name="to"/> aralığında bitişik eksik gün bloklarını döner.
-    /// Açgözlü tarama, O(<c>to-from</c>) zaman; test kapsamı kolay.
-    /// </summary>
-    internal static List<(DateOnly From, DateOnly To)> ComputeMissingRanges(
-        DateOnly from, DateOnly to, IReadOnlySet<DateOnly> existing)
-    {
-        var result = new List<(DateOnly, DateOnly)>();
-        DateOnly? rangeStart = null;
-        for (var d = from; d <= to; d = d.AddDays(1))
-        {
-            if (existing.Contains(d))
-            {
-                if (rangeStart.HasValue)
-                {
-                    result.Add((rangeStart.Value, d.AddDays(-1)));
-                    rangeStart = null;
-                }
-            }
-            else
-            {
-                rangeStart ??= d;
-            }
-        }
-        if (rangeStart.HasValue)
-            result.Add((rangeStart.Value, to));
-        return result;
-    }
-
-    private async Task FetchTodayAsync(CancellationToken ct)
-    {
-        var target = TargetDate(DateTime.UtcNow);
-        var assets = await repository.GetActiveAssetsBySourceAsync(adapter.Source, ct);
-        foreach (var asset in assets)
-            await FetchAndUpsertAsync(asset, target, target,
-                IngestionJobTypes.DailyUpdate, ct);
-    }
-
-    private async Task FetchAndUpsertAsync(
-        Asset asset, DateOnly from, DateOnly to, string jobType, CancellationToken ct)
-    {
-        // ingestion_jobs.StartAsync DB hatası fırlatırsa caller (RunAsync) içinde
-        // OperationCanceledException dışındaki exception'ları yakalamadığı için
-        // tüm worker düşerdi. Bu yüzden StartAsync de try kapsamında; başarısız olursa
-        // log + skip ile asset döngüsü devam eder.
-        IngestionJob? job = null;
+        var closed = await GetCalendarClosedDatesAsync(asset, claim, ct);
+        AdapterOutcome<PricePoint> outcome;
         try
         {
-            job = await TryStartJobAsync(asset, jobType, from, to, ct);
-            if (job is null) return;
-
-            var points = await FetchPointsAsync(asset, from, to, ct);
-            await CompleteJobAsync(asset, job.Id, points, from, to, ct);
+            outcome = await WithLeaseRenewalAsync(claim, token =>
+                adapter.FetchRangeAsync(new PriceFetchRequest(
+                    asset.Id, asset.Symbol, asset.SourceId ?? string.Empty,
+                    claim.From, claim.To, closed), token), ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Shutdown — job'ı failed olarak işaretlemek anlamlı değil; running kalır,
-            // bir sonraki başlatmada operasyon ekibi görür.
+            await MarkCancelledBoundedAsync(claim, closed.Count);
             throw;
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "{Symbol} veri çekimi başarısız ({From}–{To})", asset.Symbol, from, to);
-            if (job is not null)
-                await MarkFailedSafelyAsync(asset, job.Id, ex, ct);
-        }
-    }
-
-    private async Task<IngestionJob?> TryStartJobAsync(
-        Asset asset, string jobType, DateOnly from, DateOnly to, CancellationToken ct)
-    {
-        // job kaydı açılamazsa (DB flap, network) ingestion'ı atla — bir sonraki
-        // cycle'da tekrar denenir. Loglanır, ama worker'ın tamamen düşmesini engeller.
-        try
-        {
-            return await jobs.StartAsync(asset.Id, jobType, from, to, asset.Source, ct);
-        }
-        catch (OperationCanceledException)
+        catch (IngestionLeaseLostException)
         {
             throw;
         }
         catch (Exception ex)
         {
-            logger.LogError(ex,
-                "{Symbol} ingestion_jobs.StartAsync başarısız ({From}–{To}) — ingestion atlandı",
-                asset.Symbol, from, to);
-            return null;
+            var retryable = ProviderFailureClassifier.IsRetryable(ex);
+            logger.LogError("{Source}/{Symbol} adapter exception {ExceptionType} ({From}..{To})",
+                adapter.Source, asset.Symbol, ex.GetType().Name, claim.From, claim.To);
+            using var finalize = new CancellationTokenSource(FailureFinalizeTimeout);
+            await windows.RecordFailureAsync(claim,
+                retryable ? IngestionWindowStates.RetryableFailed : IngestionWindowStates.PermanentFailed,
+                retryable ? AdapterOutcomeKind.RetryableFailure : AdapterOutcomeKind.PermanentFailure,
+                EmptyFailureCounts(claim, closed.Count),
+                retryable ? "adapter_exception_retryable" : "adapter_exception_permanent",
+                retryable ? "adapter_transient" : "adapter_unhandled", ex.GetType().Name,
+                timeProvider.GetUtcNow().Add(LogicalRetryDelay), finalize.Token);
+            if (retryable) return false;
+            throw;
         }
-    }
 
-    private async Task<IReadOnlyList<PricePoint>> FetchPointsAsync(
-        Asset asset, DateOnly from, DateOnly to, CancellationToken ct) =>
-        await adapter.FetchRangeAsync(
-            asset.Id, asset.Symbol, asset.SourceId ?? string.Empty, from, to, ct);
+        if (outcome.IsFailure)
+            return await PersistTypedFailureAsync(claim, outcome, closed.Count, ct);
 
-    private async Task CompleteJobAsync(
-        Asset asset, Guid jobId, IReadOnlyList<PricePoint> points, DateOnly from, DateOnly to, CancellationToken ct)
-    {
-        if (points.Count == 0)
+        if (!TryValidateSuccess(asset, claim, closed, outcome, out var counts, out var validationCode))
         {
-            logger.LogInformation("{Symbol}: {From}–{To} arasında alınacak veri yok", asset.Symbol, from, to);
-            await jobs.MarkSuccessAsync(jobId, recordsUpserted: 0, ct);
-            return;
+            var rejected = AdapterOutcome<PricePoint>.PartialRejected(
+                outcome.Records, Math.Max(outcome.RawItemCount, outcome.Records.Count),
+                Math.Max(1, outcome.RejectedCount), validationCode);
+            await PersistTypedFailureAsync(claim, rejected, closed.Count, ct);
+            throw new PermanentIngestionWindowException(
+                adapter.Source, asset.Id, claim.From, claim.To, validationCode);
         }
 
-        await repository.UpsertPricePointsAsync(points, ct);
-        await jobs.MarkSuccessAsync(jobId, points.Count, ct);
-
-        logger.LogInformation("{Symbol}: {Count} fiyat noktası kaydedildi ({From}–{To})",
-            asset.Symbol, points.Count, from, to);
-    }
-
-    private async Task MarkFailedSafelyAsync(Asset asset, Guid jobId, Exception cause, CancellationToken ct)
-    {
-        // job tamamlama best-effort — DB de erişilemez ise ek noise yok.
-        // GetBaseException(): AggregateException / TaskCanceledException sarmalayıcılarının
-        // altındaki gerçek nedeni alır → ingestion_jobs.error_message daha tanı koymaya
-        // elverişli olur.
         try
         {
-            await jobs.MarkFailedAsync(jobId, cause.GetBaseException().Message, ct);
+            await windows.CompletePriceAsync(claim, outcome, counts, ct);
         }
-        catch (Exception jobEx)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            logger.LogError(jobEx, "{Symbol} job failed-status yazılamadı (jobId={JobId})",
-                asset.Symbol, jobId);
+            await MarkCancelledBoundedAsync(claim, closed.Count);
+            throw;
         }
+        catch
+        {
+            var terminal = await windows.GetTerminalStateAsync(claim.WindowId, CancellationToken.None);
+            if (terminal is not null) return true;
+            throw;
+        }
+
+        logger.LogInformation("{Source}/{Symbol} tamamlandı: {From}..{To} ({Count})",
+            adapter.Source, asset.Symbol, claim.From, claim.To, counts.AcceptedDistinctCount);
+        return true;
+    }
+
+    private async Task<bool> PersistTypedFailureAsync(
+        IngestionWindowClaim claim, AdapterOutcome<PricePoint> outcome,
+        int knownNoDataCount, CancellationToken ct)
+    {
+        var retryable = outcome.Kind == AdapterOutcomeKind.RetryableFailure;
+        var state = retryable ? IngestionWindowStates.RetryableFailed : IngestionWindowStates.PermanentFailed;
+        await windows.RecordFailureAsync(claim, state, outcome.Kind,
+            FailureCounts(claim, outcome, knownNoDataCount), outcome.Code, outcome.Code, outcome.Detail,
+            timeProvider.GetUtcNow().Add(retryable ? LogicalRetryDelay : TimeSpan.Zero), ct);
+        if (retryable) return false;
+        throw new PermanentIngestionWindowException(
+            adapter.Source, claim.Scope.AssetId, claim.From, claim.To, outcome.Code);
+    }
+
+    private async Task MarkCancelledBoundedAsync(IngestionWindowClaim claim, int expectedNoDataCount)
+    {
+        using var finalize = new CancellationTokenSource(FailureFinalizeTimeout);
+        try
+        {
+            await windows.RecordFailureAsync(claim, IngestionWindowStates.Cancelled,
+                AdapterOutcomeKind.Cancelled, EmptyFailureCounts(claim, expectedNoDataCount),
+                "cancelled", "cancelled", null, timeProvider.GetUtcNow(), finalize.Token);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Cancellation terminalization başarısız; lease expiry reclaim edecek: {WindowId}",
+                claim.WindowId);
+        }
+    }
+
+    private async Task<IReadOnlySet<DateOnly>> GetCalendarClosedDatesAsync(
+        Asset asset, IngestionWindowClaim claim, CancellationToken ct)
+    {
+        if (adapter.Source is not ("tcmb" or "twelvedata"))
+            return new HashSet<DateOnly>();
+
+        if (claim.Scope.ContractVersion >= 2)
+        {
+            if (claim.CalendarReleaseId is not { } releaseId)
+                throw new CalendarNotReadyException("calendar_release_unbound");
+            return await windows.GetExpectedNoDataDatesAsync(
+                releaseId, claim.From, claim.To, ct);
+        }
+
+        var closed = (await assets.GetMarketHolidaysAsync(
+            asset.Id, claim.From, claim.To, ct)).ToHashSet();
+        foreach (var date in AdapterCompleteness.Dates(claim.From, claim.To))
+            if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) closed.Add(date);
+        return closed;
+    }
+
+    private async Task<bool> EnsureCalendarReadyAsync(
+        IngestionWindowScope scope, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        var readiness = await windows.CheckCalendarReadinessAsync(scope, from, to, ct);
+        if (readiness.Ready) return true;
+        RecordCalendarNotReady(readiness.OutcomeCode);
+        return false;
+    }
+
+    private void RecordCalendarNotReady(string reason)
+    {
+        SaydinMetrics.MarketCalendarNotReady.Add(1,
+            new KeyValuePair<string, object?>("source", adapter.Source),
+            new KeyValuePair<string, object?>("reason", reason));
+        logger.LogWarning(
+            "{Source} authoritative calendar hazır değil; provider çağrısı yapılmadı: {Reason}",
+            adapter.Source, reason);
+    }
+
+    private static bool TryValidateSuccess(
+        Asset asset, IngestionWindowClaim claim, IReadOnlySet<DateOnly> closed,
+        AdapterOutcome<PricePoint> outcome, out IngestionWindowCounts counts, out string code)
+    {
+        var requested = AdapterCompleteness.Dates(claim.From, claim.To).ToHashSet();
+        var expected = requested.Except(closed).ToHashSet();
+        var dates = outcome.Records.Select(point => point.PriceDate).ToArray();
+        var distinct = dates.ToHashSet();
+        var valid = outcome.ExpectedNoDataDates.SetEquals(closed)
+            && outcome.RejectedCount == 0
+            && outcome.Records.All(point => point.AssetId == asset.Id)
+            && dates.Length == distinct.Count
+            && distinct.SetEquals(expected)
+            && outcome.RawItemCount >= distinct.Count
+            && ((distinct.Count == 0 && outcome.Kind == AdapterOutcomeKind.ExpectedNoData)
+                || (distinct.Count > 0 && outcome.Kind == AdapterOutcomeKind.Data));
+        code = valid ? outcome.Code : "worker_completeness_rejected";
+        counts = new IngestionWindowCounts(
+            requested.Count, expected.Count, Math.Max(outcome.RawItemCount, distinct.Count),
+            distinct.Count, valid ? 0 : Math.Max(1, outcome.RejectedCount), closed.Count);
+        return valid;
+    }
+
+    private static IngestionWindowCounts FailureCounts(
+        IngestionWindowClaim claim, AdapterOutcome<PricePoint> outcome, int noDataCount)
+    {
+        var requested = claim.To.DayNumber - claim.From.DayNumber + 1;
+        var distinct = outcome.Records.Select(point => point.PriceDate).Distinct().Count();
+        return new IngestionWindowCounts(requested, Math.Max(0, requested - noDataCount),
+            Math.Max(outcome.RawItemCount, distinct), distinct,
+            Math.Max(outcome.RejectedCount, outcome.Kind == AdapterOutcomeKind.PartialRejected ? 1 : 0),
+            noDataCount);
+    }
+
+    private static IngestionWindowCounts EmptyFailureCounts(
+        IngestionWindowClaim claim, int noDataCount)
+    {
+        var requested = claim.To.DayNumber - claim.From.DayNumber + 1;
+        return new IngestionWindowCounts(
+            requested, Math.Max(0, requested - noDataCount), 0, 0, 0, noDataCount);
+    }
+
+    private IngestionWindowScope Scope(Asset asset, string jobType) =>
+        new(adapter.Source, asset.Id, jobType, ContractVersion);
+
+    private bool IsScheduledTimePassedToday()
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        return now >= now.Date.Add(DailyRunUtcTime.ToTimeSpan());
     }
 
     private TimeSpan GetDelayUntilNextRun()
     {
-        var now = DateTime.UtcNow;
-        var todayScheduled = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
-        return now < todayScheduled ? todayScheduled - now : todayScheduled.AddDays(1) - now;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var today = now.Date.Add(DailyRunUtcTime.ToTimeSpan());
+        return now < today ? today - now : today.AddDays(1) - now;
+    }
+
+    private Task DelayUntilRetryAsync(CancellationToken ct) => Task.Delay(
+        LogicalRetryDelay <= TimeSpan.Zero ? TimeSpan.FromMilliseconds(1) : LogicalRetryDelay,
+        timeProvider, ct);
+
+    private async Task<T> WithLeaseRenewalAsync<T>(
+        IngestionWindowClaim claim,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken ct)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var operationTask = operation(linked.Token);
+        var renewalTask = RenewUntilCancelledAsync(claim, linked.Token);
+        try
+        {
+            var first = await Task.WhenAny(operationTask, renewalTask);
+            if (first == renewalTask)
+            {
+                linked.Cancel();
+                try { await renewalTask; }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    try { await operationTask; } catch (OperationCanceledException) { }
+                    catch (Exception operationError)
+                    {
+                        logger.LogDebug(operationError,
+                            "Lease kaybı sonrası provider task gözlemlendi: {WindowId}", claim.WindowId);
+                    }
+                    throw ex is IngestionLeaseLostException
+                        ? ex : new IngestionLeaseLostException(claim.WindowId, ex);
+                }
+            }
+            return await operationTask;
+        }
+        finally
+        {
+            linked.Cancel();
+            try { await renewalTask; }
+            catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
+        }
+    }
+
+    private async Task RenewUntilCancelledAsync(
+        IngestionWindowClaim claim, CancellationToken ct)
+    {
+        var interval = TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(1).Ticks,
+            LeaseDuration.Ticks / 3));
+        while (true)
+        {
+            await Task.Delay(interval, timeProvider, ct);
+            try
+            {
+                if (!await windows.RenewLeaseAsync(claim, LeaseDuration, ct))
+                    throw new IngestionLeaseLostException(claim.WindowId);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (IngestionLeaseLostException) { throw; }
+            catch (Exception ex) { throw new IngestionLeaseLostException(claim.WindowId, ex); }
+        }
+    }
+
+    internal static List<(DateOnly From, DateOnly To)> ComputeMissingRanges(
+        DateOnly from, DateOnly to, IReadOnlySet<DateOnly> existing)
+    {
+        var result = new List<(DateOnly, DateOnly)>();
+        DateOnly? start = null;
+        for (var date = from; date <= to; date = date.AddDays(1))
+        {
+            if (existing.Contains(date))
+            {
+                if (start is { } value)
+                {
+                    result.Add((value, date.AddDays(-1)));
+                    start = null;
+                }
+            }
+            else start ??= date;
+        }
+        if (start is { } last) result.Add((last, to));
+        return result;
     }
 }

@@ -18,7 +18,7 @@ public interface IInflationAdapter
     /// Polly retry ve timeout zorunludur (geçici hatalar yukarı fırlatılır,
     /// kalıcı 4xx hataları HttpRequestException olarak iletilir).
     /// </summary>
-    Task<IReadOnlyList<InflationRate>> FetchRangeAsync(
+    Task<AdapterOutcome<InflationRate>> FetchRangeAsync(
         DateOnly from,
         DateOnly to,
         CancellationToken ct);

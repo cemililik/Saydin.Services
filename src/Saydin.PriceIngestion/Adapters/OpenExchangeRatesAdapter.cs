@@ -1,4 +1,7 @@
 using System.Collections.Concurrent;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Globalization;
 using Saydin.PriceIngestion.Mappers;
 using Saydin.Shared.Entities;
 
@@ -14,6 +17,7 @@ namespace Saydin.PriceIngestion.Adapters;
 public sealed class OpenExchangeRatesAdapter(
     IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
+    TimeProvider timeProvider,
     ILogger<OpenExchangeRatesAdapter> logger) : IExternalPriceAdapter
 {
     public string Source => "openexchangerates";
@@ -29,112 +33,172 @@ public sealed class OpenExchangeRatesAdapter(
     private static readonly TimeSpan EntryTtl = TimeSpan.FromHours(24);
     private readonly ConcurrentDictionary<DateOnly, CachedJson> _dayCache = new();
 
-    private sealed record CachedJson(string Json, DateTimeOffset CachedAt);
+    private sealed record CachedJson(string Json, byte[] PayloadSha256, DateTimeOffset CachedAt);
 
-    public async Task<IReadOnlyList<PricePoint>> FetchRangeAsync(
-        Guid assetId, string assetSymbol, string sourceId,
-        DateOnly from, DateOnly to, CancellationToken ct)
+    public async Task<AdapterOutcome<PricePoint>> FetchRangeAsync(
+        PriceFetchRequest request, CancellationToken ct)
     {
         var appId = configuration["ExternalApis:OpenExchangeRates:AppId"];
         if (string.IsNullOrWhiteSpace(appId))
         {
-            logger.LogWarning("OpenExchangeRates AppId yapılandırılmamış, {Symbol} atlandı", assetSymbol);
-            return [];
+            logger.LogError("OpenExchangeRates AppId yapılandırılmamış: {Symbol}", request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.PermanentFailure("auth_missing_app_id");
         }
+
+        var completedUtcDay = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime.Date.AddDays(-1));
+        if (request.To > completedUtcDay)
+            return AdapterOutcome<PricePoint>.RetryableFailure("current_day_provisional");
 
         var client = httpClientFactory.CreateClient("openexchangerates");
         var results = new List<PricePoint>();
+        var remoteRequestIssued = false;
 
-        for (var date = from; date <= to; date = date.AddDays(1))
+        for (var date = request.From; date <= request.To; date = date.AddDays(1))
         {
-            if (ct.IsCancellationRequested) break;
+            ct.ThrowIfCancellationRequested();
 
-            var point = await FetchDayAsync(client, assetId, sourceId, date, appId, ct);
-            if (point is not null)
-                results.Add(point);
+            var day = await GetOrFetchJsonAsync(
+                client, date, appId, remoteRequestIssued, ct);
+            if (day.RemoteRequestIssued)
+                remoteRequestIssued = true;
+            if (day.FailureKind is { } kind)
+                return kind == AdapterOutcomeKind.RetryableFailure
+                    ? AdapterOutcome<PricePoint>.RetryableFailure(day.Code, day.Detail)
+                    : AdapterOutcome<PricePoint>.PermanentFailure(day.Code, day.Detail);
 
-            // Cache'te olmayan günler için HTTP isteği yapılır; küçük bekleme ile
-            // rate limit (1000/ay ≈ 33/gün) aşılmaz.
-            await Task.Delay(200, ct);
+            PricePoint? point;
+            try
+            {
+                point = OpenExchangeRatesMapper.Map(
+                    day.Json!, request.AssetId, date, request.SourceId, day.PayloadSha256);
+            }
+            catch (JsonException ex)
+            {
+                return results.Count == 0
+                    ? AdapterOutcome<PricePoint>.PermanentFailure(
+                        "parse_error", ex.GetType().Name, rawItemCount: 1, rejectedCount: 1)
+                    : AdapterOutcome<PricePoint>.PartialRejected(
+                        results.AsReadOnly(), results.Count + 1, 1, "parse_error", ex.GetType().Name);
+            }
+            catch (ProviderContractException ex)
+            {
+                return results.Count == 0
+                    ? AdapterOutcome<PricePoint>.PermanentFailure(
+                        ex.Code, rawItemCount: 1, rejectedCount: 1)
+                    : AdapterOutcome<PricePoint>.PartialRejected(
+                        results.AsReadOnly(), results.Count + 1, 1, ex.Code);
+            }
+            if (point is null)
+                return results.Count == 0
+                    ? AdapterOutcome<PricePoint>.PermanentFailure(
+                        "contract_missing_rate", $"metal={request.SourceId};date={date:yyyy-MM-dd}",
+                        rawItemCount: 1, rejectedCount: 1)
+                    : AdapterOutcome<PricePoint>.PartialRejected(
+                        results.AsReadOnly(), results.Count + 1, 1, "contract_missing_rate",
+                        $"metal={request.SourceId};date={date:yyyy-MM-dd}");
+            results.Add(point);
         }
 
         logger.LogInformation(
             "OpenExchangeRates {Symbol}: {Count} fiyat noktası alındı ({From}–{To})",
-            assetSymbol, results.Count, from, to);
+            request.AssetSymbol, results.Count, request.From, request.To);
 
-        return results.AsReadOnly();
+        return AdapterCompleteness.Price(request, results.AsReadOnly(), results.Count);
     }
 
-    private async Task<PricePoint?> FetchDayAsync(
-        HttpClient client, Guid assetId, string metalCode,
-        DateOnly date, string appId, CancellationToken ct)
-    {
-        try
-        {
-            var json = await GetOrFetchJsonAsync(client, date, appId, ct);
-            if (json is null) return null;
-
-            return OpenExchangeRatesMapper.Map(json, assetId, date, metalCode);
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "OpenExchangeRates veri alınamadı: {Metal} {Date}", metalCode, date);
-            return null;
-        }
-    }
-
-    private async Task<string?> GetOrFetchJsonAsync(HttpClient client, DateOnly date, string appId, CancellationToken ct)
+    private async Task<JsonFetch> GetOrFetchJsonAsync(
+        HttpClient client,
+        DateOnly date,
+        string appId,
+        bool delayBeforeRemoteRequest,
+        CancellationToken ct)
     {
         // F2.4-4: TTL kontrolü ile cache lookup. Süresi dolmuşsa cache'i bypass et,
         // taze yanıtla yenile.
         if (_dayCache.TryGetValue(date, out var cached))
         {
-            if (DateTimeOffset.UtcNow - cached.CachedAt < EntryTtl)
-                return cached.Json;
+            if (timeProvider.GetUtcNow() - cached.CachedAt < EntryTtl)
+                return new JsonFetch(
+                    cached.Json, cached.PayloadSha256, null, "data_complete", null);
             // INGR-009: TTL miss — stale entry'yi sil; MaxEntries threshold'una
             // stale entry'lerin katkıda bulunmaması için.
             _dayCache.TryRemove(date, out _);
         }
 
+        // Gecikme yalnız aynı logical fetch içindeki gerçek provider isteklerinin
+        // arasındadır. Cache hit'leri ve son remote istekten sonrası beklemez.
+        if (delayBeforeRemoteRequest)
+            await Task.Delay(TimeSpan.FromMilliseconds(200), timeProvider, ct);
+
         // XAU, XAG ve TRY'yi tek istekte çek
-        var url = $"historical/{date:yyyy-MM-dd}.json?app_id={appId}&symbols=XAU,XAG,TRY";
-
-        using var response = await client.GetAsync(url, ct);
-
-        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-            return null;
-
-        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
-            response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        var url = $"historical/{date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}.json?symbols=XAU,XAG,TRY&prettyprint=false";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Token", appId);
+        HttpResponseMessage response;
+        try
         {
-            logger.LogWarning(
-                "OpenExchangeRates {StatusCode}: API key geçersiz veya limit aşıldı (ExternalApis:OpenExchangeRates:AppId).",
-                (int)response.StatusCode);
-            return null;
+            response = await client.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, ct);
         }
-
-        response.EnsureSuccessStatusCode();
-
-        var json = await response.Content.ReadAsStringAsync(ct);
-        _dayCache[date] = new CachedJson(json, DateTimeOffset.UtcNow);
-
-        // F2.4-4: sınırı aştığımızda en eski yarıyı atarak temel LRU-benzeri davranış.
-        // INGR-008: paralel iki Fetch eviction'ı tetiklerse Interlocked flag ile
-        // yalnız bir tanesi geçer; diğeri no-op.
-        if (_dayCache.Count > MaxEntries
-            && Interlocked.CompareExchange(ref _evicting, 1, 0) == 0)
+        catch (HttpRequestException ex)
         {
-            try
-            {
-                EvictOldestHalf();
-            }
-            finally
-            {
-                Volatile.Write(ref _evicting, 0);
-            }
+            logger.LogWarning("OpenExchangeRates network error: {ExceptionType}", ex.GetType().Name);
+            return new JsonFetch(null, null, AdapterOutcomeKind.RetryableFailure,
+                "network_error", null);
         }
-        return json;
+        using (response)
+        {
+            var status = (int)response.StatusCode;
+            if (status >= 500)
+                return new JsonFetch(null, null, AdapterOutcomeKind.RetryableFailure,
+                    "http_5xx", $"status={status}");
+
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                var body = await BoundedHttpContent.ReadAsync(response.Content, ct);
+                var providerMessage = ReadProviderMessage(body.Bytes);
+                return string.Equals(providerMessage, "not_allowed", StringComparison.OrdinalIgnoreCase)
+                    ? new JsonFetch(null, null, AdapterOutcomeKind.PermanentFailure,
+                        "plan_not_allowed", "status=429")
+                    : new JsonFetch(null, null, AdapterOutcomeKind.RetryableFailure,
+                        "http_429", "status=429");
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var code = response.StatusCode switch
+                {
+                    System.Net.HttpStatusCode.Unauthorized => "auth_rejected",
+                    System.Net.HttpStatusCode.Forbidden => "access_restricted",
+                    System.Net.HttpStatusCode.NotFound => "historical_route_not_found",
+                    System.Net.HttpStatusCode.BadRequest => "invalid_or_unavailable_date",
+                    _ => "http_4xx",
+                };
+                return new JsonFetch(null, null, AdapterOutcomeKind.PermanentFailure, code, $"status={status}");
+            }
+
+            var payload = await BoundedHttpContent.ReadAsync(response.Content, ct);
+            var json = payload.Utf8Text;
+            _dayCache[date] = new CachedJson(json, payload.Sha256, timeProvider.GetUtcNow());
+
+            // F2.4-4: sınırı aştığımızda en eski yarıyı atarak temel LRU-benzeri davranış.
+            // INGR-008: paralel iki Fetch eviction'ı tetiklerse Interlocked flag ile
+            // yalnız bir tanesi geçer; diğeri no-op.
+            if (_dayCache.Count > MaxEntries
+                && Interlocked.CompareExchange(ref _evicting, 1, 0) == 0)
+            {
+                try
+                {
+                    EvictOldestHalf();
+                }
+                finally
+                {
+                    Volatile.Write(ref _evicting, 0);
+                }
+            }
+            return new JsonFetch(
+                json, payload.Sha256, null, "data_complete", null, RemoteRequestIssued: true);
+        }
     }
 
     private int _evicting;
@@ -152,5 +216,24 @@ public sealed class OpenExchangeRatesAdapter(
             .ToArray();
         foreach (var key in threshold)
             _dayCache.TryRemove(key, out _);
+    }
+
+    private sealed record JsonFetch(
+        string? Json, byte[]? PayloadSha256,
+        AdapterOutcomeKind? FailureKind, string Code, string? Detail,
+        bool RemoteRequestIssued = false);
+
+    private static string? ReadProviderMessage(byte[] body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.TryGetProperty("message", out var message)
+                ? message.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 }

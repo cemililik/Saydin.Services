@@ -1,88 +1,152 @@
 using System.Diagnostics;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Localization;
 using Saydin.Api.Exceptions;
 using Saydin.Api.Services;
+using Saydin.Api.Repositories;
+using Saydin.Api.Security;
+using System.Security.Cryptography;
 
 namespace Saydin.Api.Endpoints;
 
-internal static partial class EndpointExtensions
+internal static class EndpointExtensions
 {
-    internal const string DeviceIdItemKey = "DeviceId";
+    internal const string PrincipalActivityIdItemKey = "InstallationPrincipalActivityId";
 
-    private const string DeviceIdHeader   = "X-Device-ID";
-    private const int    MaxDeviceIdLength = 128;
+    internal static RouteHandlerBuilder RequireInstallationCredential(this RouteHandlerBuilder builder)
+    {
+        // Every secured route can terminate in these three filter-level outcomes;
+        // keep generated clients aligned with the runtime contract at the filter boundary.
+        builder.ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-    /// <summary>
-    /// F2.1-3 ([C-A-8]): ASCII-only sınıf — <see cref="char.IsLetterOrDigit"/>
-    /// Unicode harf ve rakamları da kabul eder (örn. <c>İ</c>, <c>ǅ</c>).
-    /// DeviceId Flutter SecureStorage UUID'leri için ASCII alphanumeric + ayraç
-    /// karakterleri (<c>-_.</c>) ile sınırlı.
-    /// </summary>
-    [GeneratedRegex(@"^[A-Za-z0-9._-]+$")]
-    private static partial Regex DeviceIdPattern();
-
-    /// <summary>
-    /// <c>RequireDeviceId()</c> filter'ı <see cref="DeviceIdItemKey"/> öğesini set ettiği için
-    /// burada normalde null dönmez. Filter atlanırsa InvalidOperationException → 500;
-    /// bu noktayı görünür kılmak için <see cref="GlobalExceptionHandler"/> tarafından
-    /// loglanır. (Tüm endpoint'lerde tekrarlanan boilerplate'i bu helper'a topladık.)
-    /// </summary>
-    internal static string GetRequiredDeviceId(this HttpContext context) =>
-        context.Items[DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException(
-                "DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
-
-    internal static RouteHandlerBuilder RequireDeviceId(this RouteHandlerBuilder builder)
-        => builder.AddEndpointFilter(async (ctx, next) =>
+        return builder.AddEndpointFilter(async (ctx, next) =>
         {
-            var localizer = ctx.HttpContext.RequestServices
-                .GetRequiredService<IStringLocalizer<ErrorMessages>>();
+            var http = ctx.HttpContext;
+            var keyring = http.RequestServices.GetRequiredService<IInstallationCredentialKeyring>();
+            var repository = http.RequestServices.GetRequiredService<IInstallationRepository>();
 
-            var headerValues = ctx.HttpContext.Request.Headers[DeviceIdHeader];
+            if (!TryReadInstallationToken(http.Request, keyring, out var secret))
+                return InvalidInstallationCredential(http);
 
-            if (headerValues.Count != 1 || string.IsNullOrWhiteSpace(headerValues[0]))
+            IReadOnlyList<CredentialHashCandidate>? candidates = null;
+            InstallationPrincipal? principal = null;
+            try
             {
-                return Results.Problem(
-                    title: localizer["DeviceIdRequired"],
-                    detail: localizer["DeviceIdRequiredDetail"],
-                    statusCode: StatusCodes.Status400BadRequest,
-                    type: "https://saydin.app/errors/missing-device-id",
-                    // EC-FU: 9 handler deseniyle birebir — her hata yanıtı log korelasyonu için
-                    // traceId taşımalı (api-contract.md "tüm yanıtlar traceId taşır" sözleşmesi).
-                    extensions: new Dictionary<string, object?>
-                    {
-                        ["traceId"] = Activity.Current?.TraceId.ToString() ?? ctx.HttpContext.TraceIdentifier,
-                        ["code"]    = ApiErrorCodes.MissingDeviceId,
-                    });
+                candidates = keyring.HashAccepted(secret);
+                principal = await repository.ResolveAsync(candidates, http.RequestAborted);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(secret);
+                ZeroCandidateHashes(candidates);
             }
 
-            var deviceId = headerValues[0]!.Trim();
+            // No decoded credential or verifier remains live while application code runs.
+            if (principal is null)
+                return InvalidInstallationCredential(http);
 
-            if (deviceId.Length > MaxDeviceIdLength || !DeviceIdPattern().IsMatch(deviceId))
+            http.RequestServices.GetRequiredService<InstallationPrincipalContext>()
+                .Set(principal);
+            http.Items[PrincipalActivityIdItemKey] =
+                keyring.PseudonymizePrincipal(principal.PrincipalId);
+
+            var principalAdmission = await http.RequestServices
+                .GetRequiredService<IDistributedSecurityLimiter>()
+                .TryAcquirePrincipalAsync(principal.PrincipalId, http.RequestAborted);
+            if (principalAdmission.Outcome == SecurityLimiterOutcome.Limited)
             {
-                return Results.Problem(
-                    title: localizer["DeviceIdInvalid"],
-                    detail: string.Format(localizer["DeviceIdInvalidDetail"], MaxDeviceIdLength),
-                    statusCode: StatusCodes.Status400BadRequest,
-                    type: "https://saydin.app/errors/invalid-device-id",
-                    extensions: new Dictionary<string, object?>
-                    {
-                        ["traceId"] = Activity.Current?.TraceId.ToString() ?? ctx.HttpContext.TraceIdentifier,
-                        ["code"]    = ApiErrorCodes.InvalidDeviceId,
-                    });
+                var retrySeconds = Math.Max(
+                    1,
+                    (int)Math.Ceiling(principalAdmission.RetryAfter.TotalSeconds));
+                http.Response.Headers.RetryAfter = retrySeconds.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
+                return SecurityLimiterProblem(
+                    http,
+                    StatusCodes.Status429TooManyRequests,
+                    "security_rate_limited",
+                    "https://saydin.app/errors/security-rate-limited",
+                    "Too many requests.");
             }
 
-            ctx.HttpContext.Items[DeviceIdItemKey] = deviceId;
-
-            // F2.2-3: doğrulanmış device id'yi scoped IDeviceContext'e de yaz — iş
-            // service'leri (WhatIf/Dca/SavedScenario/AppConfig) artık `deviceId` parametresi
-            // yerine bu context'ten okur. Items[] ise GetRequiredDeviceId() (AssetsEndpoints,
-            // ActivityLog) için korunur.
-            ctx.HttpContext.RequestServices
-                .GetRequiredService<DeviceContext>()
-                .SetDeviceId(deviceId);
+            if (principalAdmission.Outcome != SecurityLimiterOutcome.Allowed)
+            {
+                http.RequestServices.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger("InstallationPrincipalAdmission")
+                    .LogWarning(
+                        "Distributed security limiter unavailable: {Code}",
+                        "security_limiter_unavailable");
+                return SecurityLimiterProblem(
+                    http,
+                    StatusCodes.Status503ServiceUnavailable,
+                    "security_limiter_unavailable",
+                    "https://saydin.app/errors/security-limiter-unavailable",
+                    "Request admission is temporarily unavailable.");
+            }
 
             return await next(ctx);
         });
+    }
+
+    internal static bool TryReadInstallationToken(
+        HttpRequest request,
+        IInstallationCredentialKeyring keyring,
+        out byte[] secret)
+    {
+        secret = [];
+        var values = request.Headers.Authorization;
+        if (values.Count != 1)
+            return false;
+
+        var value = values[0];
+        const string prefix = "Installation ";
+        if (value is null
+            || value.Length != prefix.Length + InstallationCredentialKeyring.CredentialTextLength
+            || !value.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return keyring.TryDecode(value[prefix.Length..], out secret);
+    }
+
+    internal static IResult InvalidInstallationCredential(HttpContext http)
+    {
+        http.Response.Headers.WWWAuthenticate = "Installation";
+        var localizer = http.RequestServices.GetRequiredService<IStringLocalizer<ErrorMessages>>();
+        return Results.Problem(
+            title: localizer["InstallationCredentialInvalid"],
+            detail: localizer["InstallationCredentialInvalidDetail"],
+            statusCode: StatusCodes.Status401Unauthorized,
+            type: "https://saydin.app/errors/invalid-installation-credential",
+            extensions: new Dictionary<string, object?>
+            {
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier,
+                ["code"] = ApiErrorCodes.InvalidInstallationCredential,
+            });
+    }
+
+    internal static void ZeroCandidateHashes(IReadOnlyList<CredentialHashCandidate>? candidates)
+    {
+        if (candidates is null)
+            return;
+
+        foreach (var candidate in candidates)
+            CryptographicOperations.ZeroMemory(candidate.SecretHash);
+    }
+
+    private static IResult SecurityLimiterProblem(
+        HttpContext http,
+        int status,
+        string code,
+        string type,
+        string title) => Results.Problem(
+            title: title,
+            statusCode: status,
+            type: type,
+            extensions: new Dictionary<string, object?>
+            {
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier,
+                ["code"] = code,
+            });
 }

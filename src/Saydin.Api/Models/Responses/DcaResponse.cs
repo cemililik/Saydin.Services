@@ -34,8 +34,15 @@ public record DcaResponse(
     // Enflasyon düzeltmesi — IncludeInflation = false ise null
     decimal?  CumulativeInflationPercent,
     decimal?  RealProfitLossPercent,
-    // TÜİK yayın gecikmesi durumunda kullanılan en son endeks tarihi
+    // Legacy as-of alanı: complete exact hesapta terminal CPI ayı, veri eksikse null.
     DateOnly? InflationDataAsOf,
     IReadOnlyList<DcaPurchase>   Purchases,
-    IReadOnlyList<DcaChartPoint> ChartData
+    IReadOnlyList<DcaChartPoint> ChartData,
+    // Additive API-04 alanları. Tutarlar terminal fiyat gününün TÜFE ayındaki TL
+    // satın alma gücüyle ve yalnız final sınırında 2 haneye yuvarlanır.
+    decimal? InflationAdjustedInvestedTry = null,
+    decimal? RealProfitLossTry = null,
+    string?  RealReturnMethod = null,
+    DateOnly? InflationTerminalMonth = null,
+    CalculationDataResponse? Data = null
 );

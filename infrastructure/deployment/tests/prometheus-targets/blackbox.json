@@ -1,0 +1,6 @@
+[
+  {
+    "targets": ["https://api.validation.test/health/live"],
+    "labels": {"service": "saydin-edge"}
+  }
+]

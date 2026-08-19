@@ -21,4 +21,8 @@ public interface IPriceIngestionRepository
     /// Worker bu seti tamamlayıcı tarihlere doğru gap-aware backfill yapar.
     /// </summary>
     Task<IReadOnlySet<DateOnly>> GetExistingDatesAsync(Guid assetId, DateOnly from, DateOnly to, CancellationToken ct);
+
+    /// <summary>Provider completeness contractı için bilinen piyasa tatilleri.</summary>
+    Task<IReadOnlySet<DateOnly>> GetMarketHolidaysAsync(
+        Guid assetId, DateOnly from, DateOnly to, CancellationToken ct);
 }

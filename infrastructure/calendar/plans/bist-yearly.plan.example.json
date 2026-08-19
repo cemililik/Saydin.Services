@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "snapshotSetId": "cal-candidate-bist-2027",
+  "calendars": [
+    {
+      "code": "tcmb_indicative_fx",
+      "coverageFrom": "2006-01-01",
+      "coverageThrough": "2026-08-17",
+      "outputPath": "normalized/tcmb_indicative_fx.csv"
+    },
+    {
+      "code": "bist_pay_xist",
+      "coverageFrom": "2024-01-01",
+      "coverageThrough": "2027-12-31",
+      "outputPath": "normalized/bist_pay_xist.csv"
+    }
+  ],
+  "sources": [
+    {
+      "id": "bist-holidays-index",
+      "calendarCode": "bist_pay_xist",
+      "kind": "bistHolidayIndex",
+      "role": "discovery",
+      "uri": "https://www.borsaistanbul.com/resmi-tatil-gunleri",
+      "mediaType": "text/html"
+    },
+    {
+      "id": "bist-pay-2027",
+      "calendarCode": "bist_pay_xist",
+      "kind": "bistPayHolidayPdf",
+      "role": "authority",
+      "uri": "https://www.borsaistanbul.com/files/pay-piyasasi-2027-yili-tatil-tablosu.pdf",
+      "mediaType": "application/pdf",
+      "year": 2027
+    }
+  ]
+}

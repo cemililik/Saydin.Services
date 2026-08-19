@@ -1,0 +1,48 @@
+groups:
+  - name: saydin-api
+    rules:
+      - alert: SaydinApiUnavailable
+        expr: up{job="saydin-api"} != 1
+        for: 2m
+        labels: {severity: critical, service: saydin-api}
+        annotations:
+          summary: Saydin API is unavailable
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md
+
+      - alert: SaydinApiHttpSliMissing
+        expr: absent(http_server_request_duration_seconds_count{job="saydin-api"})
+        for: 15m
+        labels: {severity: critical, service: saydin-api}
+        annotations:
+          summary: API HTTP SLI series is absent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md
+
+      - alert: SaydinApiErrorBudgetBurn
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{job="saydin-api",http_response_status_code=~"5.."}[5m]))
+          / clamp_min(sum(rate(http_server_request_duration_seconds_count{job="saydin-api"}[5m])), 0.001) > 0.05
+        for: 10m
+        labels: {severity: critical, service: saydin-api}
+        annotations:
+          summary: API 5xx ratio is above 5 percent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-errors.md
+
+      - alert: SaydinApiLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_server_request_duration_seconds_bucket{job="saydin-api"}[10m]))) > 1
+        for: 15m
+        labels: {severity: warning, service: saydin-api}
+        annotations:
+          summary: API p95 latency is above one second
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-latency.md
+
+      - alert: SaydinActivityLogLoss
+        expr: |
+          increase(saydin_activity_log_write_failures_total[10m])
+          + increase(saydin_activity_log_queue_drops_total[10m])
+          + increase(saydin_activity_log_queue_rejected_writes_total[10m]) > 0
+        labels: {severity: critical, service: saydin-api}
+        annotations:
+          summary: Activity log writes were lost or rejected
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-errors.md

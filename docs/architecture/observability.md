@@ -4,7 +4,7 @@
 > exception handler deseni, custom span/metrik kuralları, health check) **normatif kaynağı**
 > kök `CLAUDE.md` → "Observability Kuralları" bölümüdür. Bu doküman o kuralların **detaylı
 > referansıdır**: kod ve konfigürasyonun fiili durumunu (Serilog, OpenTelemetry tracing/metrics,
-> Prometheus, health check, 9-handler exception zinciri) örnekleriyle açıklar.
+> Prometheus, health check ve exception zinciri) örnekleriyle açıklar.
 
 ## Genel Yaklaşım
 
@@ -12,25 +12,26 @@
 
 | Sütun | Araç | Nerede Görülür |
 |-------|------|----------------|
-| **Structured Logging** | Serilog + Console (JSON) + OTLP sink | Aspire Dashboard → Logs |
-| **Distributed Tracing** | OpenTelemetry | Aspire Dashboard → Traces |
-| **Metrics** | OpenTelemetry + Prometheus | Aspire Dashboard → Metrics / Prometheus UI |
+| **Structured Logging** | Serilog + Console (JSON) + OTLP | Collector'ın disk kuyruğu → Loki |
+| **Distributed Tracing** | OpenTelemetry | Collector'ın disk kuyruğu → Tempo |
+| **Metrics** | OpenTelemetry + Prometheus | Prometheus; pipeline/queue metrikleri dahil |
 
-Trace ve metrikler **OTLP (OpenTelemetry Protocol, gRPC)** üzerinden Aspire Dashboard'a
-gönderilir; loglar hem Console'a (JSON) hem OTLP sink'e yazılır. Compose içinde servisler
-OTLP'yi `http://aspire-dashboard:18889` adresine, host makinede ise `http://localhost:4317`
-adresine export eder (Aspire Dashboard container'ı `18889` portunu host'ta `4317` olarak yayınlar).
-Endpoint `Otlp:Endpoint` config anahtarıyla (env: `Otlp__Endpoint`) ayarlanabilir; varsayılan
-`http://localhost:4317`.
+Üretimde trace ve loglar **OTLP** üzerinden private management network'ündeki Collector'a
+gönderilir. Collector her iki export yolunda da bounded retry ve disk-backed queue kullanır;
+trace'leri Tempo'ya, logları Loki'ye yazar. Tempo/Loki için kalıcı external volume ve bounded
+retention zorunludur, hiçbirinin host portu yayınlanmaz. Collector kuyruk/export arızaları
+Prometheus tarafından izlenir. Geliştirmede `devtools` profiliyle Aspire Dashboard opsiyonel
+bir görüntüleme yüzeyi olarak kullanılabilir; üretim forensic backend'i değildir.
 
-Metrikler ayrıca `GET /metrics` üzerinden Prometheus tarafından doğrudan kazınır
-(Prometheus exporter, OTLP'den bağımsız ikinci yol).
+Metrikler ayrıca private management listener'daki `GET :9090/metrics` üzerinden Prometheus
+tarafından doğrudan kazınır (Prometheus exporter, OTLP'den bağımsız ikinci yol).
 
 ---
 
 ## Geliştirme Ortamı Araçları
 
-Tümü `docker compose up -d` ile ayağa kalkar ve yalnızca loopback'e (`127.0.0.1`) bağlanır:
+Aşağıdaki opsiyonel araçlar `docker compose --profile devtools up -d` ile ayağa kalkar ve
+yalnızca loopback'e (`127.0.0.1`) bağlanır:
 
 | Araç | URL | Amaç |
 |------|-----|-------|
@@ -39,7 +40,7 @@ Tümü `docker compose up -d` ile ayağa kalkar ve yalnızca loopback'e (`127.0.
 | **pgAdmin** | http://localhost:5050 | PostgreSQL yönetimi |
 | **Redis Insight** | http://localhost:5540 | Redis izleme ve yönetimi |
 
-> OTLP gRPC ucu: `localhost:4317` (Aspire Dashboard container içinde `18889`).
+> Geliştirme OTLP gRPC ucu: `localhost:4317` (Aspire Dashboard container içinde `18889`).
 > Prometheus ek olarak `postgres-exporter` ve `redis_exporter` hedeflerini de kazır.
 
 ---
@@ -51,7 +52,7 @@ Tümü `docker compose up -d` ile ayağa kalkar ve yalnızca loopback'e (`127.0.
 Serilog kullanılır çünkü:
 - `.ForContext<T>()` ile zengin log enrichment
 - `{@object}` ile structured (JSON) nesne loglama
-- OTLP sink aracılığıyla Aspire Dashboard'a gönderim
+- OTLP sink aracılığıyla geliştirmede Aspire'a, üretimde Collector → Loki'ye gönderim
 - Trace ID ve Span ID otomatik olarak log'a eklenir (trace-log korelasyonu)
 
 ### Konfigürasyon
@@ -70,6 +71,7 @@ Log.Logger = new LoggerConfiguration()
     .CreateBootstrapLogger();
 
 // ─── Asıl Serilog ───
+var serviceVersion = ApiServiceVersionContract.Parse(builder.Configuration, builder.Environment);
 builder.Host.UseSerilog((ctx, services, cfg) =>
 {
     var otlpEndpoint = ctx.Configuration["Otlp:Endpoint"] ?? "http://localhost:4317";
@@ -80,14 +82,14 @@ builder.Host.UseSerilog((ctx, services, cfg) =>
         .Enrich.FromLogContext()
         .Enrich.WithMachineName()
         .WriteTo.Console(new Serilog.Formatting.Json.JsonFormatter())   // Yapısal JSON
-        .WriteTo.OpenTelemetry(opts =>                                  // OTLP → Aspire Dashboard
+        .WriteTo.OpenTelemetry(opts =>                                  // OTLP → configured collector
         {
             opts.Endpoint = otlpEndpoint;
             opts.Protocol = OtlpProtocol.Grpc;
             opts.ResourceAttributes = new Dictionary<string, object>
             {
                 ["service.name"] = "saydin-api",
-                ["service.version"] = "1.0.0"
+                ["service.version"] = serviceVersion
             };
         });
 });
@@ -142,10 +144,11 @@ _logger.LogInformation($"Fiyat hesaplandı: {symbol} {buyDate} → {profitPercen
 ```csharp
 var otlpEndpointUri = new Uri(
     builder.Configuration["Otlp:Endpoint"] ?? "http://localhost:4317");
+var serviceVersion = ApiServiceVersionContract.Parse(builder.Configuration, builder.Environment);
 
 builder.Services.AddOpenTelemetry()
     .ConfigureResource(r => r
-        .AddService("saydin-api", serviceVersion: "1.0.0")
+        .AddService("saydin-api", serviceVersion: serviceVersion)
         .AddAttributes(new Dictionary<string, object>
         {
             ["deployment.environment"] = builder.Environment.EnvironmentName.ToLowerInvariant()
@@ -155,7 +158,7 @@ builder.Services.AddOpenTelemetry()
         .AddAspNetCoreInstrumentation(opts =>
         {
             opts.RecordException = true;
-            // /health ve /metrics trace'leri hariç tutulur (gürültü)
+            // Health ve metrics trace'leri hariç tutulur (gürültü)
             opts.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health")
                                  && !ctx.Request.Path.StartsWithSegments("/metrics");
         })
@@ -167,8 +170,9 @@ builder.Services.AddOpenTelemetry()
         }));
 ```
 
-Dış API adapter'ları `AddHttpClientInstrumentation()` ile otomatik izlenir. Health check
-(`/health`) ve Prometheus scrape (`/metrics`) yolları trace'e dahil edilmez.
+Dış API adapter'ları `AddHttpClientInstrumentation()` ile otomatik izlenir. Public liveness
+(`/health/live`) ile management-only readiness (`/health/ready`) ve Prometheus scrape
+(`/metrics`) yolları trace'e dahil edilmez.
 
 ### Merkezi ActivitySource
 
@@ -214,10 +218,10 @@ builder.Services.AddOpenTelemetry()
             opts.Endpoint = otlpEndpointUri;
             opts.Protocol = OtlpExportProtocol.Grpc;
         })
-        .AddPrometheusExporter());           // /metrics endpoint'i
+        .AddPrometheusExporter());           // management /metrics endpoint'i
 
-// Route kaydı
-app.MapPrometheusScrapingEndpoint();   // GET /metrics
+// Route kaydı; port-boundary metadata'sı bunu yalnız :9090'da kabul eder.
+app.MapPrometheusScrapingEndpoint("/metrics");
 ```
 
 ### Merkezi Meter ve Custom Metrikler
@@ -247,13 +251,15 @@ Tanımlı iş metrikleri:
 | `saydin.price.not_found.total` | Counter&lt;long&gt; | — | Fiyat bulunamayan sorgu sayısı | — |
 | `saydin.inflation.ingestion.failures.total` | Counter&lt;long&gt; | — | EVDS/TÜFE ingestion başarısızlıkları | `source`, `outcome` (`auth\|http\|other`) |
 | `saydin.activity_log.write.failures.total` | Counter&lt;long&gt; | — | Activity log batch yazımı başarısızlıkları | `outcome` (`retry_exhausted\|cancelled`) |
-| `saydin.activity_log.queue.drops.total` | Counter&lt;long&gt; | — | Channel kuyruğu dolduğundan düşürülen log sayısı | — |
+| `saydin.activity_log.queue.drops.total` | Counter&lt;long&gt; | — | `itemDropped` callback'inin gözlediği gerçek capacity drop | `action` (allowlist) |
+| `saydin.activity_log.queue.rejected_writes.total` | Counter&lt;long&gt; | — | Completed channel writer tarafından reddedilen write; drop değildir | `action` (allowlist), `reason=writer_completed` |
 | `saydin.activity_log.data.truncations.total` | Counter&lt;long&gt; | — | Byte limit aşıldığı için truncate edilen `data` payload sayısı | `action` |
 
 > **Operasyon notu:** `EvdsInflationWorker` adapter başarısızlığını şu an `ingestion_jobs`
 > tablosuna her durumda yazmayabilir; alarm bu nedenle `saydin.inflation.ingestion.failures.total`
 > sayacına dayanır. Activity log yazma yolundaki **sessiz veri kaybı**
-> (`activity_log.write.failures` / `queue.drops` / `data.truncations`) yalnızca bu sayaçlardan
+> (`activity_log.write.failures` / `queue.drops` / `queue.rejected_writes` /
+> `data.truncations`) yalnızca bu sayaçlardan
 > izlenebilir — bu sayaçlar olmadan drop edilen kayıtlar görünmez olurdu.
 
 Kullanım:
@@ -271,7 +277,7 @@ SaydinMetrics.WhatIfCalculations.Add(1,
 
 ## Exception Handling
 
-### Yaklaşım: 9 Handler'lı IExceptionHandler Zinciri
+### Yaklaşım: 11 Handler'lı IExceptionHandler Zinciri
 
 .NET 10'un `IExceptionHandler` interface'i ile her domain exception türü için **ayrı** handler
 yazılır. `Program.cs`'deki kayıt sırası anlamlıdır: spesifik handler'lar önce gelir,
@@ -280,14 +286,16 @@ handler zinciri keser.
 
 ```mermaid
 flowchart LR
-    R["İstek → Endpoint → Service<br/>Exception fırlatıldı"] --> V["ValidationExceptionHandler<br/>400"]
+    R["İstek → Endpoint → Service<br/>Exception fırlatıldı"] --> B["RequestBodyTooLargeExceptionHandler<br/>413"]
+    B --> V["ValidationExceptionHandler<br/>400"]
     V --> F["FeatureDisabledExceptionHandler<br/>403"]
     F --> P["PriceNotFoundExceptionHandler<br/>404"]
     P --> A["AssetNotFoundExceptionHandler<br/>404"]
     A --> SN["ScenarioNotFoundExceptionHandler<br/>404"]
     SN --> SL["ScenarioLimitExceededExceptionHandler<br/>422"]
     SL --> D["DailyLimitExceededExceptionHandler<br/>429"]
-    D --> E["ExternalApiExceptionHandler<br/>502"]
+    D --> Q["QuotaUnavailableExceptionHandler<br/>503"]
+    Q --> E["ExternalApiExceptionHandler<br/>502"]
     E --> G["GlobalExceptionHandler<br/>500 + traceId"]
 ```
 
@@ -295,6 +303,7 @@ HTTP kod konvansiyonu:
 
 | Handler | Exception | Durum | `Type` (RFC 7807) | Notlar |
 |---------|-----------|:-----:|-------------------|--------|
+| `RequestBodyTooLargeExceptionHandler` | `RequestBodyTooLargeException` | 413 | `…/errors/payload-too-large` | Endpoint byte limiti ve stable code |
 | `ValidationExceptionHandler` | `ValidationException` | 400 | `…/errors/validation` | Yalnız domain `ValidationException`; jenerik `ArgumentException` Global'a düşer (P1R-003). `field` extension'ı opsiyonel |
 | `FeatureDisabledExceptionHandler` | `FeatureDisabledException` | 403 | `…/errors/feature-disabled` | Tier ile kapatılan özellik; `feature` extension'ı. 404 değil → istemci upsell gösterebilsin (F4-14) |
 | `PriceNotFoundExceptionHandler` | `PriceNotFoundException` | 404 | `…/errors/price-not-found` | `nearestDates` extension'ı |
@@ -302,18 +311,18 @@ HTTP kod konvansiyonu:
 | `ScenarioNotFoundExceptionHandler` | `ScenarioNotFoundException` | 404 | `…/errors/scenario-not-found` | — |
 | `ScenarioLimitExceededExceptionHandler` | `ScenarioLimitExceededException` | 422 | `…/errors/scenario-limit-exceeded` | Geçerli ama domain kotasını ihlal eden istek; `limit` extension'ı |
 | `DailyLimitExceededExceptionHandler` | `DailyLimitExceededException` | 429 | `…/errors/daily-limit-exceeded` | `limit` + `resetAt` (UTC `DateTimeOffset`, `TimeProvider`'dan) extension'ları |
+| `QuotaUnavailableExceptionHandler` | `QuotaUnavailableException` | 503 | `…/errors/quota-unavailable` | Finite quota Redis arızasında fail-closed stable code |
 | `ExternalApiExceptionHandler` | `ExternalApiException` | 502 | `…/errors/external-api` | `source` extension'ı; `Warning` loglar |
 | `GlobalExceptionHandler` | (catch-all) | 500 | `…/errors/internal-error` | `Error` loglar, her zaman `traceId` döner |
 
-> IP-bazlı `RateLimiter` middleware (config-gated) reddetme yanıtı bu zincirden bağımsızdır
-> ama **aynı şekli** taşır: 429 + `…/errors/rate-limited` + lokalize `title`/`detail` + `traceId`
-> + `Retry-After` header (bkz. "Rate Limiting" altında).
+> Dağıtık security limiter middleware'i bu zincirden bağımsızdır. Limit aşımında 429,
+> Redis/client-IP güven sınırı arızasında 503 döndürür; her iki yanıt stable error code ve
+> `traceId` taşır (bkz. "Dağıtık Abuse Limiti ve Günlük Kota").
 
 ### Ortak Kurallar
 
-- Tüm handler'lar `IStringLocalizer<ErrorMessages>` inject ederek `ProblemDetails.Title`
-  (ve çoğu yerde `Detail`) alanını `Accept-Language`'a göre lokalize eder — hardcoded
-  Türkçe/İngilizce string YASAK.
+- Resource-backed handler'lar `IStringLocalizer<ErrorMessages>` ile kullanıcı metnini
+  lokalize eder. Her yanıtın makinece okunabilen stable `code` alanı dil bağımsızdır.
 - Tüm handler'lar **RFC 7807** `ProblemDetails` döner ve `Extensions["traceId"]` ekler.
   `Activity.Current` null olabileceği için `traceId = Activity.Current?.TraceId.ToString()
   ?? context.TraceIdentifier` deseni kullanılır.
@@ -414,25 +423,33 @@ app.UseExceptionHandler();
 ### TraceId İstemciye Döner
 
 Her yanıtta `traceId` extension'ı bulunur (özellikle 5xx'te kritik). İstemci bu ID'yi
-loglara/destek talebine ekler; geliştirici Aspire Dashboard → Traces'te tam çağrı zincirini
-(`endpoint → service → repository → DB query`) bulur.
+destek talebine ekler; operatör üretimde Tempo'da, geliştirmede opsiyonel Aspire arayüzünde
+tam çağrı zincirini (`endpoint → service → repository → DB query`) bulur.
 
 ---
 
-## Rate Limiting (IP-Bazlı, Config-Gated)
+## Dağıtık Abuse Limiti ve Günlük Kota
 
-İki katmanlı throttling modelinin **2. katmanı** ASP.NET Core `RateLimiter` middleware'idir
-(1. katman: `IDailyLimitGuard` / Redis günlük kota — bkz. `docs/architecture.md`). Varsayılan
-**KAPALI** (`RateLimiting:Enabled=false`); açıkken IP-bazlı sabit pencere
-(`PartitionedRateLimiter` + `FixedWindow`, `PermitLimit`/`WindowSeconds` config) uygulanır.
+İstek sınırları process-local değildir. Redis TIME tabanlı atomik script, HMAC ile
+pseudonymize edilmiş istemci IP'si, IPv4 `/24` veya IPv6 `/64` ağı ve kimliği doğrulanmış
+installation principal için ayrı bucket'lar uygular. Principal bucket'ı credential
+çözüldükten sonra alınır. Finite günlük ürün kotası ayrıca nonce'lu `QuotaLease` üretir;
+release exact lease key'ini kullanır ve tekrar/gün dönümü karşısında idempotenttir.
+
+Üretim deployment validator'ı limiter kapalıysa, HMAC secret/file yoksa veya trusted-proxy
+sözleşmesi wildcard/placeholder ise başlamayı reddeder. Redis arızası, bilinmeyen istemci IP'si
+ve malformed/untrusted forwarded IP **503**; gerçek limit aşımı **429** üretir. Sınırsız ürün
+planı no-op lease kullanabilir, finite kota hiçbir zaman fail-open değildir.
 
 Observability açısından:
-- `/health` ve `/metrics` throttle dışıdır (OTel trace filtresiyle tutarlı — gürültü yok).
+- Public `/health/live` yalnız process liveness'tır; dependency ayrıntısı taşımaz.
+- `/health/ready` ve `/metrics` yalnız private `:9090` management listener'ındadır ve dış
+  istemci limiter yüzeyine açılmaz.
 - Reddetme yanıtı 429 + RFC 7807 `ProblemDetails` (`type=…/errors/rate-limited`), `IStringLocalizer`
   ile lokalize `title`/`detail`, `traceId` extension'ı ve `Retry-After` header taşır — exception
   zinciriyle tutarlı şekil.
-- `app.UseRateLimiter()` yalnız config açıkken, `UseForwardedHeaders` (gerçek istemci IP'si) ve
-  `UseRequestLocalization` (lokalize 429 mesajı) **sonrasında** pipeline'a girer.
+- IP/network limiti trusted-proxy çözümlemesinden sonra, principal limiti credential doğrulaması
+  sırasında çalışır. İki API replikası aynı Redis bucket'larını paylaşır.
 
 ---
 
@@ -457,17 +474,24 @@ builder.Services
         name: "redis",
         tags: ["cache"]);
 
-// Tek endpoint
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false
+});
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
 ```
 
 - PostgreSQL kontrolü hazır `AddNpgSql(...)` yerine, uygulamanın gerçekte kullandığı singleton
   `NpgsqlDataSource` (aynı connection pool) üzerinden `SELECT 1` çalıştıran bir `AddAsyncCheck`
   ile yapılır — gerçek pool sağlığını yansıtır.
-- Redis kontrolü `AddRedis` ile yapılır. Redis `AbortOnConnectFail=false` ile bağlanır:
-  Redis down olsa bile API ayağa kalkar (cache-aside → DB'ye düşülür), health check `Unhealthy`
-  raporlar.
-- `/health` endpoint'i trace filtresi ile tracing dışında tutulur (gürültü engellenir).
+- Redis zorunlu readiness dependency değildir; cache ve distributed security yüzeyleri kendi
+  fail-closed/degraded sözleşmelerini uygular.
+- `/health/live` public `:8080` listener'ında yalnız process kontrolüdür. PostgreSQL readiness
+  `/health/ready` ve scrape `/metrics` private `:9090` listener'ında kalır. Port-boundary
+  middleware yanlış listener/yol birleşimini 404 ile reddeder.
 
 ---
 
@@ -480,14 +504,17 @@ Kullanıcı/istek aktiviteleri `activity_logs` (TimescaleDB hypertable) tablosun
 - `ActivityLogMiddleware` (transient `IMiddleware`) exception handler'dan **sonra**, endpoint
   mapping'den **önce** çalışır; pipeline tamamlanınca nihai `Response.StatusCode`'u kayda yazar →
   4xx/5xx istekler de doğru loglanır (review C-3).
-- `ChannelActivityLogger` kayıtları kuyruğa yazar; kuyruk doluysa `TryWrite` false döner,
-  `saydin.activity_log.queue.drops.total` sayacı artar (`DropWrite` mode bilinçli — `DropOldest`
-  drop sayısını ölçülemez kılıyordu).
+- `ChannelActivityLogger` kayıtları kuyruğa yazar. `DropWrite` doluyken `TryWrite=true`
+  döndüğünden gerçek kayıp callback'te `saydin.activity_log.queue.drops.total` olarak ölçülür.
+  `TryWrite=false` completed writer'dır ve ayrı
+  `saydin.activity_log.queue.rejected_writes.total` sayacına gider; drop sayılmaz.
+- Drop/rejected warning'leri ayrı birer dakikalık pencereyle rate-limit edilir; action
+  metric ve loglarda allowlist dışıysa `unknown` olarak normalize edilir.
 - `ActivityLogWriter` (hosted service) kuyruğu okuyup batch UPSERT yapar; kalıcı başarısızlıkta
   `saydin.activity_log.write.failures.total` (`outcome=retry_exhausted|cancelled`), byte limit
   aşımında `saydin.activity_log.data.truncations.total` sayaçları artar.
 
-Bu üç sayaç, sessizce düşen/kısaltılan kayıtlar için **tek görünürlük kaynağıdır**.
+Bu dört sayaç, sessizce düşen/reddedilen/kısaltılan kayıtlar için **tek görünürlük kaynağıdır**.
 
 ---
 
@@ -497,36 +524,41 @@ Bu üç sayaç, sessizce düşen/kısaltılan kayıtlar için **tek görünürl�
 
 1. Prometheus'ta `saydin_whatif_calculation_duration_ms` histogram'ını izle.
 2. P99 > 500ms uyarısı: hangi `asset.symbol`?
-3. Aspire Dashboard → Traces'te `WhatIfCalculation` span'ını bul → hangi alt-adım yavaş?
+3. Tempo'da `WhatIfCalculation` span'ını bul → hangi alt-adım yavaş?
 
 ### Senaryo 2: Dış API / Downstream Hata Takibi
 
-1. `ExternalApiException` → 502 logları Aspire Dashboard → Logs'ta `Warning` olarak görünür.
+1. `ExternalApiException` → 502 logları Loki'de `Warning` olarak görünür.
 2. Her log'da `traceId` var → ilgili `AddHttpClientInstrumentation` span'ını bul.
 3. Prometheus'ta `http.client.request.duration` ile trend analizi.
 
 ### Senaryo 3: Üretim Hata Analizi (5xx)
 
 1. Kullanıcı hata bildiriyor, yanıttaki `traceId: abc123` değerini paylaşıyor.
-2. Aspire Dashboard → Traces → `abc123` ara.
+2. Tempo'da `abc123` trace kimliğini ara.
 3. Tam çağrı zinciri: endpoint → service → repository → DB query.
 
 ### Senaryo 4: Sessiz Log Kaybı / Limit Alarmı
 
-1. `saydin.activity_log.queue.drops.total` veya `…write.failures.total` artışı → activity log
+1. `saydin.activity_log.queue.drops.total`, `…queue.rejected_writes.total` veya
+   `…write.failures.total` artışı → activity log
    yazma yolunda darboğaz/hata.
 2. `saydin.inflation.ingestion.failures.total` (`outcome` tag'i) → EVDS TÜFE ingestion sorunu.
 3. `saydin.price.not_found.total` artışı → eksik fiyat verisi / yeni asset backfill gecikmesi.
+
+Collector export failure veya disk kuyruğu kapasite alarmında
+[`../runbooks/telemetry-pipeline.md`](../runbooks/telemetry-pipeline.md) izlenir. Queue verisi
+external volume'da tutulur; Tempo/Loki retention varsayılanı bounded'dır. Bu yerel private
+backend off-site arşiv değildir; olay delili saklama süresi ve legal hold operatör politikasıdır.
 
 ---
 
 ## İlgili Belgeler
 
 - Kök `CLAUDE.md` → "Observability Kuralları" (normatif kurallar).
-- [`../architecture.md`](../architecture.md) → exception zinciri, iki katmanlı rate limiting,
+- [`../architecture.md`](../architecture.md) → exception zinciri, dağıtık limiter + kota,
   feature flag → 403, lokalizasyon middleware zinciri.
 - [`../cache-strategy.md`](../cache-strategy.md) → Redis cache key/TTL ve fail-open prensibi.
-- ADR'ler: backend kararları [`../decisions/`](../decisions/) altındadır (ör. ADR-001
-  migration-strategy = numaralı SQL "Seçenek C"). Ürün/altyapı kararları (TimescaleDB,
-  daily-granularity, device-id-auth vb.) **Saydın meta repo'sundaki** `docs/decisions/` altında
-  yaşar — bu dokümandan onlara meta-repo çapraz referansı olarak atıf yapılır.
+- ADR'ler [`../decisions/`](../decisions/) altındadır. Özellikle ADR-003 dağıtık limiter/kota,
+  ADR-006 activity minimizasyonu ve ADR-010 installation principal/retention sözleşmesini
+  tanımlar.

@@ -1,4 +1,8 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Globalization;
+using Saydin.PriceIngestion.Adapters;
 using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Mappers;
@@ -16,10 +20,25 @@ public static class OpenExchangeRatesMapper
     /// <param name="assetId">Veritabanı asset UUID'si</param>
     /// <param name="date">Fiyat tarihi</param>
     /// <param name="metalCode">Sembol: "XAU" (altın) veya "XAG" (gümüş)</param>
-    public static PricePoint? Map(string json, Guid assetId, DateOnly date, string metalCode)
+    public static PricePoint? Map(
+        string json,
+        Guid assetId,
+        DateOnly date,
+        string metalCode,
+        byte[]? payloadSha256 = null,
+        int? payloadByteLength = null)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+
+        if (!root.TryGetProperty("base", out var baseElement)
+            || baseElement.GetString() != "USD"
+            || !root.TryGetProperty("timestamp", out var timestampElement)
+            || !timestampElement.TryGetInt64(out var timestamp))
+            throw new ProviderContractException("contract_identity_mismatch");
+        var providerAsOf = DateTimeOffset.FromUnixTimeSeconds(timestamp);
+        if (DateOnly.FromDateTime(providerAsOf.UtcDateTime) != date)
+            throw new ProviderContractException("contract_observation_date_mismatch");
 
         if (!root.TryGetProperty("rates", out var rates))
             return null;
@@ -41,12 +60,26 @@ public static class OpenExchangeRatesMapper
 
         if (priceTryPerGram <= 0) return null;
 
-        return new PricePoint
+        var observationId = $"openexchangerates:{metalCode}:{date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}";
+        var evidence = ObservationEvidence.Create(
+            ("as_of_at", providerAsOf),
+            ("base_currency", "USD"),
+            ("close", priceTryPerGram),
+            ("date", date),
+            ("observation_id", observationId),
+            ("provider_source", ProviderSources.OpenExchangeRates),
+            ("quote_currency", "TRY"),
+            ("symbol", metalCode),
+            ("unit", "gram"));
+        return ProviderAuthority.Price(new PricePoint
         {
             AssetId   = assetId,
             PriceDate = date,
             Close     = priceTryPerGram
             // OXR historical endpoint OHLC sağlamaz, sadece close değeri var
-        };
+        }, ProviderSources.OpenExchangeRates, observationId, providerAsOf,
+            ObservationPriceKinds.DailyReference,
+            payloadSha256 ?? SHA256.HashData(Encoding.UTF8.GetBytes(json)),
+            payloadByteLength ?? Encoding.UTF8.GetByteCount(json), evidence);
     }
 }

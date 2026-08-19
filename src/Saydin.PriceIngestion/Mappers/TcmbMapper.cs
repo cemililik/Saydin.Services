@@ -1,5 +1,8 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Xml.Linq;
+using Saydin.PriceIngestion.Adapters;
 using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Mappers;
@@ -32,8 +35,10 @@ public static class TcmbMapper
     /// <returns>PricePoint veya null (kur bulunamadıysa).</returns>
     public static PricePoint? Map(string xml, Guid assetId, string currencyCode, DateOnly date)
     {
+        var bytes = Encoding.UTF8.GetBytes(xml);
         var doc = XDocument.Parse(xml);
-        return MapInternal(doc, assetId, currencyCode, date);
+        return MapInternal(doc, assetId, currencyCode, date,
+            SHA256.HashData(bytes), bytes.Length);
     }
 
     /// <summary>
@@ -42,8 +47,18 @@ public static class TcmbMapper
     /// yeniden kullanır (review F1.1-2: 20 yıl × 30 sembol senaryosunda
     /// XDocument.Parse ~150k → ~5200).
     /// </summary>
-    public static PricePoint? Map(XDocument doc, Guid assetId, string currencyCode, DateOnly date) =>
-        MapInternal(doc, assetId, currencyCode, date);
+    public static PricePoint? Map(
+        XDocument doc,
+        Guid assetId,
+        string currencyCode,
+        DateOnly date,
+        byte[]? payloadSha256 = null,
+        int? payloadByteLength = null) =>
+        MapInternal(doc, assetId, currencyCode, date,
+            payloadSha256 ?? SHA256.HashData(
+                Encoding.UTF8.GetBytes(doc.ToString(SaveOptions.DisableFormatting))),
+            payloadByteLength ?? Encoding.UTF8.GetByteCount(
+                doc.ToString(SaveOptions.DisableFormatting)));
 
     /// <summary>
     /// XML'i bir kez parse edip aynı doc üzerinden N para birimi için PricePoint üretir
@@ -55,11 +70,13 @@ public static class TcmbMapper
         DateOnly date)
     {
         var doc = XDocument.Parse(xml);
+        var bytes = Encoding.UTF8.GetBytes(xml);
+        var hash = SHA256.HashData(bytes);
         var results = new List<PricePoint>(currencyCodeToAssetId.Count);
 
         foreach (var (currencyCode, assetId) in currencyCodeToAssetId)
         {
-            var point = MapInternal(doc, assetId, currencyCode, date);
+            var point = MapInternal(doc, assetId, currencyCode, date, hash, bytes.Length);
             if (point is not null)
                 results.Add(point);
         }
@@ -67,31 +84,80 @@ public static class TcmbMapper
         return results;
     }
 
-    private static PricePoint? MapInternal(XDocument doc, Guid assetId, string currencyCode, DateOnly date)
+    private static PricePoint? MapInternal(
+        XDocument doc,
+        Guid assetId,
+        string currencyCode,
+        DateOnly date,
+        byte[] payloadSha256,
+        int payloadByteLength)
     {
+        ValidatePayloadDate(doc, date);
         var currency = doc.Descendants("Currency")
             .FirstOrDefault(c => c.Attribute("CurrencyCode")?.Value == currencyCode);
 
         if (currency is null) return null;
 
         // Unit: 1 (USD/EUR/...) veya 100 (JPY/KRW/IDR/...). XML'de yoksa 1 varsayılır.
-        var unit = ParseDecimal(currency.Element("Unit")?.Value) ?? 1m;
-        if (unit <= 0m) unit = 1m;
+        var unitText = currency.Element("Unit")?.Value;
+        var unit = string.IsNullOrWhiteSpace(unitText) ? 1m : ParseDecimal(unitText);
+        if (unit is null || unit <= 0m)
+            throw new ProviderContractException("contract_unit_invalid");
 
         var forexBuying = ParseDecimal(currency.Element("ForexBuying")?.Value);
         if (forexBuying is null) return null;
+        if (forexBuying <= 0m)
+            throw new ProviderContractException("contract_price_invalid");
 
-        return new PricePoint
+        var close = Normalize(forexBuying.Value, unit.Value);
+        var observationId = $"tcmb:{currencyCode}:{date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}:forex_buying";
+        var asOf = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        var evidence = ObservationEvidence.Create(
+            ("as_of_at", asOf),
+            ("close", close),
+            ("currency", currencyCode),
+            ("date", date),
+            ("observation_id", observationId),
+            ("provider_source", ProviderSources.Tcmb),
+            ("unit", unit.Value));
+        return ProviderAuthority.Price(new PricePoint
         {
             AssetId   = assetId,
             PriceDate = date,
-            Close     = Normalize(forexBuying.Value, unit),
+            Close     = close,
             // Open / High / Low = null (TCMB intra-day OHLC yayınlamaz, sadece bid kuru).
-        };
+        }, ProviderSources.Tcmb, observationId, asOf,
+            ObservationPriceKinds.OfficialReference, payloadSha256, payloadByteLength, evidence);
     }
 
     private static decimal Normalize(decimal value, decimal unit) =>
         Math.Round(value / unit, 6, MidpointRounding.AwayFromZero);
+
+    private static void ValidatePayloadDate(XDocument document, DateOnly requestedDate)
+    {
+        var root = document.Root;
+        if (root?.Name.LocalName != "Tarih_Date")
+            throw new ProviderContractException("contract_root_mismatch");
+        var observed = new List<DateOnly>(2);
+        var date = root.Attribute("Date")?.Value;
+        if (!string.IsNullOrWhiteSpace(date))
+        {
+            if (!DateOnly.TryParseExact(date, "MM/dd/yyyy", CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var parsed))
+                throw new ProviderContractException("contract_observation_date_invalid");
+            observed.Add(parsed);
+        }
+        var tarih = root.Attribute("Tarih")?.Value;
+        if (!string.IsNullOrWhiteSpace(tarih))
+        {
+            if (!DateOnly.TryParseExact(tarih, "dd.MM.yyyy", CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var parsed))
+                throw new ProviderContractException("contract_observation_date_invalid");
+            observed.Add(parsed);
+        }
+        if (observed.Count == 0 || observed.Any(value => value != requestedDate))
+            throw new ProviderContractException("contract_observation_date_mismatch");
+    }
 
     private static decimal? ParseDecimal(string? value)
     {

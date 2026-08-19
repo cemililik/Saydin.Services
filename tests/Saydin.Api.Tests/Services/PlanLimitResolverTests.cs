@@ -13,10 +13,10 @@ namespace Saydin.Api.Tests.Services;
 /// </summary>
 public class PlanLimitResolverTests
 {
-    private const string DeviceId = "test-device-001";
-
     private readonly ISavedScenarioRepository _repository = Substitute.For<ISavedScenarioRepository>();
+    private readonly IInstallationPrincipalContext _principal = Substitute.For<IInstallationPrincipalContext>();
     private readonly PlanLimitResolver _sut;
+    private readonly Guid _principalId = Guid.NewGuid();
 
     private static readonly PlanOptions Plans = new()
     {
@@ -26,16 +26,20 @@ public class PlanLimitResolverTests
 
     public PlanLimitResolverTests()
     {
-        _sut = new PlanLimitResolver(_repository, Microsoft.Extensions.Options.Options.Create(Plans));
+        _principal.PrincipalId.Returns(_principalId);
+        _sut = new PlanLimitResolver(
+            _repository,
+            _principal,
+            Microsoft.Extensions.Options.Options.Create(Plans));
     }
 
     [Fact]
     public async Task ResolveDailyAssetQueryLimitAsync_FreeUser_ReturnsFreeLimit()
     {
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>())
-                   .Returns(new User { Id = Guid.NewGuid(), DeviceId = DeviceId, Tier = "free" });
+        _repository.GetUserByIdAsync(_principalId, Arg.Any<CancellationToken>())
+                   .Returns(new User { Id = _principalId, Tier = "free" });
 
-        var limit = await _sut.ResolveDailyAssetQueryLimitAsync(DeviceId, CancellationToken.None);
+        var limit = await _sut.ResolveDailyAssetQueryLimitAsync(CancellationToken.None);
 
         limit.Should().Be(500);
     }
@@ -43,21 +47,21 @@ public class PlanLimitResolverTests
     [Fact]
     public async Task ResolveDailyAssetQueryLimitAsync_PremiumUser_ReturnsPremiumLimit()
     {
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>())
-                   .Returns(new User { Id = Guid.NewGuid(), DeviceId = DeviceId, Tier = "premium" });
+        _repository.GetUserByIdAsync(_principalId, Arg.Any<CancellationToken>())
+                   .Returns(new User { Id = _principalId, Tier = "premium" });
 
-        var limit = await _sut.ResolveDailyAssetQueryLimitAsync(DeviceId, CancellationToken.None);
+        var limit = await _sut.ResolveDailyAssetQueryLimitAsync(CancellationToken.None);
 
         limit.Should().Be(5000);
     }
 
     [Fact]
-    public async Task ResolveDailyAssetQueryLimitAsync_UnknownDevice_ReturnsFreeLimit()
+    public async Task ResolveDailyAssetQueryLimitAsync_MissingAuthenticatedPrincipal_FailsClosed()
     {
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns((User?)null);
+        _repository.GetUserByIdAsync(_principalId, Arg.Any<CancellationToken>()).Returns((User?)null);
 
-        var limit = await _sut.ResolveDailyAssetQueryLimitAsync(DeviceId, CancellationToken.None);
+        var act = () => _sut.ResolveDailyAssetQueryLimitAsync(CancellationToken.None);
 
-        limit.Should().Be(500);
+        await act.Should().ThrowAsync<InvalidOperationException>();
     }
 }

@@ -14,9 +14,27 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
         // F2.5-2 / F2.5-7 ([C-E-9], [G-E-02]): saved_scenarios.type CHECK constraint
         // kod tarafında da modellenir. DB CHECK ile ScenarioTypes.All listesi
         // birebir aynı olmalıdır.
-        builder.ToTable("saved_scenarios", t => t.HasCheckConstraint(
-            "chk_saved_scenarios_type",
-            $"type IN ({string.Join(", ", ScenarioTypes.All.Select(v => $"'{v}'"))})"));
+        builder.ToTable("saved_scenarios", table =>
+        {
+            table.HasCheckConstraint(
+                "chk_saved_scenarios_type",
+                $"type IN ({string.Join(", ", ScenarioTypes.All.Select(v => $"'{v}'"))})");
+            table.HasCheckConstraint(
+                "chk_saved_scenarios_unit",
+                $"quantity_unit IN ({string.Join(", ", QuantityUnits.All.Select(v => $"'{v}'"))})");
+            table.HasCheckConstraint(
+                "chk_saved_scenarios_dates",
+                "sell_date IS NULL OR sell_date > buy_date");
+            table.HasCheckConstraint(
+                "chk_saved_scenarios_type_unit",
+                $"type <> '{ScenarioTypes.Dca}' OR quantity_unit = '{QuantityUnits.Try}'");
+            table.HasCheckConstraint(
+                "chk_saved_scenarios_extra_data_object",
+                "extra_data IS NULL OR jsonb_typeof(extra_data) IN ('object', 'null')");
+            table.HasCheckConstraint(
+                "chk_saved_scenarios_extra_data_size",
+                "extra_data IS NULL OR octet_length(extra_data::text) <= 8192");
+        });
         builder.HasKey(s => s.Id);
 
         builder.Property(s => s.Quantity).HasColumnType("numeric(18,8)").IsRequired();
@@ -61,8 +79,9 @@ public sealed class SavedScenarioConfiguration : IEntityTypeConfiguration<SavedS
             .IsRequired(false)
             .OnDelete(DeleteBehavior.Restrict);
 
-        builder.HasIndex(s => new { s.UserId, s.CreatedAt })
-            .HasDatabaseName("idx_saved_scenarios_user");
+        builder.HasIndex(s => new { s.UserId, s.CreatedAt, s.Id })
+            .IsDescending(false, true, true)
+            .HasDatabaseName("idx_saved_scenarios_user_created_id_desc");
     }
 
     /// <summary>

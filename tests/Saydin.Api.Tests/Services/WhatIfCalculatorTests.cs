@@ -10,6 +10,8 @@ using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
+using Saydin.Api.Tests.Helpers;
+using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
@@ -24,13 +26,10 @@ public class WhatIfCalculatorTests
     private readonly IRedisCacheHelper            _cache              = Substitute.For<IRedisCacheHelper>();
     private readonly IAssetNameLocalizer          _assetNameLocalizer = Substitute.For<IAssetNameLocalizer>();
     private readonly IStringLocalizer<ErrorMessages> _localizer       = Substitute.For<IStringLocalizer<ErrorMessages>>();
-    private readonly IDeviceContext                  _deviceContext   = Substitute.For<IDeviceContext>();
+    private readonly IInstallationPrincipalContext   _principalContext =
+        Substitute.For<IInstallationPrincipalContext>();
     private readonly FakeTimeProvider                _timeProvider    = new();
     private readonly WhatIfCalculator             _sut;
-
-    private const string DeviceId  = "test-device-001";
-    private const string FreeDeviceId  = "free-device";
-    private const string PremiumDeviceId = "premium-device";
 
     private static readonly Guid   AssetId  = Guid.Parse("aaaaaaaa-0000-0000-0000-000000000001");
     private static readonly Asset  UsdTry   = new()
@@ -46,7 +45,7 @@ public class WhatIfCalculatorTests
     private static readonly User FreeUser = new()
     {
         Id       = Guid.Parse("bbbbbbbb-0000-0000-0000-000000000001"),
-        DeviceId = FreeDeviceId,
+        DeviceId = null,
         Tier     = "free",
         CreatedAt = DateTimeOffset.UtcNow
     };
@@ -54,38 +53,49 @@ public class WhatIfCalculatorTests
     private static readonly User PremiumUser = new()
     {
         Id       = Guid.Parse("bbbbbbbb-0000-0000-0000-000000000002"),
-        DeviceId = PremiumDeviceId,
+        DeviceId = null,
         Tier     = "premium",
         CreatedAt = DateTimeOffset.UtcNow
     };
 
     private static readonly DateOnly BuyDate  = new(2020, 1, 1);
     private static readonly DateOnly SellDate = new(2021, 1, 1);
+    private static readonly AssetCatalogVersion Catalog = new()
+    {
+        Revision = 7,
+        CatalogSha256 = Enumerable.Repeat((byte)0x5a, 32).ToArray()
+    };
+    private static readonly string CatalogHash =
+        Convert.ToHexString(Catalog.CatalogSha256).ToLowerInvariant();
 
     public WhatIfCalculatorTests()
     {
+        _dailyLimitGuard.TryAcquireAsync(
+                Arg.Any<User?>(), Arg.Any<string>(), Arg.Any<string>(),
+                Arg.Any<int?>(), Arg.Any<CancellationToken>())
+            .Returns(QuotaLease.Noop);
         // Varsayılan: cache miss (TryGetAsync returns null)
-        _cache.TryGetAsync<WhatIfResponse>(Arg.Any<string>(), Arg.Any<CancellationToken>())
-              .Returns((WhatIfResponse?)null);
-        _cache.TryGetAsync<ReverseWhatIfResponse>(Arg.Any<string>(), Arg.Any<CancellationToken>())
-              .Returns((ReverseWhatIfResponse?)null);
+        _cache.TryGetAsync<WhatIfCacheEntry>(Arg.Any<string>(), Arg.Any<CancellationToken>())
+              .Returns((WhatIfCacheEntry?)null);
+        _cache.TryGetAsync<ReverseWhatIfCacheEntry>(Arg.Any<string>(), Arg.Any<CancellationToken>())
+              .Returns((ReverseWhatIfCacheEntry?)null);
 
         // Varsayılan: free kullanıcı
-        _scenarioRepository.GetUserByDeviceIdAsync(FreeDeviceId, Arg.Any<CancellationToken>())
+        _scenarioRepository.GetUserByIdAsync(FreeUser.Id, Arg.Any<CancellationToken>())
                            .Returns(FreeUser);
-        _scenarioRepository.GetUserByDeviceIdAsync(PremiumDeviceId, Arg.Any<CancellationToken>())
+        _scenarioRepository.GetUserByIdAsync(PremiumUser.Id, Arg.Any<CancellationToken>())
                            .Returns(PremiumUser);
-        _scenarioRepository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>())
-                           .Returns((User?)null);
 
         // Varsayılan: asset lookup
         _assetService.GetBySymbolAsync("USDTRY", Arg.Any<CancellationToken>())
                      .Returns(UsdTry);
+        _assetService.GetCatalogVersionAsync(Arg.Any<CancellationToken>())
+                     .Returns(Catalog);
 
         // Varsayılan: enflasyon verisi yok
         _inflationRepository
             .GetIndexValuesAsync(Arg.Any<DateOnly>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
-            .Returns((null, (DateOnly?)null, null, (DateOnly?)null));
+            .Returns(((InflationIndexObservation?)null, (InflationIndexObservation?)null));
 
         // Varsayılan: localizer — key'i olduğu gibi döndür
         _localizer[Arg.Any<string>()]
@@ -104,8 +114,7 @@ public class WhatIfCalculatorTests
             Free    = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } },
             Premium = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } }
         };
-        // F2.2-3: device id artık IDeviceContext'ten; varsayılan = free kullanıcı cihazı.
-        _deviceContext.DeviceId.Returns(FreeDeviceId);
+        _principalContext.PrincipalId.Returns(FreeUser.Id);
 
         var options = Microsoft.Extensions.Options.Options.Create(defaultPlans);
         _sut = new WhatIfCalculator(
@@ -113,7 +122,7 @@ public class WhatIfCalculatorTests
             _scenarioRepository,
             _inflationRepository,
             _dailyLimitGuard,
-            _deviceContext,
+            _principalContext,
             _timeProvider,
             _cache,
             _assetNameLocalizer,
@@ -219,10 +228,8 @@ public class WhatIfCalculatorTests
 
     // ── Validasyon ───────────────────────────────────────────────────────────
 
-    // F2.2-3: deviceId boş/whitespace doğrulaması artık servis katmanında DEĞİL —
-    // RequireDeviceId endpoint filter'ında yapılır (400 + ProblemDetails). Servis,
-    // device id'yi scoped IDeviceContext'ten okur. Önceki "CalculateAsync_EmptyDeviceId"
-    // servis-seviyesi testi bu nedenle kaldırıldı; context sözleşmesi DeviceContextTests'te.
+    // Installation credential ve principal çözümlemesi endpoint filter'ında yapılır.
+    // Servis yalnızca doğrulanmış IInstallationPrincipalContext kimliğini kullanır.
 
     [Fact]
     public async Task CalculateAsync_BuyDateAfterSellDate_ThrowsValidationException()
@@ -284,14 +291,14 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        _deviceContext.DeviceId.Returns(PremiumDeviceId);
+        _principalContext.PrincipalId.Returns(PremiumUser.Id);
         await _sut.CalculateAsync(request, CancellationToken.None);
 
         await _dailyLimitGuard.Received(1)
-            .TryAcquireAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
+            .TryAcquireAsync(PremiumUser, PremiumUser.Id.ToString("N"), Arg.Any<string>(), null, Arg.Any<CancellationToken>());
         // Premium success → release çağırılmaz (yalnızca failure path'inde release var)
         await _dailyLimitGuard.DidNotReceive()
-            .ReleaseAsync(PremiumUser, PremiumDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
+            .ReleaseAsync(Arg.Any<QuotaLease>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -310,7 +317,7 @@ public class WhatIfCalculatorTests
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
-        _dailyLimitGuard.TryAcquireAsync(FreeUser, FreeDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>())
+        _dailyLimitGuard.TryAcquireAsync(FreeUser, FreeUser.Id.ToString("N"), Arg.Any<string>(), null, Arg.Any<CancellationToken>())
             .ThrowsAsync(new DailyLimitExceededException(20));
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
@@ -322,7 +329,7 @@ public class WhatIfCalculatorTests
 
         // TOCTOU race: limit reddi sonrası release çağrılmaz (acquire fail oldu, geri verilecek bir şey yok)
         await _dailyLimitGuard.DidNotReceive()
-            .ReleaseAsync(FreeUser, FreeDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
+            .ReleaseAsync(Arg.Any<QuotaLease>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -340,29 +347,33 @@ public class WhatIfCalculatorTests
 
         await act.Should().ThrowAsync<AssetNotFoundException>();
         await _dailyLimitGuard.Received(1)
-            .ReleaseAsync(FreeUser, FreeDeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
+            .ReleaseAsync(Arg.Any<QuotaLease>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task CalculateAsync_UnknownDevice_PassesNullUserToGuard()
+    public async Task CalculateAsync_MissingAuthenticatedPrincipal_ThrowsBeforeGuard()
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
-        _deviceContext.DeviceId.Returns(DeviceId);
-        await _sut.CalculateAsync(request, CancellationToken.None);
+        _principalContext.PrincipalId.Returns(Guid.Parse("cccccccc-0000-4000-8000-000000000001"));
 
-        await _dailyLimitGuard.Received(1)
-            .TryAcquireAsync(null, DeviceId, Arg.Any<string>(), null, Arg.Any<CancellationToken>());
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Authenticated installation principal is missing.");
+        await _dailyLimitGuard.DidNotReceive().TryAcquireAsync(
+            Arg.Any<User?>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<int?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task CalculateAsync_RedisDownForLimitCheck_StillCalculates()
+    public async Task CalculateAsync_QuotaLeaseAcquired_Calculates()
     {
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
-        // DailyLimitGuard Redis hatalarını kendi içinde yutar (fail-open).
-        // Varsayılan mock davranışı: exception fırlatmaz.
+        // Guard mock'u başarılı no-op lease döndürür; Redis failure davranışı
+        // DailyLimitGuardTests'te fail-closed olarak ayrıca doğrulanır.
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
         var act = () => _sut.CalculateAsync(request, CancellationToken.None);
@@ -373,27 +384,181 @@ public class WhatIfCalculatorTests
     // ── Cache ────────────────────────────────────────────────────────────────
 
     [Fact]
+    public async Task CalculateAndReverseAsync_InformationLogs_ContainBucketsButNoExactFinancialAmounts()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        var logger = new TestLogger<WhatIfCalculator>();
+        var options = Microsoft.Extensions.Options.Options.Create(new PlanOptions
+        {
+            Free = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } },
+            Premium = new TierOptions { Features = new FeatureOptions { PriceHistoryMonths = 0 } },
+        });
+        var sut = new WhatIfCalculator(
+            _assetService,
+            _scenarioRepository,
+            _inflationRepository,
+            _dailyLimitGuard,
+            _principalContext,
+            _timeProvider,
+            _cache,
+            _assetNameLocalizer,
+            options,
+            _localizer,
+            logger);
+        const decimal investmentSentinel = 8_765_432m;
+        const decimal targetSentinel = 7_654_321m;
+
+        var calculation = await sut.CalculateAsync(
+            MakeRequest("USDTRY", BuyDate, SellDate, investmentSentinel, "try"),
+            CancellationToken.None);
+        var reverse = await sut.CalculateReverseAsync(
+            MakeReverseRequest("USDTRY", BuyDate, SellDate, targetSentinel, "try"),
+            CancellationToken.None);
+
+        var entries = logger.Entries
+            .Where(entry => entry.Level == Microsoft.Extensions.Logging.LogLevel.Information)
+            .ToArray();
+        entries.Should().HaveCount(2);
+        entries.Any(entry =>
+                entry.Properties.TryGetValue("AmountBucket", out var value) && Equals(value, "1M+"))
+            .Should().BeTrue();
+        entries.Any(entry =>
+                entry.Properties.TryGetValue("TargetAmountBucket", out var value) && Equals(value, "1M+"))
+            .Should().BeTrue();
+
+        var forbiddenAmounts = new decimal[]
+        {
+            investmentSentinel,
+            calculation.InitialValueTry,
+            calculation.FinalValueTry,
+            calculation.ProfitLossTry,
+            calculation.ProfitLossPercent,
+            targetSentinel,
+            reverse.RequiredInvestmentTry,
+            reverse.TargetValueTry,
+            reverse.ProfitLossTry,
+            reverse.ProfitLossPercent,
+        };
+        entries.SelectMany(entry => entry.Properties.Values)
+            .OfType<decimal>()
+            .Intersect(forbiddenAmounts)
+            .Should().BeEmpty();
+        entries.Should().OnlyContain(entry =>
+            !entry.Message.Contains("8765432", StringComparison.Ordinal)
+            && !entry.Message.Contains("7654321", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CalculateAsync_CacheHit_DoesNotCallAssetService()
     {
-        var cached = new WhatIfResponse(
-            AssetSymbol: "USDTRY", AssetDisplayName: "Dolar/TL",
-            BuyDate: BuyDate, SellDate: SellDate,
-            BuyPrice: 5.95m, SellPrice: 8.50m,
-            UnitsAcquired: 1m, InitialValueTry: 5.95m, FinalValueTry: 8.50m,
-            ProfitLossTry: 2.55m, ProfitLossPercent: 42.86m, IsProfit: true,
-            PriceHistory: Array.Empty<PriceHistoryPoint>(),
-            CumulativeInflationPercent: null, RealProfitLossPercent: null,
-            InflationDataAsOf: null, ActualBuyDate: null, ActualSellDate: null);
-
-        _cache.TryGetAsync<WhatIfResponse>(Arg.Any<string>(), Arg.Any<CancellationToken>())
-              .Returns(cached);
+        var cached = CompleteWhatIfResponse();
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1m, "units");
+        _cache.TryGetAsync<WhatIfCacheEntry>(Arg.Any<string>(), Arg.Any<CancellationToken>())
+              .Returns(WhatIfCacheEntry.Create(
+                  "USDTRY", BuyDate, SellDate, 1m, "units", false,
+                  System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName,
+                  cached,
+                  Catalog));
+
         var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.BuyPrice.Should().Be(5.95m);
-        await _assetService.DidNotReceive().GetPriceAsync(
+        await _assetService.DidNotReceive().GetNearestPriceAsync(
             Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("symbol")]
+    [InlineData("date")]
+    [InlineData("amount")]
+    [InlineData("type")]
+    [InlineData("inflation")]
+    public async Task CalculateAsync_CurrentKeyWrongRequestEnvelope_IsCacheMiss(string mutation)
+    {
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1m, "units");
+        var entry = new WhatIfCacheEntry(
+            "USDTRY", BuyDate, SellDate, 1m, "units", false,
+            System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName,
+            CompleteWhatIfResponse(),
+            Catalog.Revision,
+            CatalogHash);
+        entry = mutation switch
+        {
+            "symbol" => entry with { Symbol = "EURTRY" },
+            "date" => entry with { BuyDate = BuyDate.AddDays(-1) },
+            "amount" => entry with { Amount = 999m },
+            "type" => entry with { AmountType = "try" },
+            "inflation" => entry with { IncludeInflation = true },
+            _ => throw new InvalidOperationException("unknown_test_mutation"),
+        };
+        _cache.TryGetAsync<WhatIfCacheEntry>(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(entry);
+        SetupPrices(5.95m, 8.50m);
+
+        var result = await _sut.CalculateAsync(request, CancellationToken.None);
+
+        result.AssetSymbol.Should().Be("USDTRY");
+        await _assetService.Received(2).GetNearestPriceAsync(
+            "USDTRY", Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_ValidRequestEnvelope_SkipsExpensiveCalls()
+    {
+        var response = CompleteReverseWhatIfResponse();
+        _cache.TryGetAsync<ReverseWhatIfCacheEntry>(
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(ReverseWhatIfCacheEntry.Create(
+                "USDTRY", BuyDate, SellDate, 1m, "units", false,
+                System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName,
+                response,
+                Catalog));
+
+        var result = await _sut.CalculateReverseAsync(
+            MakeReverseRequest("USDTRY", BuyDate, SellDate, 1m, "units"),
+            CancellationToken.None);
+
+        result.Should().BeSameAs(response);
+        await _assetService.DidNotReceive().GetNearestPriceAsync(
+            Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("symbol")]
+    [InlineData("date")]
+    [InlineData("amount")]
+    [InlineData("type")]
+    [InlineData("inflation")]
+    public async Task CalculateReverseAsync_CurrentKeyWrongRequestEnvelope_IsCacheMiss(
+        string mutation)
+    {
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1m, "units");
+        var entry = new ReverseWhatIfCacheEntry(
+            "USDTRY", BuyDate, SellDate, 1m, "units", false,
+            System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName,
+            CompleteReverseWhatIfResponse(),
+            Catalog.Revision,
+            CatalogHash);
+        entry = mutation switch
+        {
+            "symbol" => entry with { Symbol = "EURTRY" },
+            "date" => entry with { SellDate = SellDate.AddDays(1) },
+            "amount" => entry with { TargetAmount = 999m },
+            "type" => entry with { TargetAmountType = "try" },
+            "inflation" => entry with { IncludeInflation = true },
+            _ => throw new InvalidOperationException("unknown_test_mutation"),
+        };
+        _cache.TryGetAsync<ReverseWhatIfCacheEntry>(
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(entry);
+        SetupPrices(5.95m, 8.50m);
+
+        var result = await _sut.CalculateReverseAsync(request, CancellationToken.None);
+
+        result.AssetSymbol.Should().Be("USDTRY");
+        await _assetService.Received(2).GetNearestPriceAsync(
+            "USDTRY", Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
     }
 
     // ── Symbol Normalizasyon ─────────────────────────────────────────────────
@@ -442,12 +607,8 @@ public class WhatIfCalculatorTests
         SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
 
         var points = Enumerable.Range(0, 100)
-            .Select(i => new PricePoint
-            {
-                AssetId   = AssetId,
-                PriceDate = BuyDate.AddDays(i),
-                Close     = 5.95m + i * 0.02m
-            })
+            .Select(i => AuthorityTestData.FinalPrice(
+                BuyDate.AddDays(i), 5.95m + i * 0.02m, AssetId))
             .ToList();
 
         _assetService.GetPriceRangeAsync(
@@ -494,6 +655,56 @@ public class WhatIfCalculatorTests
         var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
         result.PriceHistory.Should().BeEmpty();
+        result.Data!.DataStatus.Should().Be(AuthorityDataStatuses.Degraded);
+        await _cache.DidNotReceive().TrySetAsync(
+            Arg.Any<string>(), Arg.Any<WhatIfCacheEntry>(), Arg.Any<TimeSpan>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateAsync_TransientDegraded_IsNotCachedAndRecoveryRecomputesComplete()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        var attempts = 0;
+        var recovered = new[] { AuthorityTestData.FinalPrice(BuyDate, 5.95m, AssetId) };
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(_ => attempts++ == 0
+                ? throw new TimeoutException("transient")
+                : recovered);
+        var request = MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+
+        var degraded = await _sut.CalculateAsync(request, CancellationToken.None);
+        var complete = await _sut.CalculateAsync(request, CancellationToken.None);
+
+        degraded.Data!.DataStatus.Should().Be(AuthorityDataStatuses.Degraded);
+        complete.Data!.DataStatus.Should().Be(AuthorityDataStatuses.Complete);
+        complete.PriceHistory.Should().ContainSingle();
+        await _assetService.Received(2).GetPriceRangeAsync(
+            "USDTRY", BuyDate, SellDate, PriceIntervals.Daily, Arg.Any<CancellationToken>());
+        await _cache.Received(1).TrySetAsync(
+            Arg.Any<string>(), Arg.Any<WhatIfCacheEntry>(), Arg.Any<TimeSpan>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateAsync_UnexpectedOptionalDependencyFailure_PropagatesAndDoesNotCache()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("programmer-contract-drift"));
+
+        var act = () => _sut.CalculateAsync(
+            MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try"), CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("programmer-contract-drift");
+        await _cache.DidNotReceive().TrySetAsync(
+            Arg.Any<string>(), Arg.Any<WhatIfCacheEntry>(), Arg.Any<TimeSpan>(),
+            Arg.Any<CancellationToken>());
     }
 
     // ── Yardımcı Metodlar ────────────────────────────────────────────────────
@@ -501,12 +712,8 @@ public class WhatIfCalculatorTests
     private void SetupPriceRange(int count)
     {
         var points = Enumerable.Range(0, count)
-            .Select(i => new PricePoint
-            {
-                AssetId   = AssetId,
-                PriceDate = BuyDate.AddDays(i),
-                Close     = 5.95m + i * 0.01m
-            })
+            .Select(i => AuthorityTestData.FinalPrice(
+                BuyDate.AddDays(i), 5.95m + i * 0.01m, AssetId))
             .ToList();
 
         _assetService.GetPriceRangeAsync(
@@ -524,20 +731,12 @@ public class WhatIfCalculatorTests
         var effectiveSell = sellDate ?? SellDate;
 
         _assetService.GetNearestPriceAsync(Arg.Any<string>(), effectiveBuy, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint
-                     {
-                         AssetId   = AssetId,
-                         PriceDate = actualBuyDate ?? effectiveBuy,
-                         Close     = buyPrice
-                     });
+                     .Returns(AuthorityTestData.FinalPrice(
+                         actualBuyDate ?? effectiveBuy, buyPrice, AssetId));
 
         _assetService.GetNearestPriceAsync(Arg.Any<string>(), effectiveSell, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint
-                     {
-                         AssetId   = AssetId,
-                         PriceDate = actualSellDate ?? effectiveSell,
-                         Close     = sellPrice
-                     });
+                     .Returns(AuthorityTestData.FinalPrice(
+                         actualSellDate ?? effectiveSell, sellPrice, AssetId));
 
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(effectiveSell);
@@ -546,7 +745,7 @@ public class WhatIfCalculatorTests
         if (today != effectiveSell)
         {
             _assetService.GetNearestPriceAsync(Arg.Any<string>(), today, Arg.Any<CancellationToken>())
-                         .Returns(new PricePoint { AssetId = AssetId, PriceDate = today, Close = sellPrice });
+                         .Returns(AuthorityTestData.FinalPrice(today, sellPrice, AssetId));
         }
     }
 
@@ -607,7 +806,8 @@ public class WhatIfCalculatorTests
         var sellMonth = new DateOnly(SellDate.Year, SellDate.Month, 1);
         _inflationRepository
             .GetIndexValuesAsync(BuyDate, SellDate, Arg.Any<CancellationToken>())
-            .Returns((100m, buyMonth, 150m, sellMonth));
+            .Returns((AuthorityTestData.FinalCpi(buyMonth, 100m),
+                AuthorityTestData.FinalCpi(sellMonth, 150m)));
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
         var result  = await _sut.CalculateAsync(request, CancellationToken.None);
@@ -631,7 +831,8 @@ public class WhatIfCalculatorTests
 
         _inflationRepository
             .GetIndexValuesAsync(BuyDate, SellDate, Arg.Any<CancellationToken>())
-            .Returns((100m, buyMonth, 140m, laggedMonth));
+            .Returns((AuthorityTestData.FinalCpi(buyMonth, 100m),
+                AuthorityTestData.FinalCpi(laggedMonth, 140m)));
 
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 10_000m, "try", includeInflation: true);
         var result  = await _sut.CalculateAsync(request, CancellationToken.None);
@@ -716,6 +917,88 @@ public class WhatIfCalculatorTests
         result.TargetValueTry.Should().NotBe(100_000m); // ham echo olmadığını kanıtlar
         Math.Round(result.UnitsAcquired * result.SellPrice, 2, MidpointRounding.AwayFromZero)
             .Should().Be(result.TargetValueTry);
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_TransientDegraded_IsNotCachedAndRecoveryRecomputesComplete()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        var attempts = 0;
+        var recovered = new[] { AuthorityTestData.FinalPrice(BuyDate, 5.95m, AssetId) };
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(_ => attempts++ == 0
+                ? throw new TimeoutException("transient")
+                : recovered);
+        var request = MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try");
+
+        var degraded = await _sut.CalculateReverseAsync(request, CancellationToken.None);
+        var complete = await _sut.CalculateReverseAsync(request, CancellationToken.None);
+
+        degraded.Data!.DataStatus.Should().Be(AuthorityDataStatuses.Degraded);
+        complete.Data!.DataStatus.Should().Be(AuthorityDataStatuses.Complete);
+        complete.PriceHistory.Should().ContainSingle();
+        await _assetService.Received(2).GetPriceRangeAsync(
+            "USDTRY", BuyDate, SellDate, PriceIntervals.Daily, Arg.Any<CancellationToken>());
+        await _cache.Received(1).TrySetAsync(
+            Arg.Any<string>(), Arg.Any<ReverseWhatIfCacheEntry>(), Arg.Any<TimeSpan>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateReverseAsync_UnexpectedOptionalDependencyFailure_PropagatesAndDoesNotCache()
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("programmer-contract-drift"));
+
+        var act = () => _sut.CalculateReverseAsync(
+            MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try"),
+            CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("programmer-contract-drift");
+        await _cache.DidNotReceive().TrySetAsync(
+            Arg.Any<string>(), Arg.Any<ReverseWhatIfCacheEntry>(), Arg.Any<TimeSpan>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OptionalDependencyCancellation_ForwardAndReverse_PropagatesAndDoesNotCache(
+        bool reverse)
+    {
+        SetupPrices(buyPrice: 5.95m, sellPrice: 8.50m);
+        _assetService.GetPriceRangeAsync(
+                Arg.Any<string>(), Arg.Any<DateOnly>(), Arg.Any<DateOnly>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new OperationCanceledException("cancelled"));
+
+        Func<Task> act = reverse
+            ? () => _sut.CalculateReverseAsync(
+                MakeReverseRequest("USDTRY", BuyDate, SellDate, 1000m, "try"),
+                CancellationToken.None)
+            : () => _sut.CalculateAsync(
+                MakeRequest("USDTRY", BuyDate, SellDate, 1000m, "try"),
+                CancellationToken.None);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        if (reverse)
+        {
+            await _cache.DidNotReceive().TrySetAsync(
+                Arg.Any<string>(), Arg.Any<ReverseWhatIfCacheEntry>(), Arg.Any<TimeSpan>(),
+                Arg.Any<CancellationToken>());
+        }
+        else
+        {
+            await _cache.DidNotReceive().TrySetAsync(
+                Arg.Any<string>(), Arg.Any<WhatIfCacheEntry>(), Arg.Any<TimeSpan>(),
+                Arg.Any<CancellationToken>());
+        }
     }
 
     [Fact]
@@ -888,14 +1171,14 @@ public class WhatIfCalculatorTests
 
         // USDTRY 5.95 → 8.50 (~%43 kâr)
         _assetService.GetNearestPriceAsync("USDTRY", BuyDate, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint { AssetId = AssetId, PriceDate = BuyDate, Close = 5.95m });
+                     .Returns(AuthorityTestData.FinalPrice(BuyDate, 5.95m, AssetId));
         _assetService.GetNearestPriceAsync("USDTRY", SellDate, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint { AssetId = AssetId, PriceDate = SellDate, Close = 8.50m });
+                     .Returns(AuthorityTestData.FinalPrice(SellDate, 8.50m, AssetId));
         // BTC 10000 → 30000 (%200 kâr)
         _assetService.GetNearestPriceAsync("BTC", BuyDate, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint { AssetId = btc.Id, PriceDate = BuyDate, Close = 10_000m });
+                     .Returns(AuthorityTestData.FinalPrice(BuyDate, 10_000m, btc.Id));
         _assetService.GetNearestPriceAsync("BTC", SellDate, Arg.Any<CancellationToken>())
-                     .Returns(new PricePoint { AssetId = btc.Id, PriceDate = SellDate, Close = 30_000m });
+                     .Returns(AuthorityTestData.FinalPrice(SellDate, 30_000m, btc.Id));
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(SellDate);
 
@@ -936,7 +1219,7 @@ public class WhatIfCalculatorTests
                 if (Interlocked.Increment(ref inFlight) > 1) overlapped = true;
                 await Task.Delay(25);
                 Interlocked.Decrement(ref inFlight);
-                return ((decimal?)null, (DateOnly?)null, (decimal?)null, (DateOnly?)null);
+                return ((InflationIndexObservation?)null, (InflationIndexObservation?)null);
             });
 
         var request = new CompareRequest(
@@ -977,9 +1260,9 @@ public class WhatIfCalculatorTests
             };
             _assetService.GetBySymbolAsync(sym, Arg.Any<CancellationToken>()).Returns(asset);
             _assetService.GetNearestPriceAsync(sym, BuyDate, Arg.Any<CancellationToken>())
-                         .Returns(new PricePoint { AssetId = asset.Id, PriceDate = BuyDate,  Close = 10m  });
+                         .Returns(AuthorityTestData.FinalPrice(BuyDate, 10m, asset.Id));
             _assetService.GetNearestPriceAsync(sym, SellDate, Arg.Any<CancellationToken>())
-                         .Returns(new PricePoint { AssetId = asset.Id, PriceDate = SellDate, Close = sell });
+                         .Returns(AuthorityTestData.FinalPrice(SellDate, sell, asset.Id));
         }
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(SellDate);
@@ -1022,9 +1305,9 @@ public class WhatIfCalculatorTests
         foreach (var (sym, id) in new[] { ("AAA", assetA.Id), ("BBB", assetB.Id) })
         {
             _assetService.GetNearestPriceAsync(sym, BuyDate, Arg.Any<CancellationToken>())
-                         .Returns(new PricePoint { AssetId = id, PriceDate = BuyDate,  Close = 10m });
+                         .Returns(AuthorityTestData.FinalPrice(BuyDate, 10m, id));
             _assetService.GetNearestPriceAsync(sym, SellDate, Arg.Any<CancellationToken>())
-                         .Returns(new PricePoint { AssetId = id, PriceDate = SellDate, Close = 15m });
+                         .Returns(AuthorityTestData.FinalPrice(SellDate, 15m, id));
         }
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(SellDate);
@@ -1128,10 +1411,43 @@ public class WhatIfCalculatorTests
     {
         return new WhatIfCalculator(
             _assetService, _scenarioRepository, _inflationRepository,
-            _dailyLimitGuard, _deviceContext, _timeProvider, _cache, _assetNameLocalizer,
+            _dailyLimitGuard, _principalContext, _timeProvider, _cache, _assetNameLocalizer,
             Microsoft.Extensions.Options.Options.Create(planOptions),
             _localizer, NullLogger<WhatIfCalculator>.Instance);
     }
+
+    private static CalculationDataResponse CompleteCalculationData() =>
+        AuthorityDataResponseFactory.Calculation(
+            [new ObservationAuthorityValue(
+                ProviderSources.Tcmb,
+                ObservationPriceKinds.OfficialReference,
+                new DateTimeOffset(BuyDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero),
+                1)],
+            [],
+            inflationRequested: false,
+            warnings: []);
+
+    private static WhatIfResponse CompleteWhatIfResponse() => new(
+        AssetSymbol: "USDTRY", AssetDisplayName: "Dolar/TL",
+        BuyDate: BuyDate, SellDate: SellDate,
+        BuyPrice: 5.95m, SellPrice: 8.50m,
+        UnitsAcquired: 1m, InitialValueTry: 5.95m, FinalValueTry: 8.50m,
+        ProfitLossTry: 2.55m, ProfitLossPercent: 42.86m, IsProfit: true,
+        PriceHistory: Array.Empty<PriceHistoryPoint>(),
+        CumulativeInflationPercent: null, RealProfitLossPercent: null,
+        InflationDataAsOf: null, ActualBuyDate: null, ActualSellDate: null,
+        Data: CompleteCalculationData());
+
+    private static ReverseWhatIfResponse CompleteReverseWhatIfResponse() => new(
+        AssetSymbol: "USDTRY", AssetDisplayName: "Dolar/TL",
+        BuyDate: BuyDate, SellDate: SellDate,
+        BuyPrice: 5.95m, SellPrice: 8.50m,
+        RequiredInvestmentTry: 5.95m, UnitsAcquired: 1m, TargetValueTry: 8.50m,
+        ProfitLossTry: 2.55m, ProfitLossPercent: 42.86m, IsProfit: true,
+        PriceHistory: Array.Empty<PriceHistoryPoint>(),
+        CumulativeInflationPercent: null, RealProfitLossPercent: null,
+        InflationDataAsOf: null, ActualBuyDate: null, ActualSellDate: null,
+        Data: CompleteCalculationData());
 
     private static WhatIfRequest MakeRequest(
         string symbol, DateOnly buyDate, DateOnly? sellDate,

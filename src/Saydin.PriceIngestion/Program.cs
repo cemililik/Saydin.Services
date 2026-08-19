@@ -6,6 +6,7 @@ using OpenTelemetry.Trace;
 using Serilog;
 using Serilog.Events;
 using Serilog.Sinks.OpenTelemetry;
+using Saydin.DatabaseSecurity;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Extensions;
 using Saydin.PriceIngestion.Repositories;
@@ -23,6 +24,9 @@ Log.Logger = new LoggerConfiguration()
 try
 {
     var builder = Host.CreateApplicationBuilder(args);
+    // Provider credentials are validated before DB authentication, window planning,
+    // hosted-service construction or any outbound HTTP can occur.
+    ProviderStartupValidator.Validate(builder.Configuration);
 
     // ─── Serilog ─────────────────────────────────────────────────────────────
     builder.Services.AddSerilog((services, cfg) =>
@@ -119,18 +123,25 @@ try
         .AddSaydinResilience();
 
     // ─── EF Core ─────────────────────────────────────────────────────────────
-    var pgConnection = builder.Configuration.GetConnectionString("Postgres")
-        ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
+    var runtimeDatabase = RuntimeDatabaseOptions.FromEnvironment(
+        LoginPurpose.Ingestion, RuntimeDatabasePooling.Service);
+    var npgsqlDataSource = await RuntimeDatabase.OpenVerifiedDataSourceAsync(
+        runtimeDatabase,
+        dataSource => dataSource.MapEnum<AssetCategory>("asset_category"));
 
     builder.Services.AddDbContextFactory<SaydinDbContext>(options =>
-        options.UseNpgsql(pgConnection, npgsql =>
+        options.UseNpgsql(npgsqlDataSource, npgsql =>
             npgsql.MapEnum<AssetCategory>("asset_category"))
                .UseSnakeCaseNamingConvention());
+    builder.Services.AddSingleton(npgsqlDataSource);
 
     // ─── Adapters & Repositories ──────────────────────────────────────────────
     builder.Services.AddSingleton<IPriceIngestionRepository, PriceIngestionRepository>();
-    builder.Services.AddSingleton<IInflationIngestionRepository, InflationIngestionRepository>();
-    builder.Services.AddSingleton<IIngestionJobRepository, IngestionJobRepository>();
+    builder.Services.AddSingleton(TimeProvider.System);
+    builder.Services.AddSingleton<IProcessExitCodeSink, EnvironmentProcessExitCodeSink>();
+    builder.Services.AddSingleton<IIngestionPersistenceFaultInjector, NoopIngestionPersistenceFaultInjector>();
+    builder.Services.AddSingleton<IIngestionFreshnessTelemetry, IngestionFreshnessTelemetry>();
+    builder.Services.AddSingleton<IIngestionWindowRepository, IngestionWindowRepository>();
     builder.Services.AddSingleton<TcmbAdapter>();
     builder.Services.AddSingleton<CoinGeckoAdapter>();
     builder.Services.AddSingleton<OpenExchangeRatesAdapter>();
@@ -143,17 +154,31 @@ try
     builder.Services.AddSingleton<OpenExchangeRatesWorker>();
     builder.Services.AddSingleton<TwelveDataWorker>();
     builder.Services.AddSingleton<EvdsInflationWorker>();
+    builder.Services.AddHostedService<IngestionFreshnessHydrationService>();
     builder.Services.AddHostedService<IngestionOrchestrator>();
     builder.Services.AddHostedService<Saydin.PriceIngestion.BackgroundServices.LivenessHeartbeatService>();
+    builder.Services.Configure<HostOptions>(options =>
+        options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.StopHost);
 
     var host = builder.Build();
 
     Log.Information("Saydin.PriceIngestion başlatılıyor");
     await host.RunAsync();
 }
+catch (DatabaseSecurityRejectedException exception)
+{
+    Log.Fatal("Saydin.PriceIngestion veritabanı güvenlik sınırında reddedildi: {Code}", exception.Code);
+    Environment.ExitCode = 78;
+}
+catch (ProviderStartupRejectedException exception)
+{
+    Log.Fatal("Saydin.PriceIngestion provider startup contract rejected: {Code}", exception.Code);
+    Environment.ExitCode = 78;
+}
 catch (Exception ex)
 {
     Log.Fatal(ex, "Saydin.PriceIngestion beklenmedik şekilde sonlandı");
+    Environment.ExitCode = 1;
 }
 finally
 {

@@ -197,4 +197,13 @@ public class EvdsInflationMapperTests
 
         result[0].IndexValue.Should().Be(2819.65m);
     }
+
+    [Fact]
+    public void Map_NonPositiveIndex_IsPermanentContractFailure()
+    {
+        const string json = """{"items":[{"Tarih":"2025-1","TP_FG_J0":"0"}]}""";
+        var act = () => EvdsInflationMapper.Map(json);
+        act.Should().Throw<Saydin.PriceIngestion.Adapters.ProviderContractException>()
+            .Which.Code.Should().Be("contract_index_value_invalid");
+    }
 }

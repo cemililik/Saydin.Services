@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Saydin.Api.Services;
@@ -15,12 +14,13 @@ namespace Saydin.Api.Helpers;
 public sealed class ActivityLogBuilder
 {
     // Sonar S1192: "unknown" literal 4 yerde tekrarlıyordu — tek sabite indirgendi.
-    // Action whitelist'ine düşmeyen action veya DeviceId fallback'i için kullanılır.
+    // Action whitelist'ine düşmeyen action veya principal pseudonym fallback'i için kullanılır.
     private const string UnknownFallback = "unknown";
 
-    private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private readonly HttpContext _httpContext;
     private readonly IGeoIpResolver? _geoIpResolver;
+    private readonly TimeProvider _timeProvider;
+    private readonly long _startedTimestamp;
 
     private Guid? _userId;
     private string? _action;
@@ -28,10 +28,15 @@ public sealed class ActivityLogBuilder
     private short _statusCode = 200;
     private string? _errorCode;
 
-    public ActivityLogBuilder(HttpContext httpContext, IGeoIpResolver? geoIpResolver = null)
+    public ActivityLogBuilder(
+        HttpContext httpContext,
+        IGeoIpResolver? geoIpResolver = null,
+        TimeProvider? timeProvider = null)
     {
         _httpContext = httpContext;
         _geoIpResolver = geoIpResolver;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _startedTimestamp = _timeProvider.GetTimestamp();
     }
 
     public ActivityLogBuilder WithAction(string action)
@@ -67,10 +72,15 @@ public sealed class ActivityLogBuilder
         return this;
     }
 
+    public ActivityLogBuilder WithResponseStatus(short statusCode)
+    {
+        _statusCode = statusCode;
+        _errorCode ??= ActivityAuditOutcome.ErrorCode(statusCode);
+        return this;
+    }
+
     public ActivityLog Build()
     {
-        _stopwatch.Stop();
-
         // Build çağrılmadan önce WithAction zorunludur (ActivityLog.Action NOT NULL).
         // ActivityLogMiddleware Send'i otomatik çağırdığı için sessizce 'unknown' yazmak
         // yerine bug'ı görünür hâle getiriyoruz.
@@ -78,10 +88,9 @@ public sealed class ActivityLogBuilder
             throw new InvalidOperationException(
                 "ActivityLogBuilder.Build çağrılmadan önce WithAction(...) ile bir action belirlenmelidir.");
 
-        // LOGR-008: DeviceId truncation — 200 char üstü payload tüm batch'i drop
-        // edebilirdi (CHECK + bisection retry maliyeti). Pre-validation burada.
-        var deviceId = _httpContext.Items[Endpoints.EndpointExtensions.DeviceIdItemKey] as string
-                       ?? _httpContext.Request.Headers["X-Device-ID"].FirstOrDefault()
+        // The legacy column name is retained in storage, but its value is now only
+        // a server-issued principal pseudonym. Client headers never populate it.
+        var deviceId = _httpContext.Items[Endpoints.EndpointExtensions.PrincipalActivityIdItemKey] as string
                        ?? UnknownFallback;
         deviceId = TruncateSurrogateSafe(deviceId, ActivityLogLimits.DeviceIdMaxLength) ?? UnknownFallback;
 
@@ -133,8 +142,10 @@ public sealed class ActivityLogBuilder
             StatusCode = _statusCode,
             // F2.1-9 ([C-A-29]): long olarak tut — int cast 24.8 günden uzun sürede
             // overflow yapardı; migration 011 ile DB kolonu BIGINT'e genişler.
-            DurationMs = _stopwatch.ElapsedMilliseconds,
+            DurationMs = Math.Max(0,
+                (long)_timeProvider.GetElapsedTime(_startedTimestamp).TotalMilliseconds),
             ErrorCode  = TruncateSurrogateSafe(_errorCode, ActivityLogLimits.ErrorCodeMaxLength),
+            CreatedAt = _timeProvider.GetUtcNow(),
         };
     }
 

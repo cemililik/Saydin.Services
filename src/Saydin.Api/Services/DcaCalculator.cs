@@ -17,7 +17,7 @@ public sealed class DcaCalculator(
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
     IDailyLimitGuard dailyLimitGuard,
-    IDeviceContext deviceContext,
+    IInstallationPrincipalContext principalContext,
     TimeProvider timeProvider,
     IRedisCacheHelper cache,
     IAssetNameLocalizer assetNameLocalizer,
@@ -26,6 +26,7 @@ public sealed class DcaCalculator(
     ILogger<DcaCalculator> logger) : IDcaCalculator
 {
     private const string DcaUsageKeyPrefix   = "usage:dca:";
+    private const string RealReturnMethodCashflowCpiTerminal = "cashflow_cpi_terminal_v1";
     private const int    MaxChartPoints      = 60;
     // DoS koruması: 10 yıl haftalık ≈ 520 alma noktası. Bunun üzeri ya yanlış
     // tarih aralığı ya da malicious — anonim free kullanıcının tek istekle
@@ -40,8 +41,8 @@ public sealed class DcaCalculator(
             throw new ValidationException(
                 string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
 
-        // F2.2-3: device id artık scoped IDeviceContext'ten — RequireDeviceId filter doğrular/doldurur.
-        var deviceId = deviceContext.DeviceId;
+        // Quota keys use only the authenticated server-issued principal UUID.
+        var usageIdentity = principalContext.PrincipalId.ToString("N");
 
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
@@ -52,8 +53,9 @@ public sealed class DcaCalculator(
             throw new ValidationException(
                 localizer["AmountMustBePositive"], field: nameof(request.PeriodicAmount));
 
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        var features = options.Value.GetTierOptions(user?.Tier).Features;
+        var user = await scenarioRepository.GetUserByIdAsync(principalContext.PrincipalId, ct)
+            ?? throw new InvalidOperationException("Authenticated installation principal is missing.");
+        var features = options.Value.GetTierOptions(user.Tier).Features;
 
         if (!features.Dca)
             throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "dca");
@@ -70,7 +72,8 @@ public sealed class DcaCalculator(
         if (request.IncludeInflation && !features.InflationAdjustment)
             throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
 
-        await dailyLimitGuard.TryAcquireAsync(user, deviceId, DcaUsageKeyPrefix, ct: ct);
+        var lease = await dailyLimitGuard.TryAcquireAsync(
+            user, usageIdentity, DcaUsageKeyPrefix, ct: ct);
 
         try
         {
@@ -78,16 +81,16 @@ public sealed class DcaCalculator(
         }
         catch
         {
-            await TryReleaseAsync(user, deviceId);
+            await TryReleaseAsync(lease);
             throw;
         }
     }
 
-    private async Task TryReleaseAsync(User? user, string deviceId)
+    private async Task TryReleaseAsync(QuotaLease lease)
     {
         try
         {
-            await dailyLimitGuard.ReleaseAsync(user, deviceId, DcaUsageKeyPrefix, ct: CancellationToken.None);
+            await dailyLimitGuard.ReleaseAsync(lease, CancellationToken.None);
         }
         catch (Exception releaseEx)
         {
@@ -123,11 +126,17 @@ public sealed class DcaCalculator(
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
         var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         var amountStr = request.PeriodicAmount.ToString("G", CultureInfo.InvariantCulture);
-        var cacheKey = $"dca:v1:{symbol}:{request.StartDate:yyyy-MM-dd}:{endDate:yyyy-MM-dd}:{amountStr}:{period}:{amountType}{inflationSuffix}:{lang}";
+        var catalog = await assetService.GetCatalogVersionAsync(ct);
+        var cacheKey = AuthorityCacheNamespace.Key(
+            $"catalog:{catalog.Token}:dca:v2:{symbol}:{request.StartDate:yyyy-MM-dd}:{endDate:yyyy-MM-dd}:{amountStr}:{period}:{amountType}{inflationSuffix}:{lang}");
 
-        var cached = await cache.TryGetAsync<DcaResponse>(cacheKey, ct);
+        var cached = await cache.TryGetAsync<DcaCacheEntry>(cacheKey, ct);
+        if (cached is not null && cached.IsValid(
+                symbol, request.StartDate, endDate, request.PeriodicAmount,
+                period, amountType, request.IncludeInflation, lang, catalog))
+            return cached.Response!;
         if (cached is not null)
-            return cached;
+            await cache.TryDeleteAsync(cacheKey, ct);
 
         // ── Asset bilgisi ───────────────────────────────────────────────────
         var asset = await assetService.GetBySymbolAsync(symbol, ct)
@@ -142,12 +151,27 @@ public sealed class DcaCalculator(
 
         // ── Her alım tarihi için hesaplama ──────────────────────────────────
         var purchases      = new List<DcaPurchase>(purchaseDates.Count);
+        // CPI dönemi, kullanıcının planladığı takvim gününden değil gerçekten fiyat
+        // bulunan/alımın gerçekleştiği piyasa gününden türetilir. Aynı piyasa gününe
+        // clip edilen katkılar display satırında birleşse bile burada ayrı nakit akışıdır.
+        var effectiveContributionMonths = new List<DateOnly>(purchaseDates.Count);
+        var priceAuthorities = new List<ObservationAuthorityValue>(purchaseDates.Count + 1);
+        var inflationAuthorities = new List<ObservationAuthorityValue>();
+        var dataWarnings = new List<string>();
         var cumulativeUnits = 0m;
         var cumulativeCost  = 0m;
 
+        // Purchases and the terminal valuation share one final-authority bulk read.
+        // The terminal date is included even when it duplicates the final purchase;
+        // repository ordinality keeps both logical positions stable.
+        var requestedPriceDates = purchaseDates.Append(endDate).ToArray();
+        var pricePoints = await assetService.GetNearestPricesAsync(symbol, requestedPriceDates, ct);
+        var purchaseIndex = 0;
+
         foreach (var purchaseDate in purchaseDates)
         {
-            var pricePoint    = await assetService.GetNearestPriceAsync(symbol, purchaseDate, ct);
+            var pricePoint    = pricePoints[purchaseIndex++];
+            priceAuthorities.Add(FinalObservationAuthority.ToValue(pricePoint));
             var price         = pricePoint.Close;
             // F2.2-23 ([G-B-04]) / SVCR-016: non-positive fiyat → PriceNotFound + data bug log.
             if (price <= 0)
@@ -159,6 +183,8 @@ public sealed class DcaCalculator(
             }
 
             var unitsAcquired = Math.Round(request.PeriodicAmount / price, 6, MidpointRounding.AwayFromZero);
+
+            effectiveContributionMonths.Add(ToMonth(pricePoint.PriceDate));
 
             cumulativeUnits += unitsAcquired;
             cumulativeCost  += request.PeriodicAmount;
@@ -192,7 +218,8 @@ public sealed class DcaCalculator(
         }
 
         // ── Güncel değer ve kâr/zarar ───────────────────────────────────────
-        var latestPricePoint = await assetService.GetNearestPriceAsync(symbol, endDate, ct);
+        var latestPricePoint = pricePoints[^1];
+        priceAuthorities.Add(FinalObservationAuthority.ToValue(latestPricePoint));
         var currentUnitPrice = latestPricePoint.Close;
         // SVCR-004 follow-up: purchase-side ≤0 guard ile asimetri kalktı. Negatif
         // fiyat (data bug) terminalde de reddedilir; aksi halde negatif
@@ -208,7 +235,8 @@ public sealed class DcaCalculator(
 
         var totalUnitsAcquired = Math.Round(cumulativeUnits, 6, MidpointRounding.AwayFromZero);
         var totalInvestedTry   = Math.Round(cumulativeCost, 2, MidpointRounding.AwayFromZero);
-        var currentValueTry    = Math.Round(totalUnitsAcquired * currentUnitPrice, 2, MidpointRounding.AwayFromZero);
+        var terminalPortfolioValue = totalUnitsAcquired * currentUnitPrice;
+        var currentValueTry    = Math.Round(terminalPortfolioValue, 2, MidpointRounding.AwayFromZero);
         var profitLossTry      = currentValueTry - totalInvestedTry;
         var profitLossPercent  = totalInvestedTry == 0
             ? 0m
@@ -221,39 +249,74 @@ public sealed class DcaCalculator(
         // ── Enflasyon düzeltmesi ────────────────────────────────────────────
         decimal?  cumulativeInflationPercent = null;
         decimal?  realProfitLossPercent      = null;
+        decimal?  inflationAdjustedInvestedTry = null;
+        decimal?  realProfitLossTry          = null;
+        string?   realReturnMethod           = null;
+        DateOnly? inflationTerminalMonth     = null;
         DateOnly? inflationDataAsOf          = null;
+        var inflationCalculationComplete = !request.IncludeInflation;
 
         if (request.IncludeInflation)
         {
+            realReturnMethod = RealReturnMethodCashflowCpiTerminal;
+            inflationTerminalMonth = ToMonth(latestPricePoint.PriceDate);
+
             try
             {
-                var (buyIdx, _, sellIdx, sellIdxDate) =
-                    await inflationRepository.GetIndexValuesAsync(request.StartDate, endDate, ct);
+                var requiredMonths = effectiveContributionMonths
+                    .Append(inflationTerminalMonth.Value)
+                    .Distinct()
+                    .ToArray();
+                var indexes = await inflationRepository.GetExactIndexValuesAsync(requiredMonths, ct);
+                var missingMonths = requiredMonths
+                    .Where(month => !indexes.TryGetValue(month, out var index)
+                                    || index.IndexValue <= 0m)
+                    .OrderBy(month => month)
+                    .ToArray();
 
-                if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
+                if (missingMonths.Length == 0)
                 {
+                    inflationAuthorities.AddRange(indexes.Values.Select(index => index.Authority));
+                    var terminalIndex = indexes[inflationTerminalMonth.Value].IndexValue;
+                    var firstContributionIndex = indexes[effectiveContributionMonths[0]].IndexValue;
+
                     cumulativeInflationPercent = Math.Round(
-                        (sellIdx.Value / buyIdx.Value - 1m) * 100, 2, MidpointRounding.AwayFromZero);
+                        (terminalIndex / firstContributionIndex - 1m) * 100m,
+                        2,
+                        MidpointRounding.AwayFromZero);
 
-                    // Fisher denklemi: reel_getiri = (1 + nominal) / (1 + enflasyon) - 1
-                    var nominalFactor   = 1m + profitLossPercent / 100m;
-                    var inflationFactor = 1m + cumulativeInflationPercent.Value / 100m;
+                    // API-04: Her katkıyı kendi exact CPI ayından terminal CPI ayının
+                    // satın alma gücüne taşı. Ara katkılar yuvarlanmaz; TL ve yüzde yalnız
+                    // response sınırında yuvarlanır. Reel P/L ve ROI, iki haneye yuvarlanmış
+                    // CurrentValueTry'dan değil raw terminal portföy değerinden hesaplanır.
+                    var terminalAdjustedCost = effectiveContributionMonths.Sum(
+                        month => request.PeriodicAmount * terminalIndex / indexes[month].IndexValue);
+
+                    inflationAdjustedInvestedTry = Math.Round(
+                        terminalAdjustedCost, 2, MidpointRounding.AwayFromZero);
+                    realProfitLossTry = Math.Round(
+                        terminalPortfolioValue - terminalAdjustedCost,
+                        2,
+                        MidpointRounding.AwayFromZero);
                     realProfitLossPercent = Math.Round(
-                        (nominalFactor / inflationFactor - 1m) * 100, 2, MidpointRounding.AwayFromZero);
-
-                    var expectedSellMonth = new DateOnly(endDate.Year, endDate.Month, 1);
-                    if (sellIdxDate.HasValue && sellIdxDate.Value < expectedSellMonth)
-                        inflationDataAsOf = sellIdxDate;
+                        (terminalPortfolioValue / terminalAdjustedCost - 1m) * 100m,
+                        2,
+                        MidpointRounding.AwayFromZero);
+                    inflationDataAsOf = inflationTerminalMonth;
+                    inflationCalculationComplete = true;
                 }
                 else
                 {
                     logger.LogWarning(
-                        "Enflasyon endeksi bulunamadı: {StartDate} / {EndDate}", request.StartDate, endDate);
+                        "DCA reel getiri hesaplanamadı; exact TÜFE ayları eksik/geçersiz: {MissingMonths}",
+                        string.Join(",", missingMonths.Select(month => month.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))));
+                    dataWarnings.Add(AuthorityDataWarnings.InflationIncomplete);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (OptionalDataFailure.IsExpected(ex))
             {
                 logger.LogWarning(ex, "Enflasyon hesabı başarısız, nominal getiri kullanılıyor");
+                dataWarnings.Add(AuthorityDataWarnings.InflationUnavailable);
             }
         }
 
@@ -283,14 +346,28 @@ public sealed class DcaCalculator(
             RealProfitLossPercent:      realProfitLossPercent,
             InflationDataAsOf:          inflationDataAsOf,
             Purchases:                  purchases,
-            ChartData:                  chartData);
+            ChartData:                  chartData,
+            InflationAdjustedInvestedTry: inflationAdjustedInvestedTry,
+            RealProfitLossTry:            realProfitLossTry,
+            RealReturnMethod:             realReturnMethod,
+            InflationTerminalMonth:       inflationTerminalMonth,
+            Data: AuthorityDataResponseFactory.Calculation(
+                priceAuthorities, inflationAuthorities, request.IncludeInflation, dataWarnings));
 
-        await cache.TrySetAsync(cacheKey, response, TimeSpan.FromHours(1), ct);
+        // Exact CPI seti eksikse nullable reel sözleşme korunur; incomplete sonucu bir
+        // saat cache'leyip yeni yayınlanan TÜFE verisini görünmez kılmayız.
+        if (inflationCalculationComplete)
+            await cache.TrySetAsync(
+                cacheKey,
+                DcaCacheEntry.Create(
+                    symbol, request.StartDate, endDate, request.PeriodicAmount,
+                    period, amountType, request.IncludeInflation, lang, response, catalog),
+                TimeSpan.FromHours(1), ct);
 
         logger.LogInformation(
-            "DCA hesaplandı: {Symbol} {StartDate}→{EndDate} {Period} {Amount} → %{ProfitLossPercent} (reel: %{RealProfitLossPercent})",
-            symbol, request.StartDate, endDate, period, request.PeriodicAmount,
-            profitLossPercent, realProfitLossPercent);
+            "DCA hesaplandı: {Symbol} {StartDate}→{EndDate} {Period} {AmountBucket} → {Outcome} (reel: {RealOutcome})",
+            symbol, request.StartDate, endDate, period, AmountBucket.Coarse(request.PeriodicAmount),
+            TelemetryOutcome.From(profitLossTry), TelemetryOutcome.From(realProfitLossTry));
 
         return response;
     }
@@ -332,4 +409,6 @@ public sealed class DcaCalculator(
 
         return dates;
     }
+
+    private static DateOnly ToMonth(DateOnly date) => new(date.Year, date.Month, 1);
 }

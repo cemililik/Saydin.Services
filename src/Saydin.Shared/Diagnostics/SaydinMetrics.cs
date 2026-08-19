@@ -14,7 +14,7 @@ public static class SaydinMetrics
 
     private static readonly Meter Meter = new(MeterName, "1.0.0");
 
-    /// <summary>Toplam hesaplama sayısı (asset.symbol, user.tier tag'leri ile)</summary>
+    /// <summary>Toplam WhatIf çağrısı (bounded operation/outcome tag'leri ile)</summary>
     public static readonly Counter<long> WhatIfCalculations =
         Meter.CreateCounter<long>(
             "saydin.whatif.calculations.total",
@@ -44,6 +44,58 @@ public static class SaydinMetrics
             description: "EVDS TÜFE ingestion başarısızlıkları (outcome tag'i ile)");
 
     /// <summary>
+    /// Contract-v2 worker'ın provider çağrısından önce reddettiği eksik/stale calendar
+    /// coverage sayısı. Tag'ler: source ve reason (bounded allowlist).
+    /// </summary>
+    public static readonly Counter<long> MarketCalendarNotReady =
+        Meter.CreateCounter<long>(
+            "saydin.ingestion.calendar.not_ready.total",
+            description: "Authoritative market calendar readiness reddi");
+
+    public static readonly Gauge<long> IngestionLastAttemptTimestamp =
+        Meter.CreateGauge<long>(
+            "saydin.ingestion.last_attempt.timestamp.seconds",
+            description: "Son durable ingestion attempt başlangıcının Unix zamanı");
+
+    public static readonly Gauge<long> IngestionLastSuccessTimestamp =
+        Meter.CreateGauge<long>(
+            "saydin.ingestion.last_success.timestamp.seconds",
+            description: "Son authoritative terminal ingestion başarısının Unix zamanı");
+
+    public static readonly Gauge<long> IngestionLag =
+        Meter.CreateGauge<long>(
+            "saydin.ingestion.lag.seconds",
+            unit: "s",
+            description: "Durable başarılı veri horizon'ının DB saatine göre gecikmesi");
+
+    public static readonly Gauge<long> IngestionFailureStreak =
+        Meter.CreateGauge<long>(
+            "saydin.ingestion.failure_streak",
+            description: "Son authoritative başarıdan sonraki durable başarısız attempt sayısı");
+
+    public static readonly Counter<long> IngestionAttempts =
+        Meter.CreateCounter<long>(
+            "saydin.ingestion.attempts.total",
+            description: "Terminal ingestion attempt sayısı");
+
+    public static readonly Histogram<long> IngestionRecords =
+        Meter.CreateHistogram<long>(
+            "saydin.ingestion.records",
+            description: "Attempt başına accepted/rejected kayıt sayısı");
+
+    public static readonly Histogram<double> IngestionAttemptDuration =
+        Meter.CreateHistogram<double>(
+            "saydin.ingestion.attempt.duration.seconds",
+            unit: "s",
+            description: "Durable ingestion attempt süresi");
+
+    public static readonly Gauge<long> MarketCalendarCoverageHorizon =
+        Meter.CreateGauge<long>(
+            "saydin.market_calendar.coverage.horizon.days",
+            unit: "d",
+            description: "Active authoritative calendar release coverage horizon'ı");
+
+    /// <summary>
     /// F2.3-4 ([C-C-22]): Activity log batch yazımının başarısız satır sayısı.
     /// Tag: outcome="retry_exhausted|cancelled". Operasyon ekibi observability
     /// boşluğu için bu sayaca dayanır — sessizce drop edilen log sayısı bilinir.
@@ -62,6 +114,15 @@ public static class SaydinMetrics
         Meter.CreateCounter<long>(
             "saydin.activity_log.queue.drops.total",
             description: "Channel kuyruğu dolduğundan dolayı düşürülen activity log sayısı");
+
+    /// <summary>
+    /// Channel writer tamamlandığı için producer tarafından reddedilen activity log sayısı.
+    /// Capacity drop değildir. Tag'ler: action (allowlist), reason="writer_completed".
+    /// </summary>
+    public static readonly Counter<long> ActivityLogQueueRejectedWrites =
+        Meter.CreateCounter<long>(
+            "saydin.activity_log.queue.rejected_writes.total",
+            description: "Tamamlanmış channel writer tarafından reddedilen activity log sayısı");
 
     /// <summary>
     /// LOGR-028 follow-up: <c>ActivityLogBuilder</c> pre-validation aşamasında

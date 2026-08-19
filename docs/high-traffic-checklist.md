@@ -13,9 +13,9 @@
   - `maxmemory` ve `maxmemory-policy` (önerilen: `allkeys-lru`) konfigürasyonu
   - Tetikleyici: Redis bellek kullanımı %70'i aşıyorsa
 
-- [ ] **Usage key yapısı gözden geçirilmeli**
-  - Şu an: `usage:whatif:{userId}:{date}` ve `usage:dca:{userId}:{date}` — kullanıcı başına günlük key
-  - Yüksek kullanıcı sayısında (>500k aktif/gün) Lua script yükü izlenmeli
+- [ ] **Quota lease hash yükü izlenmeli**
+  - Redis `TIME` tabanlı günlük hash; `count` ve 128-bit nonce-bağlı lease field'larını 48 saat tutar.
+  - Yüksek kullanıcı sayısında (>500k aktif/gün) atomik Lua/lease field yükü izlenmeli
   - Tetikleyici: Günlük aktif kullanıcı 100k'yı aşarsa
 
 - [ ] **Redis Cluster veya Redis Sentinel kurulumu**
@@ -26,8 +26,9 @@
   - `StackExchange.Redis` varsayılan pool yeterli olup olmadığı kontrol edilmeli
   - Tetikleyici: P99 latency artışı veya timeout hataları görülürse
 
-- [ ] **Cache key namespace'leri versiyonlanmalı**
-  - Şu an `whatif:v3:...`, `whatif:reverse:v2:...`, `dca:v1:...` formatında — breaking değişiklikte versiyon artırılmalı
+- [x] **Cache key namespace'leri ve veri otoritesi versiyonlandı**
+  - Data-bearing key'ler `authority-final-v1` revision'ı ile catalog revision+SHA ve request
+    identity'sini bağlar; eski/malformed envelope yalnız miss sayılır.
   - Tetikleyici: Cache yapısını kıran her backend değişikliğinde (bkz. `docs/cache-strategy.md`)
 
 ---
@@ -57,11 +58,10 @@
 
 ## API
 
-- [ ] **Rate limiting API gateway seviyesine taşınmalı**
-  - Şu an iki katman var: (1) cihaz-bazlı günlük kota (Redis `usage:*`), (2) IP-bazlı `RateLimiter`
-    middleware (config-gated, varsayılan kapalı — bkz. `docs/decisions/ADR-003-rate-limiting.md`).
-  - DDoS / scraping senaryolarında gateway (nginx, Cloudflare) seviyesinde ek koruma gerekli; in-memory
-    IP limiter çok-instance'ta tutarsızdır (ADR-003 dağıtık limit takip işi).
+- [ ] **Dağıtık uygulama limiter'ına edge DDoS katmanı eklenmeli**
+  - Uygulama exact IP + IPv4 `/24` veya IPv6 `/64` + installation principal bucket'larını Redis
+    `TIME` ile atomik ve iki-replika tutarlı uygular; Redis/istemci-IP belirsizliğinde fail-closed 503'tür.
+  - Caddy önünde volumetrik DDoS/scraping için operator-seçimli edge/WAF katmanı ayrıca gerekir.
   - Tetikleyici: Anormal trafik desenleri görülürse veya API yatay ölçeklenince
 
 - [ ] **Horizontal scaling: API stateless mi doğrulanmalı**
@@ -79,9 +79,9 @@
 
 > Detaylı observability mimarisi: [`architecture/observability.md`](architecture/observability.md).
 
-- [ ] **Alerting kuralları tanımlanmalı**
-  - P95 latency > 500ms · Error rate > %1 · Redis connection hatası
-  - Tetikleyici: Prodüksiyon yayınından önce
+- [x] **Alerting kuralları ve runbook bağlantıları tanımlandı**
+  - API availability/latency/error, ingestion freshness, PostgreSQL/Redis/disk, backup, TLS,
+    restart ve telemetry queue/export kuralları promtool fixture'larıyla doğrulanır.
 
 - [ ] **Daily limit aşım oranı izlenmeli**
   - Kaç kullanıcı limiti dolduruyor? Bu premium conversion için sinyal
@@ -95,10 +95,9 @@
 
 ## Güvenlik
 
-- [ ] **Device-ID sahteciliği koruması**
-  - Şu an device_id header'dan okunuyor; kötü niyetli kullanıcı sonsuz device_id üretebilir
-  - Çözüm: Device fingerprint veya hesaplama başına CAPTCHA (premium öncesi)
-  - Tetikleyici: Limit bypass girişimleri tespit edilirse
+- [x] **Client-chosen Device-ID authentication ve kota kökü kaldırıldı**
+  - Server-issued 256-bit installation credential hash-only doğrulanır; limiter anahtarları HMAC ile
+    pseudonymize edilir. `X-Device-ID` route authorize etmez ve auto-claim yolu yoktur.
 
 - [ ] **Secret rotation planı**
   - Veritabanı, Redis bağlantı string'leri ve API key'leri için rotasyon prosedürü

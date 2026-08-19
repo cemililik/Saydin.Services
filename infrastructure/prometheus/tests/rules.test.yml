@@ -1,0 +1,226 @@
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: api_unavailable_routes_to_critical
+    interval: 1m
+    input_series:
+      - series: 'up{job="saydin-api"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SaydinApiUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-api, job: saydin-api}
+            exp_annotations:
+              summary: Saydin API is unavailable
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md
+
+  - name: database_and_redis_unavailable
+    interval: 1m
+    input_series:
+      - series: 'pg_up{job="postgres"}'
+        values: '0x5'
+      - series: 'redis_up{job="redis"}'
+        values: '0x5'
+      - series: 'up{job="postgres"}'
+        values: '1x5'
+      - series: 'up{job="redis"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SaydinPostgresUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: postgres, job: postgres}
+            exp_annotations:
+              summary: PostgreSQL exporter cannot reach PostgreSQL
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/database-saturation.md
+      - eval_time: 3m
+        alertname: SaydinRedisUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: redis, job: redis}
+            exp_annotations:
+              summary: Redis exporter cannot reach Redis
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/redis-unavailable.md
+
+  - name: stale_ingestion_and_backup
+    interval: 1m
+    input_series:
+      - series: 'saydin_ingestion_last_success_timestamp_seconds{source="tcmb",cadence="daily"}'
+        values: '0x1700'
+      - series: 'saydin_ingestion_lag_seconds{source="tcmb",cadence="daily"}'
+        values: '100000x1700'
+      - series: 'saydin_backup_last_success_timestamp_seconds{kind="wal"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: SaydinDailyIngestionStale
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-price-ingestion, source: tcmb, cadence: daily}
+            exp_annotations:
+              summary: A bounded ingestion source has no success within 26 hours
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+      - eval_time: 1h
+        alertname: SaydinWalBackupStale
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: wal}
+            exp_annotations:
+              summary: No recoverable backup checkpoint within the 15 minute RPO plus 15 minute grace
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+  - name: base_backup_staleness_and_recent_failure
+    interval: 1m
+    input_series:
+      - series: 'saydin_backup_last_success_timestamp_seconds{kind="base"}'
+        values: '0x1700'
+      - series: 'saydin_backup_last_failure_timestamp_seconds{kind="base"}'
+        values: '96400x1700'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: SaydinBaseBackupStale
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: base}
+            exp_annotations:
+              summary: No verified base backup within the daily schedule plus 2 hour grace
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+      - eval_time: 27h
+        alertname: SaydinBackupFailure
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: base}
+            exp_annotations:
+              summary: The encrypted off-host backup job failed
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+  - name: monthly_ingestion_has_distinct_40_day_slo
+    interval: 1m
+    input_series:
+      - series: 'saydin_ingestion_last_success_timestamp_seconds{source="evds",cadence="monthly"}'
+        values: '0x20'
+      - series: 'saydin_ingestion_lag_seconds{source="evds",cadence="monthly"}'
+        values: '3500000x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SaydinMonthlyIngestionStale
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-price-ingestion, source: evds, cadence: monthly}
+            exp_annotations:
+              summary: A bounded monthly ingestion source has no success within 40 days
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+  - name: active_asset_without_any_job_fails_daily_freshness_closed
+    interval: 1m
+    input_series:
+      - series: 'saydin_ingestion_last_success_timestamp_seconds{source="coingecko",cadence="daily"}'
+        values: '0x20'
+      - series: 'saydin_ingestion_lag_seconds{source="coingecko",cadence="daily"}'
+        values: '2000000000x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SaydinDailyIngestionStale
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-price-ingestion, source: coingecko, cadence: daily}
+            exp_annotations:
+              summary: A bounded ingestion source has no success within 26 hours
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+  - name: freshness_and_calendar_missing_series_fail_closed
+    interval: 1m
+    input_series:
+      - series: 'up{job="unrelated"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SaydinIngestionFreshnessMetricMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-price-ingestion}
+            exp_annotations:
+              summary: Ingestion freshness signal is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+      - eval_time: 16m
+        alertname: SaydinMarketCalendarCoverageMetricMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-price-ingestion}
+            exp_annotations:
+              summary: Active market calendar coverage signal is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/calendar-release.md
+
+  - name: active_calendar_horizons_fail_closed
+    interval: 1m
+    input_series:
+      - series: 'saydin_market_calendar_coverage_horizon_days{calendar="tcmb_indicative_fx",requirement="yesterday"}'
+        values: '-1x20'
+      - series: 'saydin_market_calendar_coverage_horizon_days{calendar="bist_pay_xist",requirement="45_day"}'
+        values: '44x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SaydinTcmbCalendarCoverageStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: saydin-price-ingestion
+              calendar: tcmb_indicative_fx
+              requirement: yesterday
+            exp_annotations:
+              summary: Active TCMB calendar does not cover Istanbul yesterday
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/calendar-release.md
+      - eval_time: 16m
+        alertname: SaydinBistCalendarCoverageExpiring
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: saydin-price-ingestion
+              calendar: bist_pay_xist
+              requirement: 45_day
+            exp_annotations:
+              summary: Active BIST Pay calendar has less than 45 days of coverage
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/calendar-release.md
+
+  - name: certificate_expiry
+    interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-https",instance="https://api.validation.test/health/live"}'
+        values: '1000000x40'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: SaydinCertificateExpiring
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: edge
+              job: blackbox-https
+              instance: https://api.validation.test/health/live
+            exp_annotations:
+              summary: Public TLS certificate expires within 14 days
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/tls-expiry.md
+
+  - name: telemetry_export_failure_uses_bounded_aggregate
+    interval: 1m
+    input_series:
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp/tempo"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TelemetryExportFailure
+        exp_alerts:
+          - exp_labels: {severity: warning, service: telemetry}
+            exp_annotations:
+              summary: Trace or log export is failing
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/telemetry-pipeline.md
+
+  - name: telemetry_durable_queue_near_capacity
+    interval: 1m
+    input_series:
+      - series: 'otelcol_exporter_queue_size{exporter="otlphttp/loki"}'
+        values: '9x15'
+      - series: 'otelcol_exporter_queue_capacity{exporter="otlphttp/loki"}'
+        values: '10x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TelemetryQueueNearCapacity
+        exp_alerts:
+          - exp_labels: {severity: warning, service: telemetry}
+            exp_annotations:
+              summary: Durable telemetry queue exceeds 80 percent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/telemetry-pipeline.md

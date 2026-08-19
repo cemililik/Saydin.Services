@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Time.Testing;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Helpers;
 
@@ -9,13 +10,13 @@ namespace Saydin.Api.Tests.Helpers;
 public class ActivityLogBuilderTests
 {
     private static HttpContext CreateHttpContext(
-        string? deviceId = "test-device",
+        string? principalActivityId = "p1:test-principal",
         string? deviceOs = null,
         string? appVersion = null)
     {
         var context = new DefaultHttpContext();
-        if (deviceId is not null)
-            context.Items[EndpointExtensions.DeviceIdItemKey] = deviceId;
+        if (principalActivityId is not null)
+            context.Items[EndpointExtensions.PrincipalActivityIdItemKey] = principalActivityId;
         if (deviceOs is not null)
             context.Request.Headers["X-Device-OS"] = deviceOs;
         if (appVersion is not null)
@@ -34,7 +35,7 @@ public class ActivityLogBuilderTests
 
         log.Action.Should().Be("what_if_calculate");
         log.StatusCode.Should().Be(200);
-        log.DeviceId.Should().Be("test-device");
+        log.DeviceId.Should().Be("p1:test-principal");
     }
 
     [Fact]
@@ -93,9 +94,44 @@ public class ActivityLogBuilderTests
     }
 
     [Fact]
+    public void Build_UsesInjectedTimeProviderForCreatedAtAndDuration()
+    {
+        var now = new DateTimeOffset(2026, 8, 19, 10, 30, 0, TimeSpan.Zero);
+        var time = new FakeTimeProvider(now);
+        var builder = new ActivityLogBuilder(CreateHttpContext(), timeProvider: time)
+            .WithAction("assets_list");
+        time.Advance(TimeSpan.FromMilliseconds(125));
+
+        var log = builder.Build();
+
+        log.CreatedAt.Should().Be(now.AddMilliseconds(125));
+        log.DurationMs.Should().Be(125);
+    }
+
+    [Theory]
+    [InlineData(400, "request_invalid")]
+    [InlineData(401, "authentication_failed")]
+    [InlineData(403, "request_forbidden")]
+    [InlineData(429, "rate_limited")]
+    [InlineData(503, "service_unavailable")]
+    [InlineData(500, "internal_error")]
+    public void Build_ResponseFailuresReceiveStableBoundedErrorCode(
+        short status, string errorCode)
+    {
+        var log = new ActivityLogBuilder(CreateHttpContext())
+            .WithAction("assets_list")
+            .WithResponseStatus(status)
+            .Build();
+
+        log.StatusCode.Should().Be(status);
+        log.ErrorCode.Should().Be(errorCode);
+        log.ErrorCode!.Length.Should().BeLessThanOrEqualTo(50);
+    }
+
+    [Fact]
     public void Build_NoDeviceId_FallsBackToUnknown()
     {
-        var ctx = CreateHttpContext(deviceId: null);
+        var ctx = CreateHttpContext(principalActivityId: null);
 
         var log = new ActivityLogBuilder(ctx)
             .WithAction("assets_list")

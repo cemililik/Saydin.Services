@@ -1,81 +1,13 @@
 #!/usr/bin/env bash
-# ============================================================
-# F4-1 / F4-8 (ADR-001 — Seçenek C hybrid): VAR OLAN (boş olmayan) bir PostgreSQL
-# veritabanına YENİ migration'ları uygulayan idempotent runner.
+# Deprecated fail-closed compatibility entrypoint.
 #
-# Fresh/boş DB'ler docker-entrypoint ile `/docker-entrypoint-initdb.d` üzerinden kurulur
-# (compose `./infrastructure/postgres/migrations` klasörünü oraya mount eder). Bu script
-# o klasörün DIŞINDADIR ve initdb.d'ye MOUNT EDİLMEZ → init sırasında ASLA otomatik çalışmaz.
-# Production/staging gibi var olan DB'lerde DEPLOY adımı olarak elle (ya da CI/Job ile) çağrılır.
-#
-# Mantık: schema_migrations tablosuna bakar; KAYITLI OLMAYAN .sql/.sh dosyalarını alfabetik
-# sırada `psql -v ON_ERROR_STOP=1` ile uygular ve başarı sonrası version'ı kaydeder.
-# version = dosya adının uzantısız hâli (014_schema_migrations.sql back-register'ı ile aynı türetme).
-#
-# ÖNEMLİ: 014 ÖNCESİ var olan DB'lerde ÖNCE `014_schema_migrations.sql` elle uygulanmalıdır
-# (001..014 geçmişini DDL yeniden çalıştırmadan back-register eder). Sonrasında bu runner
-# yalnız 015+ migration'ları uygular — eski migration'ları RE-RUN ETMEZ (idempotency garantisi).
-#
-# ÇALIŞTIRMA GARANTİSİ (KRİTİK): Bu runner aynı anda TEK INSTANCE çalıştırılmalıdır
-# (CI/Job concurrency=1, overlapping/paralel deploy YOK). schema_migrations SELECT (kontrol)
-# ile INSERT (kayıt) arasında bir TOCTOU penceresi vardır; eşzamanlı iki runner aynı
-# migration'ı (DDL/.sh body) iki kez uygulayabilir — ON CONFLICT yalnız kayıt satırını korur,
-# migration gövdesini DEĞİL.
-#
-# Kullanım:
-#   DATABASE_URL='postgres://user:pass@host:5432/db' ./apply-migrations.sh
-#   # veya psql ortam değişkenleri (PGHOST/PGUSER/PGPASSWORD/PGDATABASE) ile DATABASE_URL boş bırakılabilir.
-# ============================================================
+# The former psql loop had no durable lock, split migration body/tracking into
+# separate commits, and let shell migrations choose a second connection target.
+# It must never be used after the always-run Saydin.DatabaseMigrator control
+# plane was introduced. Keeping this tombstone gives old automation an explicit
+# non-zero failure instead of silently using unsafe semantics.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MIGRATIONS_DIR="${SCRIPT_DIR}/migrations"
-
-# DATABASE_URL verilmemişse psql kendi PG* env değişkenlerini kullanır (boş arg geçeriz).
-PSQL_TARGET="${DATABASE_URL:-}"
-
-run_psql() {
-    if [[ -n "${PSQL_TARGET}" ]]; then
-        psql "${PSQL_TARGET}" -v ON_ERROR_STOP=1 "$@"
-    else
-        psql -v ON_ERROR_STOP=1 "$@"
-    fi
-}
-
-# schema_migrations VAR OLMALI — otomatik oluşturma YOK (fail-fast). 014 öncesi DB'lerde
-# ÖNCE `014_schema_migrations.sql` elle uygulanmalı (001..014 geçmişini back-register eder;
-# bkz. ADR-001 / docs). Tablo yoksa burada boş oluşturmak, KAYITLI OLMAYAN tüm migration'ların
-# (001+) re-run'ına ve dolu DB'de kafa karıştırıcı "already exists" hatasına yol açardı.
-schema_migrations_exists="$(run_psql -tA -c "SELECT 1 WHERE to_regclass('schema_migrations') IS NOT NULL;")"
-if [[ "${schema_migrations_exists}" != "1" ]]; then
-    echo "✗ HATA: schema_migrations tablosu yok. 014 öncesi bir DB ise ÖNCE '014_schema_migrations.sql' migration'ını elle uygula (001..014 geçmişini back-register eder), sonra bu runner'ı yeniden çalıştır." >&2
-    exit 1
-fi
-
-applied_count=0
-for path in "${MIGRATIONS_DIR}"/*; do
-    file="$(basename "${path}")"
-    case "${file}" in
-        *.sql|*.sh) ;;            # yalnız .sql / .sh
-        *) continue ;;
-    esac
-    version="${file%.*}"          # uzantısız ad = version
-
-    already="$(run_psql -tA -v version="${version}" -c "SELECT 1 FROM schema_migrations WHERE version = :'version';")"
-    if [[ "${already}" == "1" ]]; then
-        echo "↷ atlanıyor (uygulanmış): ${file}"
-        continue
-    fi
-
-    echo "→ uygulanıyor: ${file}"
-    if [[ "${file}" == *.sh ]]; then
-        bash "${path}"            # .sh migration kendi psql çağrısını/ortamını yönetir (örn. 012b)
-    else
-        run_psql -f "${path}"
-    fi
-    run_psql -q -v version="${version}" -c \
-        "INSERT INTO schema_migrations(version) VALUES (:'version') ON CONFLICT (version) DO NOTHING;"
-    applied_count=$((applied_count + 1))
-done
-
-echo "✓ Tamamlandı — ${applied_count} yeni migration uygulandı."
+echo "apply-migrations.sh is retired; run the Saydin.DatabaseMigrator one-shot job instead." >&2
+echo "Compose: docker compose run --rm database-migrator" >&2
+exit 64

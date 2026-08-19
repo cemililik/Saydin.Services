@@ -7,7 +7,7 @@ namespace Saydin.Api.Repositories;
 
 public sealed class InflationRepository(SaydinDbContext context) : IInflationRepository
 {
-    public async Task<(decimal? BuyIndex, DateOnly? BuyIndexDate, decimal? SellIndex, DateOnly? SellIndexDate)>
+    public async Task<(InflationIndexObservation? Buy, InflationIndexObservation? Sell)>
         GetIndexValuesAsync(DateOnly buyDate, DateOnly sellDate, CancellationToken ct)
     {
         // period_date her ayın 1'idir; LKV: period_date <= hedef ay
@@ -17,19 +17,46 @@ public sealed class InflationRepository(SaydinDbContext context) : IInflationRep
         var buyRow  = await GetNearestRowAsync(buyMonth,  ct);
         var sellRow = await GetNearestRowAsync(sellMonth, ct);
 
-        return (buyRow?.IndexValue, buyRow?.PeriodDate, sellRow?.IndexValue, sellRow?.PeriodDate);
+        return (ToObservation(buyRow), ToObservation(sellRow));
+    }
+
+    public async Task<IReadOnlyDictionary<DateOnly, InflationIndexObservation>> GetExactIndexValuesAsync(
+        IReadOnlyCollection<DateOnly> months,
+        CancellationToken ct)
+    {
+        if (months.Count == 0)
+            return new Dictionary<DateOnly, InflationIndexObservation>();
+
+        var normalizedMonths = months
+            .Select(month => new DateOnly(month.Year, month.Month, 1))
+            .Distinct()
+            .ToArray();
+
+        var rows = await context.InflationRates
+            .AsNoTracking()
+            .WhereCompleteFinalAuthority()
+            .Where(rate => normalizedMonths.Contains(rate.PeriodDate))
+            .ToListAsync(ct);
+
+        return rows
+            .ToDictionary(rate => rate.PeriodDate, rate => ToObservation(rate)!);
     }
 
     /// <summary>
-    /// F2.7-5: composite PK (period_date, source) ile aynı ay için birden çok kaynak
-    /// (seed-approximation + tuik) bulunabilir. En yakın (≤ <paramref name="month"/>) tarihi
-    /// seçer ve aynı tarihte birden çok kaynak varsa gerçek TÜİK verisini
-    /// (<see cref="InflationSources.Tuik"/>) yaklaşık seed'e tercih eder.
+    /// En yakın (≤ <paramref name="month"/>) complete final EVDS/TÜİK CPI gözlemini seçer.
+    /// Migration 020 expand fazında bırakılan all-null seed/legacy satırlar görünmez.
     /// </summary>
     private async Task<InflationRate?> GetNearestRowAsync(DateOnly month, CancellationToken ct) =>
         await context.InflationRates
+            .AsNoTracking()
+            .WhereCompleteFinalAuthority()
             .Where(r => r.PeriodDate <= month)
             .OrderByDescending(r => r.PeriodDate)
-            .ThenBy(r => r.Source == InflationSources.Tuik ? 0 : 1)
             .FirstOrDefaultAsync(ct);
+
+    private static InflationIndexObservation? ToObservation(InflationRate? rate) =>
+        rate is null
+            ? null
+            : new InflationIndexObservation(
+                rate.PeriodDate, rate.IndexValue, FinalObservationAuthority.ToValue(rate));
 }

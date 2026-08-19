@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Globalization;
 using System.Text.Json;
@@ -20,26 +21,50 @@ public sealed class AssetService(
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<AssetService> logger) : IAssetService
 {
+    // IAssetService is scoped. Successful identities are therefore shared only by
+    // calls in the same request and cannot become a cross-request catalog cache.
+    // Per-symbol gates coalesce concurrent cold lookups; a cancelled/failed loader
+    // never populates the memo and the next waiter performs its own cancellable read.
+    private readonly ConcurrentDictionary<string, AssetReadIdentity> _trustedAssetIdentities =
+        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _trustedAssetIdentityGates =
+        new(StringComparer.Ordinal);
+    private readonly object _catalogVersionGate = new();
+    private Task<AssetCatalogVersion>? _catalogVersionTask;
+
+    public Task<AssetCatalogVersion> GetCatalogVersionAsync(CancellationToken ct)
+    {
+        lock (_catalogVersionGate)
+            return _catalogVersionTask ??= LoadCatalogVersionAsync(ct);
+    }
+
+    private async Task<AssetCatalogVersion> LoadCatalogVersionAsync(CancellationToken ct)
+    {
+        var version = await repository.GetAssetCatalogVersionAsync(ct);
+        return version.IsValid
+            ? version
+            : throw new InvalidOperationException("asset_catalog_version_invalid");
+    }
+
     public async Task<IReadOnlyList<Asset>> GetAllAsync(CancellationToken ct)
     {
-        // Signature = aktif asset sayısı. 5 dakikada bir DB'den taze okunur.
-        // Yeni asset eklenince sayı değişir → yeni cache key oluşur → otomatik invalidasyon.
-        const string sigKey = "assets:sig";
-
-        var sig = await cache.TryGetAsync<string>(sigKey, ct);
-        if (sig is null)
+        var catalog = await GetCatalogVersionAsync(ct);
+        var listKey = CatalogKey(catalog, "assets:list");
+        var cached = await cache.TryGetAsync<AssetListCacheEntry>(listKey, ct);
+        if (cached is not null)
         {
-            var count = await repository.GetActiveAssetCountAsync(ct);
-            sig = count.ToString();
-            await cache.TrySetAsync(sigKey, sig, TimeSpan.FromMinutes(5), ct);
+            if (cached.IsValid(catalog)) return cached.Assets!;
+            await cache.TryDeleteAsync(listKey, ct);
         }
 
-        var listKey = $"assets:list:{sig}";
-        var cached = await cache.TryGetAsync<List<Asset>>(listKey, ct);
-        if (cached is not null) return cached;
-
         var assets = await repository.GetAllActiveAssetsAsync(ct);
-        await cache.TrySetAsync(listKey, assets, TimeSpan.FromHours(6), ct);
+        var entry = new AssetListCacheEntry(
+            catalog.Revision,
+            Convert.ToHexString(catalog.CatalogSha256).ToLowerInvariant(),
+            assets);
+        if (!entry.IsValid(catalog))
+            throw new InvalidOperationException("asset_list_cache_contract_invalid");
+        await cache.TrySetAsync(listKey, entry, TimeSpan.FromHours(6), ct);
 
         return assets;
     }
@@ -50,26 +75,25 @@ public sealed class AssetService(
         // yerine `IAssetSymbolIndex` singleton; immutable record snapshot ile
         // atomik swap; cache key listenin **içerik hash**'ine bağlı (sadece count
         // değil, DisplayName/Category/IsActive değişimleri de invalidate eder).
+        var catalog = await GetCatalogVersionAsync(ct);
         var all = await GetAllAsync(ct);
-        return symbolIndex.Lookup(all, symbol);
+        return symbolIndex.Lookup(all, symbol, catalog);
     }
 
     public async Task<IReadOnlyList<AssetResponse>> GetAllAssetInfoAsync(CancellationToken ct)
     {
-        const string sigKey = "assets:sig";
-
-        var sig = await cache.TryGetAsync<string>(sigKey, ct);
-        if (sig is null)
-        {
-            var count = await repository.GetActiveAssetCountAsync(ct);
-            sig = count.ToString();
-            await cache.TrySetAsync(sigKey, sig, TimeSpan.FromMinutes(5), ct);
-        }
+        var catalog = await GetCatalogVersionAsync(ct);
+        var identities = await repository.GetAllActiveAssetIdentitiesAsync(ct);
+        var sig = identities.Count.ToString(CultureInfo.InvariantCulture);
 
         var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
-        var listKey = $"assets:info:{sig}:{lang}";
-        var cached = await cache.TryGetAsync<List<AssetResponse>>(listKey, ct);
-        if (cached is not null) return cached;
+        var listKey = CatalogKey(catalog, $"assets:info:{lang}");
+        var cached = await cache.TryGetAsync<AssetInfoCacheEntry>(listKey, ct);
+        if (cached is not null)
+        {
+            if (cached.IsValid(sig, lang, identities, catalog)) return cached.Assets!;
+            await cache.TryDeleteAsync(listKey, ct);
+        }
 
         var rows = await repository.GetAllActiveAssetsWithDateRangesAsync(ct);
         var result = rows
@@ -82,7 +106,15 @@ public sealed class AssetService(
                 r.LastDate))
             .ToList();
 
-        await cache.TrySetAsync(listKey, result, TimeSpan.FromHours(1), ct);
+        var entry = new AssetInfoCacheEntry(
+            sig,
+            lang,
+            identities,
+            result,
+            catalog.Revision,
+            Convert.ToHexString(catalog.CatalogSha256).ToLowerInvariant());
+        if (entry.IsValid(sig, lang, identities, catalog))
+            await cache.TrySetAsync(listKey, entry, TimeSpan.FromHours(1), ct);
         return result;
     }
 
@@ -97,17 +129,27 @@ public sealed class AssetService(
 
     public async Task<PricePoint> GetPriceAsync(string symbol, DateOnly date, CancellationToken ct)
     {
-        var cacheKey = $"price:{symbol.ToUpperInvariant()}:{date:yyyy-MM-dd}";
+        var catalog = await GetCatalogVersionAsync(ct);
+        var identity = await GetTrustedAssetIdentityAsync(symbol, date, ct);
+        var cacheKey = CatalogKey(catalog, $"price:{identity.Symbol}:{date:yyyy-MM-dd}");
 
-        var cached = await cache.TryGetAsync<PricePoint>(cacheKey, ct);
-        if (cached is not null) return cached;
+        var cached = await cache.TryGetAsync<PriceCacheEntry>(cacheKey, ct);
+        if (cached is not null && cached.IsValidExact(identity, date, catalog))
+            return cached.Point!;
+        if (cached is not null)
+            await cache.TryDeleteAsync(cacheKey, ct);
 
-        var price = await repository.GetPriceAsync(symbol.ToUpperInvariant(), date, ct);
+        var price = await repository.GetPriceAsync(identity.Symbol, date, ct);
 
-        if (price is null)
+        if (price is null || !FinalObservationAuthority.IsCompleteFinal(price))
             throw new PriceNotFoundException(symbol, date);
 
-        await cache.TrySetAsync(cacheKey, price, TimeSpan.FromHours(24), ct);
+        var entry = PriceCacheEntry.Exact(identity, date, price, catalog);
+        if (!entry.IsValidExact(identity, date, catalog))
+            throw new InvalidOperationException("price_cache_identity_invalid");
+
+        await cache.TrySetAsync(
+            cacheKey, entry, TimeSpan.FromHours(24), ct);
 
         return price;
     }
@@ -115,33 +157,93 @@ public sealed class AssetService(
     public async Task<PricePoint> GetNearestPriceAsync(string symbol, DateOnly date, CancellationToken ct)
     {
         const int MaxDays = 7;
-        var upperSymbol = symbol.ToUpperInvariant();
+        var catalog = await GetCatalogVersionAsync(ct);
+        var identity = await GetTrustedAssetIdentityAsync(symbol, date, ct);
 
         // Cache: nearest-price:{symbol}:{date} — 24 saat (işlem günleri değişmez)
-        var cacheKey = $"nearest-price:{upperSymbol}:{date:yyyy-MM-dd}";
+        var cacheKey = CatalogKey(
+            catalog, $"nearest-price:{identity.Symbol}:{date:yyyy-MM-dd}");
 
-        var cached = await cache.TryGetAsync<PricePoint>(cacheKey, ct);
-        if (cached is not null) return cached;
+        var cached = await cache.TryGetAsync<PriceCacheEntry>(cacheKey, ct);
+        if (cached is not null && cached.IsValidNearest(identity, date, MaxDays, catalog))
+            return cached.Point!;
+        if (cached is not null)
+            await cache.TryDeleteAsync(cacheKey, ct);
 
-        var price = await repository.GetNearestPriceAsync(upperSymbol, date, MaxDays, ct)
+        var price = await repository.GetNearestPriceAsync(identity.Symbol, date, MaxDays, ct)
             ?? throw new PriceNotFoundException(symbol, date);
 
-        await cache.TrySetAsync(cacheKey, price, TimeSpan.FromHours(24), ct);
+        if (!FinalObservationAuthority.IsCompleteFinal(price))
+            throw new PriceNotFoundException(symbol, date);
+
+        var entry = PriceCacheEntry.Nearest(identity, date, MaxDays, price, catalog);
+        if (!entry.IsValidNearest(identity, date, MaxDays, catalog))
+            throw new InvalidOperationException("nearest_price_cache_identity_invalid");
+
+        await cache.TrySetAsync(
+            cacheKey, entry,
+            TimeSpan.FromHours(24), ct);
         return price;
+    }
+
+    public async Task<IReadOnlyList<PricePoint>> GetNearestPricesAsync(
+        string symbol,
+        IReadOnlyList<DateOnly> dates,
+        CancellationToken ct)
+    {
+        const int MaxDays = 7;
+        const int MaxRequests = 601;
+
+        if (dates.Count is < 1 or > MaxRequests)
+            throw new ArgumentOutOfRangeException(nameof(dates));
+
+        // The identity lookup is deliberately performed once. DCA already owns a
+        // response-level cache, so per-date cache probes here would reintroduce the
+        // same O(n) network/query shape this bulk boundary exists to remove.
+        var identity = await GetTrustedAssetIdentityAsync(symbol, dates[0], ct);
+        var prices = await repository.GetNearestPricesAsync(identity.Symbol, dates, MaxDays, ct);
+
+        if (prices.Count != dates.Count)
+            throw new InvalidOperationException("nearest_price_batch_cardinality_invalid");
+
+        var result = new PricePoint[prices.Count];
+        for (var index = 0; index < prices.Count; index++)
+        {
+            var point = prices[index];
+            if (point is null || !FinalObservationAuthority.IsCompleteFinal(point))
+                throw new PriceNotFoundException(symbol, dates[index]);
+            result[index] = point;
+        }
+
+        return result;
     }
 
     public async Task<DateOnly> GetLatestPriceDateAsync(string symbol, CancellationToken ct)
     {
-        var cacheKey = $"latest-date:{symbol.ToUpperInvariant()}";
+        var catalog = await GetCatalogVersionAsync(ct);
+        var today = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime);
+        var identity = await GetTrustedAssetIdentityAsync(symbol, today, ct);
+        var cacheKey = CatalogKey(catalog, $"latest-date:{identity.Symbol}");
 
-        var cached = await cache.TryGetAsync<string>(cacheKey, ct);
-        if (cached is not null && DateOnly.TryParse(cached, CultureInfo.InvariantCulture, out var cachedDate))
-            return cachedDate;
+        var cached = await cache.TryGetAsync<LatestPriceDateCacheEntry>(cacheKey, ct);
+        if (cached is not null && cached.IsValid(identity, catalog))
+            return cached.Date;
+        if (cached is not null)
+            await cache.TryDeleteAsync(cacheKey, ct);
 
-        var date = await repository.GetLatestPriceDateAsync(symbol.ToUpperInvariant(), ct)
-            ?? throw new PriceNotFoundException(symbol, DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime));
+        var date = await repository.GetLatestPriceDateAsync(identity.Symbol, ct)
+            ?? throw new PriceNotFoundException(symbol, today);
 
-        await cache.TrySetAsync(cacheKey, date.ToString("yyyy-MM-dd"), TimeSpan.FromHours(1), ct);
+        await cache.TrySetAsync(
+            cacheKey,
+            new LatestPriceDateCacheEntry(
+                identity.Symbol,
+                identity.Source,
+                identity.Id,
+                date,
+                catalog.Revision,
+                Convert.ToHexString(catalog.CatalogSha256).ToLowerInvariant()),
+            TimeSpan.FromHours(1), ct);
 
         return date;
     }
@@ -161,14 +263,27 @@ public sealed class AssetService(
         // F2.2-1 ([C-B-AssetService-5/7]): cache key'e interval suffix ekle. Şu an
         // yalnızca "daily" destekleniyor; weekly/monthly eklenirse aynı (symbol, from, to)
         // çiftinin farklı interval'larda farklı response'u olur → cache key ayrımı şart.
-        var cacheKey = $"prices:{symbol.ToUpperInvariant()}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:{normalizedInterval}";
+        var catalog = await GetCatalogVersionAsync(ct);
+        var identity = await GetTrustedAssetIdentityAsync(symbol, from, ct);
+        var cacheKey = CatalogKey(
+            catalog,
+            $"prices:{identity.Symbol}:{from:yyyy-MM-dd}:{to:yyyy-MM-dd}:{normalizedInterval}");
 
-        var cached = await cache.TryGetAsync<List<PricePoint>>(cacheKey, ct);
-        if (cached is not null) return cached;
+        var cached = await cache.TryGetAsync<PriceRangeCacheEntry>(cacheKey, ct);
+        if (cached is not null && cached.IsValid(identity, from, to, normalizedInterval, catalog))
+            return cached.Points!.Cast<PricePoint>().ToArray();
+        if (cached is not null)
+            await cache.TryDeleteAsync(cacheKey, ct);
 
-        var points = await repository.GetPriceRangeAsync(symbol.ToUpperInvariant(), from, to, ct);
+        var points = await repository.GetPriceRangeAsync(identity.Symbol, from, to, ct);
 
-        await cache.TrySetAsync(cacheKey, points, TimeSpan.FromHours(1), ct);
+        if (points.Any(point => !FinalObservationAuthority.IsCompleteFinal(point)))
+            throw new InvalidOperationException("price_authority_not_final");
+
+        await cache.TrySetAsync(
+            cacheKey,
+            PriceRangeCacheEntry.Create(identity, from, to, normalizedInterval, points, catalog),
+            TimeSpan.FromHours(1), ct);
 
         // CLAUDE.md: "LogDebug yalnızca Development ortamında, detay bilgi".
         // Production minimum log seviyesi Information olduğu için bu zaten no-op; ama
@@ -178,5 +293,43 @@ public sealed class AssetService(
                 symbol, from, to, points.Count);
 
         return points;
+    }
+
+    private static string CatalogKey(AssetCatalogVersion catalog, string suffix)
+        => AuthorityCacheNamespace.Key($"catalog:{catalog.Token}:{suffix}");
+
+    private async Task<AssetReadIdentity> GetTrustedAssetIdentityAsync(
+        string symbol,
+        DateOnly errorDate,
+        CancellationToken ct)
+    {
+        var upperSymbol = symbol.ToUpperInvariant();
+        if (_trustedAssetIdentities.TryGetValue(upperSymbol, out var cached))
+            return cached;
+
+        var gate = _trustedAssetIdentityGates.GetOrAdd(
+            upperSymbol, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (_trustedAssetIdentities.TryGetValue(upperSymbol, out cached))
+                return cached;
+
+            var identity = await repository.GetActiveAssetIdentityAsync(upperSymbol, ct)
+                ?? throw new PriceNotFoundException(symbol, errorDate);
+            if (identity.Id == Guid.Empty
+                || !string.Equals(identity.Symbol, upperSymbol, StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(identity.Source))
+            {
+                throw new InvalidOperationException("asset_read_identity_invalid");
+            }
+
+            _trustedAssetIdentities.TryAdd(upperSymbol, identity);
+            return identity;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 }

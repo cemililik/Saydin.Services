@@ -25,19 +25,17 @@
   <data name="ScenarioNotFound"><value>Scenario not found</value></data>
   <data name="ScenarioNotFoundDetail"><value>Scenario '{0}' not found or does not belong to this user.</value></data>
   <data name="ScenarioLimitExceeded"><value>Scenario limit exceeded</value></data>
-  <data name="ScenarioLimitExceededDetail"><value>Free users can save at most {0} scenarios.</value></data>
+  <data name="ScenarioLimitExceededDetail"><value>This account can save at most {0} scenarios.</value></data>
   <data name="DailyLimitExceeded"><value>Daily calculation limit reached</value></data>
   <data name="DailyLimitExceededDetail"><value>You have reached the daily limit of {0} calculations. Please try again tomorrow.</value></data>
-  <data name="DeviceIdRequired"><value>X-Device-ID required</value></data>
-  <data name="DeviceIdRequiredDetail"><value>X-Device-ID header must be sent with a single, non-empty value to access this endpoint.</value></data>
-  <data name="DeviceIdInvalid"><value>X-Device-ID invalid</value></data>
-  <data name="DeviceIdInvalidDetail"><value>X-Device-ID must be at most {0} characters and may only contain letters, digits, '-', '_' and '.'.</value></data>
   <data name="CompareSymbolCount"><value>Between 2 and 5 symbols are required for comparison.</value></data>
   <data name="BuyDateAfterSellDate"><value>Buy date cannot be after sell date.</value></data>
   <data name="InvalidAmountType"><value>Invalid amountType: '{0}'. Expected: try, units, grams</value></data>
   <data name="InvalidPeriod"><value>Invalid period: '{0}'. Expected: weekly, monthly</value></data>
   <data name="InvalidDcaAmountType"><value>Invalid amountType: '{0}'. DCA calculation only supports 'try'.</value></data>
   <data name="InvalidScenarioType"><value>Invalid scenario type: '{0}'. Allowed values: {1}</value></data>
+  <data name="SellDateMustBeAfterBuyDate"><value>Sell date must be after buy date.</value></data>
+  <data name="ScenarioDataConstraintViolation"><value>Scenario data does not conform to the supported contract.</value></data>
   <data name="FeatureDisabled"><value>This feature is not available on your current plan.</value></data>
   <data name="FeatureDisabledTitle"><value>Feature disabled on current plan</value></data>
   <data name="ValidationFailed"><value>Request validation failed</value></data>
@@ -50,6 +48,23 @@
   <data name="AmountMustBePositive"><value>Amount must be greater than zero.</value></data>
   <data name="RateLimited"><value>Too many requests</value></data>
   <data name="RateLimitedDetail"><value>At most {1} requests per {0} seconds. Please try again shortly.</value></data>
+  <data name="PayloadTooLarge"><value>Request body too large</value></data>
+  <data name="PayloadTooLargeDetail"><value>The request body can be at most {0} UTF-8 bytes.</value></data>
+  <data name="UnsupportedJsonContentType"><value>Unsupported content type</value></data>
+  <data name="UnsupportedJsonContentTypeDetail"><value>This endpoint requires the application/json content type.</value></data>
+  <data name="MalformedJsonBody"><value>The request body is not valid JSON.</value></data>
+  <data name="DuplicateJsonProperty"><value>A JSON object cannot contain the same property name more than once.</value></data>
+  <data name="ExtraDataMustBeObject"><value>ExtraData can only be a JSON object or null.</value></data>
+  <data name="ExtraDataTooLarge"><value>ExtraData can be at most {0} UTF-8 bytes.</value></data>
+  <data name="ExtraDataTooDeep"><value>ExtraData can be at most {0} levels deep.</value></data>
+  <data name="ExtraDataTooManyProperties"><value>ExtraData can contain at most {0} properties in total.</value></data>
+  <data name="ExtraDataTooManyNodes"><value>ExtraData can contain at most {0} JSON nodes in total.</value></data>
+  <data name="ExtraDataTooManyArrayItems"><value>ExtraData arrays can contain at most {0} items in total.</value></data>
+  <data name="ExtraDataStringTooLong"><value>A string in ExtraData can be at most {0} UTF-8 bytes.</value></data>
+  <data name="ExtraDataUnknownField"><value>ExtraData contains a field that is unsupported for this scenario type.</value></data>
+  <data name="ExtraDataInvalidFieldType"><value>An ExtraData field has an unsupported JSON type.</value></data>
+  <data name="ScenarioCursorInvalid"><value>The scenario cursor is invalid.</value></data>
+  <data name="ScenarioPageLimitInvalid"><value>limit must be between 1 and {0}.</value></data>
   <!-- Asset Display Names -->
   <data name="Asset_USDTRY"><value>Dollar/TRY</value></data>
   <data name="Asset_EURTRY"><value>Euro/TRY</value></data>
@@ -80,4 +95,6 @@
   <data name="Asset_SOL"><value>Solana</value></data>
   <data name="Asset_THYAO"><value>Turkish Airlines</value></data>
   <data name="Asset_GARAN"><value>Garanti BBVA</value></data>
+  <data name="InstallationCredentialInvalid"><value>Installation credential required</value></data>
+  <data name="InstallationCredentialInvalidDetail"><value>A valid installation credential must be sent using the Installation authorization scheme.</value></data>
 </root>

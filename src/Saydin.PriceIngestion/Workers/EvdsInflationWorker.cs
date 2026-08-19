@@ -1,230 +1,333 @@
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
-using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
+using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Workers;
 
-/// <summary>
-/// TCMB EVDS üzerinden TÜİK TÜFE aylık endeks verisi çeken worker.
-/// Başlangıçta eksik ayları 2003-01-01'den backfill eder.
-/// Ardından her ayın {MonthlyRunDay}. günü saat {DailyRunUtcHour}:00 UTC'de çalışır.
-/// appsettings.json → IngestionWorkers:EvdsInflation ile tüm parametreler override edilebilir.
-///
-/// INGR-002 (migration 012): Artık <c>ingestion_jobs</c> tablosuna kayıt yazar
-/// (<c>asset_id = null</c>, <c>source = "evds"</c>, job_type <c>inflation_backfill</c> /
-/// <c>inflation_daily</c>) — CLAUDE.md "ingestion_jobs'a başarı ve hata durumları yazılır"
-/// kuralına uyar. Job kaydı best-effort'tur; DB hatası asıl ingestion'ı maskelemez.
-///
-/// F1.4-2 / [C-D-37]: Generic <c>IBaseWorker&lt;TPayload&gt;</c> abstraction'ı bilinçli
-/// olarak Faz 4'e ertelendi — `BaseAssetWorker` günlük + asset_id bazlı (price_points),
-/// bu worker aylık + global (inflation_rates) yazıyor; zamanlama, iterasyon ve gap-aware
-/// backfill yapısal olarak farklı (bkz. PHASE-3-DOC-UPDATE-NOTES).
-/// targetMonth hesaplaması ([C-D-38]): `AddMonths(-1)` yıl-rollover'ı doğru ele alır;
-/// Aralık 3'ünde Kasım, Ocak 3'ünde önceki yılın Aralık verisi çekilir.
-/// </summary>
 public sealed class EvdsInflationWorker(
     IInflationAdapter adapter,
-    IInflationIngestionRepository repository,
-    IIngestionJobRepository jobs,
+    IIngestionWindowRepository windows,
     IConfiguration configuration,
+    TimeProvider timeProvider,
     ILogger<EvdsInflationWorker> logger)
 {
-    // 20 yıl geriye git; EVDS serisi 2003-01-01'e kadar gidiyor
-    private static readonly DateOnly BackfillStartDate =
-        DateOnly.FromDateTime(DateTime.UtcNow.AddYears(-20));
-
+    private static readonly DateOnly BackfillStartDate = new(2003, 1, 1);
+    private const int BackfillChunkMonths = 60;
+    private const int ContractVersion = 1;
     private const string ConfigKey = "IngestionWorkers:EvdsInflation";
+    private readonly string _leaseOwner =
+        $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.CreateVersion7():N}";
 
-    // Her ayın 3. günü saat 10:00 UTC (config ile override edilebilir)
-    private int MonthlyRunDay =>
-        configuration.GetValue<int?>($"{ConfigKey}:MonthlyRunDay") ?? 3;
-
+    private int MonthlyRunDay => configuration.GetValue<int?>($"{ConfigKey}:MonthlyRunDay") ?? 3;
     private TimeOnly MonthlyRunUtcTime => new(
-        configuration.GetValue<int?>($"{ConfigKey}:DailyRunUtcHour")   ?? 10,
+        configuration.GetValue<int?>($"{ConfigKey}:DailyRunUtcHour") ?? 10,
         configuration.GetValue<int?>($"{ConfigKey}:DailyRunUtcMinute") ?? 0);
+    private TimeSpan LogicalRetryDelay => TimeSpan.FromMinutes(30);
+    private TimeSpan LeaseDuration => TimeSpan.FromMinutes(30);
+    private TimeSpan FailureFinalizeTimeout => TimeSpan.FromMilliseconds(
+        configuration.GetValue<int?>($"{ConfigKey}:FailureFinalizeTimeoutMs") ?? 5_000);
 
     public async Task RunAsync(CancellationToken ct)
     {
-        await BackfillAsync(ct);
+        while (!ct.IsCancellationRequested && !await BackfillAsync(ct))
+            await Task.Delay(LogicalRetryDelay, timeProvider, ct);
 
         while (!ct.IsCancellationRequested)
         {
-            var delay = GetDelayUntilNextRun();
-            logger.LogInformation(
-                "EVDS TÜFE sonraki çekim: {NextRun:dd.MM.yyyy HH:mm} UTC ({Days} gün {Hours} saat içinde)",
-                DateTime.UtcNow.Add(delay), (int)delay.TotalDays, delay.Hours);
-
             try
             {
-                await Task.Delay(delay, ct);
-                await FetchLatestAsync(ct);
+                await Task.Delay(GetDelayUntilNextRun(), timeProvider, ct);
+                if (await BackfillAsync(ct))
+                    await FetchLatestAsync(ct);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
         }
     }
 
-    // INGR-012: İlk backfill 20 yılı kapsayabilir. EVDS çok-yıllı aralık limitlerine karşı
-    // güvende olmak için aralık bu kadar aylık chunk'lara bölünür (her chunk = ayrı job + tek
-    // EVDS çağrısı). 60 ay = 5 yıl: tek istekte makul, 20 yıl ~4 chunk.
-    private const int BackfillChunkMonths = 60;
-
-    private async Task BackfillAsync(CancellationToken ct)
+    private async Task<bool> BackfillAsync(CancellationToken ct)
     {
-        // INGR-012: anchor = en son GERÇEK tuik tarihi (tüm kaynakların max'ı DEĞİL). Seed
-        // (source='seed-approximation') 2010→2025'i kapladığından max-all anchor'ı gerçek
-        // TÜİK'in tarihsel aylara hiç yazılmamasına yol açıyordu → reel-getiri seed'de donuyordu.
-        // tuik-anchor ile EVDS, tuik'in bittiği yerden (ilk çalıştırmada BackfillStartDate'ten)
-        // devam eder; composite PK sayesinde tuik satırları seed'in yanında durur, okuma tuik'i seçer.
-        var latestTuik = await repository.GetLatestInflationDateAsync(InflationSources.Tuik, ct);
-
-        var from = latestTuik?.AddMonths(1) ?? BackfillStartDate;
-        // Şu anki ay henüz yayınlanmamış olabilir; bir önceki aya kadar al
-        var to = new DateOnly(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-1);
-
-        var chunks = ComputeBackfillChunks(from, to, BackfillChunkMonths);
-        if (chunks.Count == 0)
-        {
-            logger.LogInformation("EVDS TÜFE: tuik backfill gerekmiyor (son tuik: {Latest})", latestTuik);
-            return;
-        }
-
-        logger.LogInformation(
-            "EVDS TÜFE backfill başlıyor (tuik): {From} → {To} ({Chunks} parça)", from, to, chunks.Count);
-
-        foreach (var (chunkFrom, chunkTo) in chunks)
-        {
-            if (ct.IsCancellationRequested) break;
-            await RunInflationJobAsync(IngestionJobTypes.InflationBackfill, chunkFrom, chunkTo, ct);
-        }
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var target = new DateOnly(now.Year, now.Month, 1).AddMonths(-1);
+        var scope = Scope(IngestionJobTypes.InflationBackfill);
+        await windows.PlanWindowsAsync(scope, BackfillStartDate, target,
+            BackfillChunkMonths, IngestionCadence.Monthly, ct);
+        return await DrainAsync(scope, ct);
     }
 
-    /// <summary>
-    /// INGR-012: [from, to] aralığını <paramref name="chunkMonths"/> aylık ardışık dilimlere böler
-    /// (son dilim to'da biter). from > to ise boş liste. Saf fonksiyon — test edilebilir.
-    /// </summary>
+    internal async Task<bool> RunBackfillChunksAsync(
+        IReadOnlyList<(DateOnly From, DateOnly To)> chunks,
+        CancellationToken ct)
+    {
+        var scope = Scope(IngestionJobTypes.InflationBackfill);
+        await windows.EnsureWindowsAsync(scope,
+            chunks.Select(chunk => new IngestionWindowRange(chunk.From, chunk.To)).ToArray(), ct);
+        return await DrainAsync(scope, ct);
+    }
+
     internal static IReadOnlyList<(DateOnly From, DateOnly To)> ComputeBackfillChunks(
         DateOnly from, DateOnly to, int chunkMonths)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(chunkMonths, 1);
         var chunks = new List<(DateOnly, DateOnly)>();
-        var start = from;
-        while (start <= to)
+        for (var start = from; start <= to; start = start.AddMonths(chunkMonths))
         {
             var end = start.AddMonths(chunkMonths - 1);
             if (end > to) end = to;
             chunks.Add((start, end));
-            start = end.AddMonths(1);
         }
         return chunks;
     }
 
     private async Task FetchLatestAsync(CancellationToken ct)
     {
-        // Bir önceki ayın verisini çek (TÜİK yayın gecikmesi nedeniyle)
-        var targetMonth = new DateOnly(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-1);
-        await RunInflationJobAsync(IngestionJobTypes.InflationDaily, targetMonth, targetMonth, ct);
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var target = new DateOnly(now.Year, now.Month, 1).AddMonths(-1);
+        var scope = Scope(IngestionJobTypes.InflationDaily);
+        await windows.EnsureWindowsAsync(scope, [new IngestionWindowRange(target, target)], ct);
+        await DrainAsync(scope, ct);
     }
 
-    /// <summary>
-    /// INGR-002: fetch + upsert akışını <c>ingestion_jobs</c> yaşam döngüsüyle sarmalar
-    /// (asset_id=null, source=adapter.Source). Job kaydı best-effort'tur — job DB hatası
-    /// asıl ingestion'ı maskelemez ve worker'ı düşürmez (log-and-continue korunur).
-    /// </summary>
-    private async Task RunInflationJobAsync(string jobType, DateOnly from, DateOnly to, CancellationToken ct)
+    private async Task<bool> DrainAsync(IngestionWindowScope scope, CancellationToken ct)
     {
-        var job = await TryStartJobAsync(jobType, from, to, ct);
+        while (!ct.IsCancellationRequested)
+        {
+            var result = await windows.ClaimNextAsync(scope, _leaseOwner, LeaseDuration, ct);
+            switch (result.Status)
+            {
+                case WindowClaimStatus.Complete:
+                    return true;
+                case WindowClaimStatus.Busy:
+                case WindowClaimStatus.NotDue:
+                    return false;
+                case WindowClaimStatus.PermanentBlocked:
+                    throw new PermanentIngestionWindowException(
+                        adapter.Source, null, default, default,
+                        result.OutcomeCode ?? "permanent_failed");
+                case WindowClaimStatus.Claimed:
+                    if (!await ProcessClaimAsync(result.Claim!, ct)) return false;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+        }
+        ct.ThrowIfCancellationRequested();
+        return false;
+    }
+
+    private async Task<bool> ProcessClaimAsync(IngestionWindowClaim claim, CancellationToken ct)
+    {
+        AdapterOutcome<InflationRate> outcome;
         try
         {
-            var rates = await adapter.FetchRangeAsync(from, to, ct);
-            await repository.UpsertInflationRatesAsync(rates, ct);
-            await TryMarkSuccessAsync(job, rates.Count, ct);
-            logger.LogInformation(
-                "EVDS TÜFE {JobType} tamamlandı: {From} → {To} ({Count} kayıt)",
-                jobType, from, to, rates.Count);
+            outcome = await WithLeaseRenewalAsync(claim,
+                token => adapter.FetchRangeAsync(claim.From, claim.To, token), ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await MarkCancelledBoundedAsync(claim);
+            throw;
+        }
+        catch (IngestionLeaseLostException)
         {
             throw;
         }
         catch (Exception ex)
         {
-            await TryMarkFailedAsync(job, ex);
-            logger.LogError(ex, "EVDS TÜFE {JobType} başarısız ({From}–{To})", jobType, from, to);
-        }
-    }
-
-    private async Task<IngestionJob?> TryStartJobAsync(
-        string jobType, DateOnly from, DateOnly to, CancellationToken ct)
-    {
-        try
-        {
-            // asset_id=null: inflation bir asset değil (INGR-002). source: provenance.
-            return await jobs.StartAsync(assetId: null, jobType, from, to, adapter.Source, ct);
-        }
-        catch (OperationCanceledException)
-        {
+            var retryable = ProviderFailureClassifier.IsRetryable(ex);
+            using var finalize = new CancellationTokenSource(FailureFinalizeTimeout);
+            await windows.RecordFailureAsync(claim,
+                retryable ? IngestionWindowStates.RetryableFailed : IngestionWindowStates.PermanentFailed,
+                retryable ? AdapterOutcomeKind.RetryableFailure : AdapterOutcomeKind.PermanentFailure,
+                EmptyCounts(claim),
+                retryable ? "adapter_exception_retryable" : "adapter_exception_permanent",
+                retryable ? "adapter_transient" : "adapter_unhandled", ex.GetType().Name,
+                timeProvider.GetUtcNow().Add(LogicalRetryDelay), finalize.Token);
+            if (retryable) return false;
             throw;
         }
+
+        if (outcome.IsFailure)
+            return await PersistFailureAsync(claim, outcome, ct);
+
+        if (!TryValidateSuccess(claim, outcome, out var counts))
+        {
+            var rejected = AdapterOutcome<InflationRate>.PartialRejected(
+                outcome.Records, Math.Max(outcome.RawItemCount, outcome.Records.Count),
+                Math.Max(1, outcome.RejectedCount), "worker_month_completeness_rejected");
+            await PersistFailureAsync(claim, rejected, ct);
+            throw new PermanentIngestionWindowException(
+                adapter.Source, null, claim.From, claim.To, rejected.Code);
+        }
+
+        try
+        {
+            await windows.CompleteInflationAsync(claim, outcome, counts, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await MarkCancelledBoundedAsync(claim);
+            throw;
+        }
+        catch
+        {
+            if (await windows.GetTerminalStateAsync(claim.WindowId, CancellationToken.None) is not null)
+                return true;
+            throw;
+        }
+        return true;
+    }
+
+    private async Task<bool> PersistFailureAsync(
+        IngestionWindowClaim claim, AdapterOutcome<InflationRate> outcome, CancellationToken ct)
+    {
+        var retryable = outcome.Kind == AdapterOutcomeKind.RetryableFailure;
+        await windows.RecordFailureAsync(claim,
+            retryable ? IngestionWindowStates.RetryableFailed : IngestionWindowStates.PermanentFailed,
+            outcome.Kind, FailureCounts(claim, outcome), outcome.Code, outcome.Code, outcome.Detail,
+            timeProvider.GetUtcNow().Add(retryable ? LogicalRetryDelay : TimeSpan.Zero), ct);
+        if (retryable) return false;
+        throw new PermanentIngestionWindowException(
+            adapter.Source, null, claim.From, claim.To, outcome.Code);
+    }
+
+    private async Task MarkCancelledBoundedAsync(IngestionWindowClaim claim)
+    {
+        using var finalize = new CancellationTokenSource(FailureFinalizeTimeout);
+        try
+        {
+            await windows.RecordFailureAsync(claim, IngestionWindowStates.Cancelled,
+                AdapterOutcomeKind.Cancelled, EmptyCounts(claim), "cancelled", "cancelled", null,
+                timeProvider.GetUtcNow(), finalize.Token);
+        }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "EVDS ingestion_jobs.StartAsync başarısız ({JobType}) — job kaydı atlanıyor", jobType);
-            return null;
+            logger.LogWarning(ex,
+                "EVDS cancellation terminalization başarısız; lease expiry reclaim edecek: {WindowId}",
+                claim.WindowId);
         }
     }
 
-    private async Task TryMarkSuccessAsync(IngestionJob? job, int recordsUpserted, CancellationToken ct)
+    private static bool TryValidateSuccess(
+        IngestionWindowClaim claim,
+        AdapterOutcome<InflationRate> outcome,
+        out IngestionWindowCounts counts)
     {
-        if (job is null) return;
+        var expected = Months(claim.From, claim.To).ToHashSet();
+        var dates = outcome.Records.Select(rate => rate.PeriodDate).ToArray();
+        var distinct = dates.ToHashSet();
+        var valid = outcome.Kind == AdapterOutcomeKind.Data
+            && outcome.ExpectedNoDataDates.Count == 0
+            && outcome.RejectedCount == 0
+            && outcome.Records.All(rate => rate.Source == Saydin.Shared.Constants.InflationSources.Tuik)
+            && dates.Length == distinct.Count
+            && distinct.SetEquals(expected)
+            && outcome.RawItemCount >= distinct.Count;
+        counts = new IngestionWindowCounts(expected.Count, expected.Count,
+            Math.Max(outcome.RawItemCount, distinct.Count), distinct.Count,
+            valid ? 0 : Math.Max(1, outcome.RejectedCount), 0);
+        return valid;
+    }
+
+    private static IngestionWindowCounts FailureCounts(
+        IngestionWindowClaim claim, AdapterOutcome<InflationRate> outcome)
+    {
+        var requested = Months(claim.From, claim.To).Count;
+        var distinct = outcome.Records.Select(rate => rate.PeriodDate).Distinct().Count();
+        return new IngestionWindowCounts(requested, requested,
+            Math.Max(outcome.RawItemCount, distinct), distinct,
+            Math.Max(outcome.RejectedCount, outcome.Kind == AdapterOutcomeKind.PartialRejected ? 1 : 0), 0);
+    }
+
+    private static IngestionWindowCounts EmptyCounts(IngestionWindowClaim claim)
+    {
+        var count = Months(claim.From, claim.To).Count;
+        return new IngestionWindowCounts(count, count, 0, 0, 0, 0);
+    }
+
+    private static IReadOnlyList<DateOnly> Months(DateOnly from, DateOnly to)
+    {
+        var months = new List<DateOnly>();
+        for (var month = new DateOnly(from.Year, from.Month, 1);
+             month <= new DateOnly(to.Year, to.Month, 1);
+             month = month.AddMonths(1)) months.Add(month);
+        return months;
+    }
+
+    private IngestionWindowScope Scope(string jobType) =>
+        new(adapter.Source, null, jobType, ContractVersion);
+
+    private async Task<T> WithLeaseRenewalAsync<T>(
+        IngestionWindowClaim claim,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken ct)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var operationTask = operation(linked.Token);
+        var renewalTask = RenewUntilCancelledAsync(claim, linked.Token);
         try
         {
-            await jobs.MarkSuccessAsync(job.Id, recordsUpserted, ct);
+            var first = await Task.WhenAny(operationTask, renewalTask);
+            if (first == renewalTask)
+            {
+                linked.Cancel();
+                try { await renewalTask; }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    try { await operationTask; } catch (OperationCanceledException) { }
+                    catch (Exception operationError)
+                    {
+                        logger.LogDebug(operationError,
+                            "EVDS lease kaybı sonrası provider task gözlemlendi: {WindowId}", claim.WindowId);
+                    }
+                    throw ex is IngestionLeaseLostException
+                        ? ex : new IngestionLeaseLostException(claim.WindowId, ex);
+                }
+            }
+            return await operationTask;
         }
-        catch (Exception ex)
+        finally
         {
-            // Best-effort telemetri — job güncellemesi başarısız olsa da ingestion başarılı sayılır.
-            logger.LogWarning(ex, "EVDS ingestion_jobs MarkSuccess başarısız: {JobId}", job.Id);
+            linked.Cancel();
+            try { await renewalTask; }
+            catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
         }
     }
 
-    private async Task TryMarkFailedAsync(IngestionJob? job, Exception cause)
+    private async Task RenewUntilCancelledAsync(IngestionWindowClaim claim, CancellationToken ct)
     {
-        if (job is null) return;
-        try
+        var interval = TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(1).Ticks,
+            LeaseDuration.Ticks / 3));
+        while (true)
         {
-            // B-Low-1: failed-status finalize'ı CancellationToken.None ile yaz — shutdown
-            // (iptal) sırasında patlayan bir job'ın "running"da takılı kalmasını önler.
-            await jobs.MarkFailedAsync(job.Id, cause.GetBaseException().Message, CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "EVDS ingestion_jobs MarkFailed başarısız: {JobId}", job.Id);
+            await Task.Delay(interval, timeProvider, ct);
+            try
+            {
+                if (!await windows.RenewLeaseAsync(claim, LeaseDuration, ct))
+                    throw new IngestionLeaseLostException(claim.WindowId);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (IngestionLeaseLostException) { throw; }
+            catch (Exception ex) { throw new IngestionLeaseLostException(claim.WindowId, ex); }
         }
     }
 
     private TimeSpan GetDelayUntilNextRun()
     {
-        var now     = DateTime.UtcNow;
-        var runTime = MonthlyRunUtcTime;
-        var runDay  = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(now.Year, now.Month));
-
-        var thisMonthRun = new DateTime(now.Year, now.Month, runDay,
-            runTime.Hour, runTime.Minute, 0, DateTimeKind.Utc);
-
-        if (now < thisMonthRun)
-            return thisMonthRun - now;
-
-        // Sonraki ay için de clamp uygula
-        var nextMonth    = now.Month == 12 ? 1 : now.Month + 1;
-        var nextYear     = now.Month == 12 ? now.Year + 1 : now.Year;
-        var nextRunDay   = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(nextYear, nextMonth));
-        var nextMonthRun = new DateTime(nextYear, nextMonth, nextRunDay,
-            runTime.Hour, runTime.Minute, 0, DateTimeKind.Utc);
-
-        return nextMonthRun - now;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var day = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(now.Year, now.Month));
+        var run = new DateTime(now.Year, now.Month, day,
+            MonthlyRunUtcTime.Hour, MonthlyRunUtcTime.Minute, 0, DateTimeKind.Utc);
+        if (now < run) return run - now;
+        var next = now.AddMonths(1);
+        day = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(next.Year, next.Month));
+        run = new DateTime(next.Year, next.Month, day,
+            MonthlyRunUtcTime.Hour, MonthlyRunUtcTime.Minute, 0, DateTimeKind.Utc);
+        return run - now;
     }
 }

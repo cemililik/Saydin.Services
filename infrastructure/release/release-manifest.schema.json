@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saydin.example/schemas/release-manifest-v1.json",
+  "title": "Saydin immutable release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "releaseId", "source", "database", "compatibility", "images", "runtimeImages", "backupPolicy"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "releaseId": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commitSha", "workflowRef"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "commitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "workflowRef": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/release-images\\.yml@refs/heads/main$"}
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terminalMigration", "trustRootSha256"],
+      "properties": {
+        "terminalMigration": {"type": "string", "pattern": "^[0-9]{3}_[a-z0-9_]+$"},
+        "trustRootSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimumMigration", "maximumMigration", "previousManifestSha256"],
+      "properties": {
+        "minimumMigration": {"type": "string", "pattern": "^[0-9]{3}_[a-z0-9_]+$"},
+        "maximumMigration": {"type": "string", "pattern": "^[0-9]{3}_[a-z0-9_]+$"},
+        "previousManifestSha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]}
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {"$ref": "#/$defs/image"}
+    },
+    "runtimeImages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timescale", "redis", "postgresExporter", "redisExporter", "otel", "prometheus", "alertmanager", "blackbox", "nodeExporter", "tempo", "loki"],
+      "properties": {
+        "timescale": {"$ref": "#/$defs/digestReference"},
+        "redis": {"$ref": "#/$defs/digestReference"},
+        "postgresExporter": {"$ref": "#/$defs/digestReference"},
+        "redisExporter": {"$ref": "#/$defs/digestReference"},
+        "otel": {"$ref": "#/$defs/digestReference"},
+        "prometheus": {"$ref": "#/$defs/digestReference"},
+        "alertmanager": {"$ref": "#/$defs/digestReference"},
+        "blackbox": {"$ref": "#/$defs/digestReference"},
+        "nodeExporter": {"$ref": "#/$defs/digestReference"},
+        "tempo": {"$ref": "#/$defs/digestReference"},
+        "loki": {"$ref": "#/$defs/digestReference"}
+      }
+    },
+    "backupPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rpoMinutes", "rtoMinutes", "walDays", "weeklyWeeks", "monthlyMonths"],
+      "properties": {
+        "rpoMinutes": {"const": 15},
+        "rtoMinutes": {"const": 120},
+        "walDays": {"const": 14},
+        "weeklyWeeks": {"const": 8},
+        "monthlyMonths": {"const": 12}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "digestReference": {"type": "string", "pattern": "^[a-z0-9.-]+(?:/[a-z0-9_.-]+)+@sha256:[0-9a-f]{64}$"},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sourceCommit", "reference", "digest", "platforms", "platformDigests", "sbom"],
+      "properties": {
+        "name": {"enum": ["api", "ingestion", "control", "calendar", "dqa", "backup", "caddy"]},
+        "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "reference": {"type": "string", "pattern": "^ghcr\\.io/[a-z0-9_.-]+/[a-z0-9_.-]+$"},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "platforms": {"const": ["linux/amd64", "linux/arm64"]},
+        "platformDigests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64", "linux/arm64"],
+          "properties": {
+            "linux/amd64": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "linux/arm64": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        },
+        "sbom": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64", "linux/arm64"],
+          "properties": {
+            "linux/amd64": {"$ref": "#/$defs/sbomPair"},
+            "linux/arm64": {"$ref": "#/$defs/sbomPair"}
+          }
+        }
+      }
+    },
+    "sbomPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spdxSha256", "cycloneDxSha256"],
+      "properties": {
+        "spdxSha256": {"$ref": "#/$defs/sha256"},
+        "cycloneDxSha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

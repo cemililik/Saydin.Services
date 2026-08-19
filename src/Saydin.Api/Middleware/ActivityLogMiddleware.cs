@@ -1,5 +1,6 @@
 using Saydin.Api.Helpers;
 using Saydin.Api.Services;
+using Saydin.Shared.Constants;
 
 namespace Saydin.Api.Middleware;
 
@@ -23,6 +24,17 @@ public sealed class ActivityLogMiddleware(
 
     public async Task InvokeAsync(HttpContext context, RequestDelegate next)
     {
+        if (context.Items.TryGetValue(ApiPortBoundary.RequestKindItemKey, out var kind)
+            && kind is not ApiPortRequestKind.PublicProduct)
+        {
+            await next(context);
+            return;
+        }
+
+        var action = ResolveAction(context);
+        if (action is not null)
+            context.GetOrCreateActivityLog(action);
+
         try
         {
             await next(context);
@@ -36,7 +48,7 @@ public sealed class ActivityLogMiddleware(
             {
                 try
                 {
-                    builder.WithStatusCode((short)context.Response.StatusCode);
+                    builder.WithResponseStatus((short)context.Response.StatusCode);
                     builder.Send(activityLogger);
                 }
                 catch (Exception logEx)
@@ -47,6 +59,27 @@ public sealed class ActivityLogMiddleware(
                 }
             }
         }
+    }
+
+    internal static string? ResolveAction(HttpContext context)
+    {
+        var endpointName = context.GetEndpoint()?.Metadata
+            .GetMetadata<IEndpointNameMetadata>()?.EndpointName;
+        return endpointName switch
+        {
+            "CalculateWhatIf" => ActivityActions.WhatIfCalculate,
+            "CompareWhatIf" => ActivityActions.WhatIfCompare,
+            "ReverseCalculateWhatIf" => ActivityActions.WhatIfReverse,
+            "CalculateDca" => ActivityActions.WhatIfDca,
+            "GetAssets" => ActivityActions.AssetsList,
+            "GetAssetPrice" => ActivityActions.AssetPrice,
+            "GetAssetPriceRange" => ActivityActions.AssetPriceRange,
+            "GetScenarios" or "GetScenarioPage" => ActivityActions.ScenarioList,
+            "SaveScenario" => ActivityActions.ScenarioSave,
+            "DeleteScenario" => ActivityActions.ScenarioDelete,
+            "GetAppConfig" => ActivityActions.ConfigFetch,
+            _ => null,
+        };
     }
 }
 
@@ -62,13 +95,21 @@ public static class ActivityLogContextExtensions
         if (context.Items.TryGetValue(ActivityLogMiddleware.BuilderItemKey, out var raw)
             && raw is ActivityLogBuilder existing)
         {
+            var resolved = context.RequestServices.GetService<IInstallationPrincipalContext>();
+            if (resolved?.IsResolved == true)
+                existing.WithUserId(resolved.PrincipalId);
             return existing.WithAction(action);
         }
 
         var builder = new ActivityLogBuilder(
             context,
-            context.RequestServices.GetService<IGeoIpResolver>())
+            context.RequestServices.GetService<IGeoIpResolver>(),
+            context.RequestServices.GetService<TimeProvider>())
             .WithAction(action);
+
+        var principal = context.RequestServices.GetService<IInstallationPrincipalContext>();
+        if (principal?.IsResolved == true)
+            builder.WithUserId(principal.PrincipalId);
 
         context.Items[ActivityLogMiddleware.BuilderItemKey] = builder;
         return builder;

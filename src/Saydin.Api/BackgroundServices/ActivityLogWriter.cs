@@ -1,6 +1,4 @@
 using System.Threading.Channels;
-using Microsoft.EntityFrameworkCore;
-using Saydin.Shared.Data;
 using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
 
@@ -8,7 +6,7 @@ namespace Saydin.Api.BackgroundServices;
 
 public sealed class ActivityLogWriter(
     Channel<ActivityLog> channel,
-    IServiceScopeFactory scopeFactory,
+    IActivityLogBatchStore store,
     ILogger<ActivityLogWriter> logger) : BackgroundService
 {
     private const int BatchSize = 50;
@@ -114,25 +112,30 @@ public sealed class ActivityLogWriter(
             var outcome = await TrySaveBatchAsync(entries, ct);
             switch (outcome.Kind)
             {
-                case FlushOutcomeKind.Success:
+                case null:
                     return;
 
-                case FlushOutcomeKind.Cancelled:
+                case ActivityLogWriteFailureKind.Cancelled:
                     ReportFailure(entries.Count, OutcomeCancelled);
                     throw outcome.Exception!;
 
-                case FlushOutcomeKind.Toxic:
+                case ActivityLogWriteFailureKind.ToxicRow:
                     lastException = outcome.Exception;
                     if (await HandleToxicAsync(entries, isShutdown, ct))
                         return; // bisection geri kalanı kurtardı
                     break;
 
-                case FlushOutcomeKind.Transient:
+                case ActivityLogWriteFailureKind.TransientBatch:
                     lastException = outcome.Exception;
                     if (attempt >= maxAttempts) break;
                     if (!await BackoffAsync(attempt, maxAttempts, entries.Count, outcome.Exception!, ct))
                         throw new OperationCanceledException(ct);
                     break;
+
+                case ActivityLogWriteFailureKind.FatalHost:
+                    logger.LogCritical(outcome.Exception,
+                        "Activity log writer systemic veritabanı hatasıyla duruyor");
+                    throw outcome.Exception!;
 
                 // Sonar S131: default — enum'a yeni değer eklendiğinde derleyici
                 // switch'in eksikliğini sezmez. Runtime'da fail-fast vermesi için
@@ -154,35 +157,24 @@ public sealed class ActivityLogWriter(
     {
         try
         {
-            using var scope = scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<SaydinDbContext>();
-            await db.ActivityLogs.AddRangeAsync(entries, ct);
-            await db.SaveChangesAsync(ct);
-            return new FlushOutcome(FlushOutcomeKind.Success, null);
-        }
-        catch (OperationCanceledException ex)
-        {
-            return new FlushOutcome(FlushOutcomeKind.Cancelled, ex);
-        }
-        catch (DbUpdateException ex)
-        {
-            return new FlushOutcome(FlushOutcomeKind.Toxic, ex);
+            await store.SaveAsync(entries, ct);
+            return new FlushOutcome(null, null);
         }
         catch (Exception ex)
         {
-            return new FlushOutcome(FlushOutcomeKind.Transient, ex);
+            return new FlushOutcome(ActivityLogWriteFailureClassifier.Classify(ex), ex);
         }
     }
 
     /// <summary>LOGR-009: toxic message → bisect; tek satırlık batch → izoleli drop + metric.</summary>
     private async Task<bool> HandleToxicAsync(List<ActivityLog> entries, bool isShutdown, CancellationToken ct)
     {
-        if (entries.Count > BisectMinBatch && !isShutdown)
+        if (entries.Count > BisectMinBatch)
         {
             logger.LogWarning(
                 "Activity log batch toxic message şüphesi — bisection ile {Count} kayıt bölünüyor",
                 entries.Count);
-            await BisectAndFlushAsync(entries, ct);
+            await BisectAndFlushAsync(entries, isShutdown, ct);
             return true;
         }
         if (entries.Count == BisectMinBatch)
@@ -224,20 +216,20 @@ public sealed class ActivityLogWriter(
     /// LOGR-009: Batch toxic row ihtimaliyle bölünür; her yarım ayrı yazılır.
     /// Worst-case O(log N) attempt başına — 50 batch için ≤6 seviyeli ağaç.
     /// </summary>
-    private async Task BisectAndFlushAsync(List<ActivityLog> entries, CancellationToken ct)
+    private async Task BisectAndFlushAsync(
+        List<ActivityLog> entries, bool isShutdown, CancellationToken ct)
     {
         if (entries.Count <= BisectMinBatch)
         {
-            await FlushAsync(entries, isShutdown: false, ct);
+            await FlushAsync(entries, isShutdown, ct);
             return;
         }
 
         var mid = entries.Count / 2;
-        await FlushAsync(entries.GetRange(0, mid), isShutdown: false, ct);
-        await FlushAsync(entries.GetRange(mid, entries.Count - mid), isShutdown: false, ct);
+        await FlushAsync(entries.GetRange(0, mid), isShutdown, ct);
+        await FlushAsync(entries.GetRange(mid, entries.Count - mid), isShutdown, ct);
     }
 
-    private enum FlushOutcomeKind { Success, Cancelled, Toxic, Transient }
-
-    private readonly record struct FlushOutcome(FlushOutcomeKind Kind, Exception? Exception);
+    private readonly record struct FlushOutcome(
+        ActivityLogWriteFailureKind? Kind, Exception? Exception);
 }

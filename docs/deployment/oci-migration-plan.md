@@ -1,5 +1,14 @@
 # Oracle Cloud (OCI A1) Geçiş Planı — Runbook
 
+> **ARŞİVLENMİŞ TASARIM — KOPYALA/ÇALIŞTIR DEĞİLDİR.** Bu 2026-05-31 lift-and-shift planındaki
+> inline Compose, migration, backup, secret ve rollback komutları güncel güvenlik sözleşmesinden
+> önce yazılmıştır. Üretim için yalnız digest-only
+> [`../../infrastructure/deployment/compose.production.yml`](../../infrastructure/deployment/compose.production.yml),
+> [`../../infrastructure/deployment/validate-production-assets.sh`](../../infrastructure/deployment/validate-production-assets.sh),
+> imzalı [`../../infrastructure/release/`](../../infrastructure/release/) akışı ve
+> [`../runbooks/`](../runbooks/README.md) kullanılır. Domain, OCI region, bucket/KMS ve backup
+> role/HBA girdileri operator tarafından sağlanmadan deployment fail-closed kalır.
+
 > **Karar:** [ADR-007](../decisions/ADR-007-hosting-deployment.md) · **Gerekçe/karşılaştırma:**
 > [`hosting-comparison.md`](hosting-comparison.md)
 >
@@ -7,9 +16,8 @@
 > (ARM, 4 OCPU / 24 GB, kalıcı $0) VM'ine **lift-and-shift** etmek. Mevcut `docker-compose`
 > neredeyse olduğu gibi taşınır; kod ve migration değişmez.
 >
-> **Bu runbook fazlara bölünmüştür.** Her faz: *amaç → görevler (komutlarla) → kabul kriteri*.
-> Faz sonundaki kutucukları işaretleyerek ilerleyin. Tüm config'ler kopyala-çalıştır hazırdır
-> (Ek A).
+> **Bu tarihsel runbook fazlara bölünmüştür.** Komutlar ve Ek A güncel değildir; yalnız karar
+> geçmişi olarak okunur, kopyalanıp çalıştırılmaz.
 
 ---
 
@@ -57,8 +65,10 @@ tests) prod compose'a **alınmaz** (opsiyonel gözlem profili Ek A.4).
    sonradan değiştirilemez.
 2. **Alan adı & DNS planı.** `api.<alanadi>` subdomain'ini API için ayır. (DNS A kaydı
    Faz 4'te, VM IP'si belli olunca girilecek.)
-3. **Sır üretimi.** Güçlü, benzersiz değerler üret ve güvenli sakla (parola yöneticisi):
-   - `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, (kullanılacaksa) `POSTGRES_EXPORTER_PASSWORD`.
+3. **Sır üretimi.** Güçlü, benzersiz değerler üret ve güvenli sakla (secret backend):
+   - PostgreSQL admin ile her managed purpose (`migrator`, `api`, `ingestion`,
+     `calendar_importer`, `exporter`, `audit`) için ayrı password file; Redis password file.
+     Raw DB parolası/connection URL environment veya Compose interpolation'a konmaz.
    - Dış API key'leri: `EVDS_API_KEY` (ücretsiz, evds3.tcmb.gov.tr), `COINGECKO_API_KEY`
      (gerekirse), `OPENEXCHANGERATES_APP_ID`, `TWELVEDATA_API_KEY`. TCMB key gerektirmez.
    - (Opsiyonel) `GEOIP_ACCOUNT_ID` / `GEOIP_LICENSE_KEY` (MaxMind; yoksa GeoIP best-effort kapalı).
@@ -177,7 +187,7 @@ açık gösteriyor; 5432/6379 dışarıdan kapalı.
    ```
 
 **Kabul kriteri:** `docker compose ps` 4 servis **healthy**; `schema_migrations` 001–014
-dolu; iki hypertable mevcut; `curl -s localhost:8080/health` (VM içinden) `Healthy` döndürüyor.
+dolu; iki hypertable mevcut; `curl -fsS localhost:8080/health/live` (VM içinden) başarılıdır.
 
 ---
 
@@ -202,11 +212,12 @@ dolu; iki hypertable mevcut; `curl -s localhost:8080/health` (VM içinden) `Heal
    ```
 5. **Public doğrulama (dışarıdan):**
    ```bash
-   curl -fsS https://api.<alanadi>/health        # Healthy + geçerli TLS
+   curl -fsS https://api.<alanadi>/health/live   # liveness + geçerli TLS
    ```
 
-**Kabul kriteri:** `https://api.<alanadi>/health` geçerli Let's Encrypt sertifikasıyla
-`Healthy` döndürüyor; HTTP→HTTPS yönlendirmesi çalışıyor.
+**Kabul kriteri:** `https://api.<alanadi>/health/live` geçerli Let's Encrypt sertifikasıyla
+başarılıdır; HTTP→HTTPS yönlendirmesi çalışır. Dependency readiness public proxy'den değil,
+private management listener'daki `:9090/health/ready` yolundan izlenir.
 
 ---
 
@@ -275,7 +286,7 @@ ngrok bağımlılığı kaldırıldı.
 
 **Amaç:** "Production hazır" kanıtı.
 
-- [ ] `https://api.<alanadi>/health` → `Healthy`, geçerli TLS, HSTS başlığı.
+- [ ] `https://api.<alanadi>/health/live` → 2xx, geçerli TLS, HSTS başlığı.
 - [ ] What-if / compare / dca / reverse / saved-scenarios uçtan uca 200.
 - [ ] Hata sözleşmesi: feature-disabled → 403 + `application/problem+json` + `traceId`;
       daily-limit → 429; validation → 400 (error-contract EC çalışması korunmuş).
@@ -325,13 +336,12 @@ services:
     container_name: saydin-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-saydin}
-      POSTGRES_USER: ${POSTGRES_USER:-saydin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
-      POSTGRES_EXPORTER_PASSWORD: ${POSTGRES_EXPORTER_PASSWORD:-}
+      POSTGRES_USER: saydin_admin
+      POSTGRES_PASSWORD_FILE: /run/saydin-secrets/private/password
     # Host'a PORT AÇILMAZ — yalnız iç ağ. (Dev compose'daki 127.0.0.1:5432 yok.)
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infrastructure/postgres/migrations:/docker-entrypoint-initdb.d:ro
+      - postgres_secret:/run/saydin-secrets:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-saydin}\" -d \"$${POSTGRES_DB:-saydin}\""]
       interval: 10s
@@ -361,7 +371,15 @@ services:
     container_name: saydin-api
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-saydin}
+      PGUSER: ${SAYDIN_API_LOGIN:?managed role metadata required}
+      PGSSLMODE: Disable
+      SAYDIN_API_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DATABASE_SYSTEM_HASH: ${SAYDIN_DATABASE_SYSTEM_HASH:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: 1
       ConnectionStrings__Redis: "redis:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
       GeoIp__DatabasePath: "/app/geoip/GeoLite2-City.mmdb"
       # Caddy arkasında gerçek istemci IP'si için (F1.2-3) — Docker subnet'ini güvenilir işaretle:
@@ -369,11 +387,12 @@ services:
       # Otlp__Endpoint: opsiyonel gözlem (A.4) açılırsa set edilir; aksi halde export kapalı.
     volumes:
       - ./infrastructure/geoip:/app/geoip:ro
+      - api_secret:/run/saydin-secrets:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health/live || exit 1"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -387,7 +406,15 @@ services:
     container_name: saydin-price-ingestion
     environment:
       DOTNET_ENVIRONMENT: Production
-      ConnectionStrings__Postgres: "Host=postgres;Database=${POSTGRES_DB:-saydin};Username=${POSTGRES_USER:-saydin};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-saydin}
+      PGUSER: ${SAYDIN_INGESTION_LOGIN:?managed role metadata required}
+      PGSSLMODE: Disable
+      SAYDIN_INGESTION_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DATABASE_SYSTEM_HASH: ${SAYDIN_DATABASE_SYSTEM_HASH:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: 1
       ExternalApis__CoinGecko__ApiKey: ${COINGECKO_API_KEY:-}
       ExternalApis__OpenExchangeRates__AppId: ${OPENEXCHANGERATES_APP_ID:-}
       ExternalApis__TwelveData__ApiKey: ${TWELVEDATA_API_KEY:-}
@@ -399,6 +426,8 @@ services:
       IngestionWorkers__EvdsInflation__Enabled: ${WORKER_EVDS_ENABLED:-false}
     depends_on:
       postgres: { condition: service_healthy }
+    volumes:
+      - ingestion_secret:/run/saydin-secrets:ro
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/saydin-ingestion-healthy && find /tmp/saydin-ingestion-healthy -mmin -2 -print -quit | grep -q . || exit 1"]
       interval: 30s
@@ -455,9 +484,10 @@ FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
 ```bash
 # --- PostgreSQL ---
 POSTGRES_DB=saydin
-POSTGRES_USER=saydin
-POSTGRES_PASSWORD=<GÜÇLÜ-RASTGELE>
-POSTGRES_EXPORTER_PASSWORD=          # yalnız gözlem profili (A.4) kullanılacaksa
+# DB secret'ları bu dosyaya yazılmaz. Admin ve her managed purpose için ayrı
+# owner-only file secret, deployment secret backend'i tarafından mount edilir.
+# Nonsecret SAYDIN_DATABASE_SYSTEM_HASH/ROLE_PREFIX ve exact login adları
+# bootstrap/identity adımından alınır.
 
 # --- Redis ---
 REDIS_PASSWORD=<GÜÇLÜ-RASTGELE>
@@ -566,7 +596,7 @@ docker exec -i saydin-postgres psql -U saydin -d saydin -c "SELECT timescaledb_p
 - [ ] **Faz 1** A1 VM oluştu + PAYG + reserved IP + SSH
 - [ ] **Faz 2** Docker + iki-katman firewall + swap + unattended-upgrades
 - [ ] **Faz 3** ARM Dockerfile + `.env` + prod compose + fresh-init 001→014 + 2 hypertable
-- [ ] **Faz 4** DNS + Caddy + Let's Encrypt + ForwardedHeaders + public `/health`
+- [ ] **Faz 4** DNS + Caddy + Let's Encrypt + ForwardedHeaders + public `/health/live`
 - [ ] **Faz 5** Worker'lar açık + ingestion akıyor + veri doğrulandı
 - [ ] **Faz 6** Block-volume policy + `pg_dump` cron + restore tatbikatı
 - [ ] **Faz 7** İstemci yeni domain'e geçti + ngrok emekli

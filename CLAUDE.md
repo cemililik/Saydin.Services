@@ -4,9 +4,10 @@
 
 Saydın, Türk kullanıcılara yönelik finansal "ya alsaydım?" hesaplama uygulamasının backend'idir.
 
-Bu repo iki .NET 10 servisini ve ortak kütüphaneyi içerir:
+Bu repo iki .NET 10 servisini, one-shot database migrator'ı ve ortak kütüphaneyi içerir:
 - `Saydin.Api` — Flutter uygulamasına HTTP endpoint'leri sunan Minimal API servisi
 - `Saydin.PriceIngestion` — Dış finansal API'lerden fiyat verisi çeken background worker
+- `Saydin.DatabaseMigrator` — SQL migration control-plane; servislerden önce tek sefer çalışır
 - `Saydin.Shared` — Her iki servisin kullandığı ortak entity, exception ve extension sınıfları
 
 ---
@@ -21,19 +22,24 @@ Tüm build, test ve çalıştırma işlemleri **Docker Compose** üzerinden yap�
 # Kod değişikliğinden sonra image'ı yeniden oluştur ve servisleri başlat
 docker compose build && docker compose up -d
 
-# Test (Faz 3: `tests` compose profili — SDK imajı + repo mount + compose ağı).
+# Lokal optional test (Faz 3: `tests` compose profili — SDK imajı + repo mount + compose ağı).
 # `api`/`saydin-api` runtime imajı SDK ve test projeleri içermez; `dotnet test` ÇALIŞMAZ.
 docker compose run --rm tests                                   # tüm solution (unit + integration)
 docker compose run --rm tests test tests/Saydin.Api.Tests       # yalnız bir proje
 docker compose run --rm tests test tests/Saydin.Api.IntegrationTests   # gerçek PG/Redis (compose up gerekli)
+docker compose run --rm database-migrator --verify-only         # checksum + şema readiness
+# Required CI integration akışı: `.github/workflows/ci.yml` integration-test job'ı
+# + `.github/compose.integration.yml` (UUID DB/project/volume, no host ports, TRX zero-skip gate).
 ```
 
 **`docker compose run --rm api dotnet build` KULLANMA** — build ve deploy için her zaman `docker compose build && docker compose up -d` kullan.
 
 Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
 
-**NOT (Faz 3):** Migration zinciri yalnız boş volume'da (fresh init) alfabetik + `ON_ERROR_STOP`
-ile çalışır. Bir `.sql` hata verirse zincir DURUR. TimescaleDB hypertable'larında (`activity_logs`)
+**NOT (C-02):** Migration zinciri artık Postgres `initdb.d` tarafından değil, her deploy/startup'ta
+one-shot `database-migrator` tarafından çalıştırılır. PostgreSQL health yalnız bağlantıyı ölçer;
+API, ingestion ve DB monitoring `service_completed_successfully` ile doğrulanmış şemayı bekler.
+Bir migration hata verirse job non-zero döner ve downstream başlamaz. TimescaleDB hypertable'larında (`activity_logs`)
 compression **enabled** iken `ALTER COLUMN ... TYPE` yasaktır (TS 2.16.1). Bu nedenle compression'ı
 etkileyen kolon değişiklikleri için `008b` (009'dan önce disable) / `013` (012'den sonra re-enable)
 sarmalama deseni kullanılır — yeni `ALTER COLUMN TYPE` eklerken bu pencereyi koru.
@@ -76,7 +82,7 @@ Build veya test başarısız olursa commit atma, önce hatayı düzelt.
 - **DbContext:** `SaydinDbContext` `Saydin.Shared/Data/` içinde yaşar, her iki servis tarafından paylaşılır
 - **Saydin.Api:** `AddDbContext<SaydinDbContext>()` → scoped lifetime
 - **Saydin.PriceIngestion:** `AddDbContextFactory<SaydinDbContext>()` → singleton-safe factory pattern
-- **Migration:** `dotnet ef migrations add <Ad> --project src/Saydin.Shared --startup-project src/Saydin.Api`
+- **Migration:** `infrastructure/postgres/migrations/` altındaki immutable sıralı SQL + `Saydin.DatabaseMigrator`; EF migration kullanılmaz
 - **HTTP Client:** `IHttpClientFactory` ile kayıtlı named client'lar — `new HttpClient()` YASAKTIR
 
 ### Servis Sınırları
@@ -355,15 +361,12 @@ await context.Database.ExecuteSqlInterpolatedAsync(
 ### Migration Komutları
 
 ```bash
-# Yeni migration oluştur
-dotnet ef migrations add <MigrationAdı> \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
+# Yeni migration: sıradaki numarayla yeni .sql ekle; 001..014'ü değiştirme.
+# Mevcut hedefe pending migration'ları uygula (Compose secrets env'den gelir):
+docker compose run --rm database-migrator
 
-# Veritabanını güncelle
-dotnet ef database update \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
+# Uygulama yapmadan checksum, control state ve core şema fingerprint doğrula:
+docker compose run --rm database-migrator --verify-only
 ```
 
 ---
@@ -383,7 +386,9 @@ dotnet ef database update \
     timeout ve hata→exception davranışı doğrulanır.
   - **Veritabanı / integration testleri:** **mock YASAK** — gerçek PostgreSQL ve Redis
     kullanılır (`tests` compose profili; compose ağındaki `postgres`/`redis` servisleri).
-    PG/Redis erişilemezse test `SkippableFact` ile Skipped olur, kırmızıya dönmez.
+    Lokal optional modda PG/Redis erişilemezse `SkippableFact` ile Skipped olabilir. Required
+    CI modunda eksik/yanlış infra fail-fast'tır; TRX en az 20 executed ve 0 skipped/notExecuted ister
+    (8 gerçek-infra davranış testi + 12 bağlantı/guard regresyonu).
 
 ---
 

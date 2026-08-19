@@ -25,8 +25,8 @@ Projenin teknik bağımlılıkları kararı kuvvetle kısıtlıyor:
    `activity_logs` migration 008) **ve** `activity_logs` üzerinde **compression**
    (`add_compression_policy`, 008/008b/013). Vanilya Postgres'te migration zinciri patlar.
 2. **Redis** — cache + atomik **Lua script** (`ScriptEvaluate`) ile rate limiting.
-3. **İki .NET 10 servisi** — `Saydin.Api` (always-on HTTP) + `Saydin.PriceIngestion`
-   (günlük/aylık zamanlı worker; şu an `Enabled:false`).
+3. **İki .NET 10 servisi** — `Saydin.Api` (always-on HTTP) + profile-gated
+   `Saydin.PriceIngestion` (başlatılırken en az bir provider explicit açık olmalıdır).
 4. Servisler **yalnız PostgreSQL üzerinden** haberleşir (message bus yok) → tek makinede
    mükemmel uyumlu.
 

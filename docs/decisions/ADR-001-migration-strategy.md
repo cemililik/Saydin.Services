@@ -1,15 +1,75 @@
 # ADR-001 — Migration & Schema Evolution Stratejisi
 
-- **Durum:** Kabul edildi (revize — Faz 4). Önceki "Seçenek B (EF Core)" önerisi
-  **Seçenek C (Hybrid)** ile değiştirildi; gerekçe için aşağıdaki
-  "Karar Revizyonu (Faz 4 — F4-1/F4-8)" bölümüne bakın.
-- **Tarih:** 2026-05-27 (ilk taslak) · 2026-05-29 (Faz 4 revizyonu)
+- **Durum:** Kabul edildi (2026-08-18 C-02 control-plane + migration 019 privilege-separation
+  revizyonu). Faz 4'teki
+  `initdb.d` + `apply-migrations.sh` çalıştırma kararı aşağıdaki güncel kararla superseded'dır;
+  numaralandırılmış SQL kaynak formatı korunur.
+- **Tarih:** 2026-05-27 (ilk taslak) · 2026-05-29 (Faz 4) · 2026-08-18 (C-02)
 - **Karar verenler:** Backend ekibi
 - **İlgili bulgular (code review):** Claude `[C-G-001/008/009/010]`, `[C-YAPISAL-1..4]`, `[C-H-DC-11]`; GPT-5 `[G-G-04]`, `[G-G-06]`; Faz 4 `F4-1`, `F4-8`
 
 ---
 
-## Bağlam
+## Güncel Karar (2026-08-18 — C-02)
+
+Kanonik şema kaynağı `infrastructure/postgres/migrations/` altındaki immutable, sıralı
+`.sql`/optional `.sh` dosyalarıdır. Bunları çalıştırmanın tek normal deploy yolu artık küçük
+`.NET` console uygulaması `Saydin.DatabaseMigrator` ve onun migration dosyalarını aynı image'a
+bake eden `infrastructure/postgres/Dockerfile.migrator` artifact'ıdır.
+
+- Runner, tüm hedeflerde persistent Npgsql connection üzerinde session-level advisory lock alır;
+  her SQL gövdesi ve tracking kaydını runner-owned aynı transaction'da işler. Uygulanmış dosyalar
+  raw-byte SHA-256 ile doğrulanır; 001–022 trust-root hash'leri binary içinde pinlidir ve DQA aynı
+  canonical map'i derler.
+- Control-plane ve tarihsel migration transaction'ları `search_path=public,pg_temp` kullanır.
+  `pg_catalog` burada bilinçli olarak explicit yazılmaz: PostgreSQL catalog'u otomatik olarak en önce
+  ararken unqualified tarihsel `CREATE` hedefi `public` kalır. Migration 019'un fully-qualified gövdesi
+  ise contract GUC'larından sonra daha dar `pg_catalog,pg_temp` path'ine geçer ve exact assert edilir.
+- Boş DB tam bootstrap edilir. Eksiksiz 014 legacy DB business data yeniden yazılmadan checksum ve
+  state alanlarıyla baseline edilir. Partial/ambiguous, bilinmeyen/yeni version, checksum drift,
+  core şema fingerprint drift ve `postgres`/`template0`/`template1` hedefleri non-zero reddedilir.
+- Global rol grafiği schema migration'dan önce one-shot `Saydin.DatabaseRoleBootstrap` tarafından
+  kurulur/doğrulanır. Normal migrator versioned least-privilege login + owner-only password file ile
+  bağlanır ve NOLOGIN owner'a `SET ROLE` eder. OID-10 admin connection yalnız explicit legacy
+  privilege cutover control-plane yolunda kabul edilir; runtime consumer credential'ı değildir.
+- TimescaleDB 2.16.1 internal-schema sözleşmesi exact'tir: `_timescaledb_internal` için PUBLIC,
+  versioned login ve foreign role grant'i yoktur; extension/bootstrap admin schema-owner
+  `CREATE+USAGE`, altı capability, NOLOGIN hypertable relation-owner ve passwordless scheduler yalnız
+  `USAGE` alır. Capability `USAGE` planner için, relation-owner `USAGE` future chunk creation için
+  zorunludur. Root table ACL'leri source/compressed chunk'lara Timescale tarafından aynalanır;
+  dolayısıyla direct chunk SELECT kök SELECT ile eşdeğer kabul edilir, write güvenlik sınırı exact
+  propagated ingestion fence + canlı window/lease sözleşmesidir. Bu davranış schema, chunk ACL,
+  trigger, RLS/policy, foreign-role deny ve scheduled BGW testleriyle kilitlenir.
+- `schema_migrations.state`, adımı `running`/`succeeded`/`skipped_optional`/`failed` olarak;
+  `saydin_migration_control.state` tüm hedefi `bootstrapping`/`baselining`/`ready`/`failed` olarak
+  açıkça kaydeder. Optional 012b yalnız parola yokken `skipped_optional` olabilir.
+- PostgreSQL `pg_isready` yalnız bağlantı sinyalidir. Compose'ta migrator `restart: "no"` one-shot
+  çalışır; API, ingestion, pgAdmin, test runner ve PostgreSQL exporter
+  `condition: service_completed_successfully` ile şema readiness'ini bekler.
+- CI iki ayrı UUID-izole TimescaleDB cluster kullanır; role-bootstrap + one-shot exit +
+  `--verify-only`, 21 terminal migration/21 checksum/2 hypertable/`ready` SQL kapısı ve en az 76
+  executed, sıfır skipped/failed/notExecuted migrator TRX kapısı required'dır. Role-bootstrap için
+  ayrıca 39 unit + 7 real-PG TRX kapısı vardır.
+
+### Rollout ve Recovery Sözleşmesi
+
+Fresh rollout sırası: OID-10 role-bootstrap `ensure/verify` → managed migrator login secret mount →
+one-shot migration/verify → consumer servislerdir. Complete-014 veya managed-through-018 legacy
+cutover; eski consumer drain → açık `--legacy-privilege-cutover --admin-connection-file` → 019
+terminal fingerprint → runtime credential switch → eski credential rotation sırasını izler. Migrator
+non-zero dönerse consumer'ları zorla başlatma, DB'yi otomatik drop/recreate etme, tracking satırı
+elle ekleme veya tarihsel dosyayı değiştirme yasaktır. Hedef clone'unda audit/backfill tamamlanır;
+gerekirse yeni additive düzeltme migration'ı üretilir ve aynı image akışı tekrar çalıştırılır.
+
+Bu faz yeni business-schema migration eklemediği için uygulama image rollback'i additive control
+metadata'yı bırakabilir; eski uygulamalar bu tabloları/kolonları okumaz. Migrator artifact rollback'i
+ise yalnız hedef manifestiyle checksum/version uyumlu önceki artifact'a yapılabilir. Uyum yoksa eski
+runner'a veya `apply-migrations.sh`'e düşmek güvenli rollback değildir; servisler kapalı tutulur ve
+staging clone üzerinden forward-fix hazırlanır. `apply-migrations.sh` retired compatibility
+entrypoint olarak exit 64 ile fail-closed'dur; migration uygulamaz ve normal/recovery deploy
+mekanizması değildir.
+
+## Tarihsel Bağlam (audit trail; güncel çalıştırma modeli değildir)
 
 Saydın Services, PostgreSQL şemasını numaralandırılmış SQL dosyalarıyla yönetiyor:
 `infrastructure/postgres/migrations/001_initial.sql` … `010_add_geo_columns.sql`.
@@ -151,7 +211,7 @@ ADR-B tam geçişe kadar:
 
 ---
 
-## Karar Revizyonu (Faz 4 — F4-1/F4-8)
+## Tarihsel Karar Revizyonu (Faz 4 — F4-1/F4-8; 2026-08-18'de superseded)
 
 > **Tarih:** 2026-05-29 · **Durum:** Kabul edildi
 >

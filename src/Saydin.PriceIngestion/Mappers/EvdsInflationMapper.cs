@@ -1,5 +1,8 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using Saydin.PriceIngestion.Adapters;
 using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 
@@ -16,7 +19,11 @@ public static class EvdsInflationMapper
     // TP.FG.J0 → EVDS JSON field: TP_FG_J0
     private const string FieldName = "TP_FG_J0";
 
-    public static IReadOnlyList<InflationRate> Map(string json, string source = InflationSources.Tuik)
+    public static IReadOnlyList<InflationRate> Map(
+        string json,
+        string source = InflationSources.Tuik,
+        byte[]? payloadSha256 = null,
+        int? payloadByteLength = null)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -26,6 +33,7 @@ public static class EvdsInflationMapper
 
         var rates = new List<InflationRate>();
         var now   = DateTimeOffset.UtcNow;
+        var payloadHash = payloadSha256 ?? SHA256.HashData(Encoding.UTF8.GetBytes(json));
 
         foreach (var item in items.EnumerateArray())
         {
@@ -44,8 +52,19 @@ public static class EvdsInflationMapper
 
             if (!decimal.TryParse(valueStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var indexValue))
                 continue;
+            if (indexValue <= 0)
+                throw new ProviderContractException("contract_index_value_invalid");
 
-            rates.Add(new InflationRate
+            var observationId = $"evds:{FieldName}:{periodDate.ToString("yyyy-MM", CultureInfo.InvariantCulture)}";
+            var asOf = new DateTimeOffset(periodDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            var evidence = ObservationEvidence.Create(
+                ("as_of_at", asOf),
+                ("date", periodDate),
+                ("index_value", indexValue),
+                ("observation_id", observationId),
+                ("provider_source", ProviderSources.Evds),
+                ("series", "TP.FG.J0"));
+            rates.Add(ProviderAuthority.Inflation(new InflationRate
             {
                 PeriodDate = periodDate,
                 IndexValue = indexValue,
@@ -57,7 +76,8 @@ public static class EvdsInflationMapper
                 Source     = source,
                 CreatedAt  = now,
                 UpdatedAt  = now,
-            });
+            }, ProviderSources.Evds, observationId, asOf, payloadHash,
+                payloadByteLength ?? Encoding.UTF8.GetByteCount(json), evidence));
         }
 
         return rates.AsReadOnly();

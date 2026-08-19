@@ -15,20 +15,40 @@
 ```bash
 # docker-compose.yml repo kökünde bulunur
 cp .env.example .env
-# .env dosyasını düzenle — API key'leri doldur. Key gerektiren: CoinGecko, OpenExchangeRates, Twelve Data. Key GEREKTİRMEYEN: EVDS, TCMB.
+# .env dosyasını düzenle — etkinleştirdiğiniz CoinGecko, OpenExchangeRates, Twelve Data
+# ve EVDS worker'larının key'lerini doldurun. Yalnız TCMB key gerektirmez.
 
-docker-compose up -d
+./infrastructure/secrets/bootstrap-dev-database.sh
+docker compose --env-file .env --env-file .env.database-runtime up --build -d
+
+# Yönetim/gözlem UI'ları default stack'e dahil değildir
+docker compose --env-file .env --env-file .env.database-runtime --profile devtools \
+  up --build -d pgadmin redis-insight aspire-dashboard prometheus
+
+# İsteğe bağlı: .env içinde en az bir WORKER_*_ENABLED=true seçtikten sonra
+docker compose --env-file .env --env-file .env.database-runtime --profile ingestion \
+  up --build -d saydin-price-ingestion
 ```
 
+İlk komut root-only one-shot generator/materializer ile her DB consumer için ayrı named volume
+hazırlar; source/admin secret normal runtime servislerine mount edilmez. Ardından PostgreSQL kimliği,
+role prefix'i ve exact managed login adları `.env.database-runtime` içine yazılır. Bu dosya yalnız
+nonsecret metadata içerir ve gitignored'dır. Doğrudan `docker compose up` metadata yoksa
+`runtime-metadata-required` ile fail-closed olur. Parola `.env`, command/argv veya container
+environment'a konmaz.
+`saydin-price-ingestion` bilinçli olarak `ingestion` profilindedir: default stack dış provider'a
+çağrı yapmaz; profil tüm worker'lar kapalıyken başlatılırsa worker güvenlik kapısı non-zero döner.
+
 Başlatılan servisler:
-- `saydin-postgres` → localhost:5432 (TimescaleDB)
-- `saydin-redis` → localhost:6379
-- `saydin-pgadmin` → http://localhost:5050 (kullanıcı: admin@saydin.dev / admin)
-- `saydin-redis-insight` → http://localhost:5540 *(Redis Insight — bkz. bağlantı adımları aşağıda)*
-- `aspire-dashboard` → http://localhost:18888 (traces, logs, metrics)
-- `prometheus` → http://localhost:9090
-- `saydin-api` → http://localhost:5080
-- `saydin-price-ingestion` → (port expose edilmez, arka planda çalışır)
+- `postgres` → 127.0.0.1:5432 (TimescaleDB)
+- `redis` → 127.0.0.1:6379
+- `saydin-api` → http://127.0.0.1:5080
+- `saydin-price-ingestion` → yalnız `ingestion` profiliyle (port expose edilmez)
+- `pgadmin`, `redis-insight`, `aspire-dashboard`, `prometheus` → yalnız `devtools` profiliyle;
+  sırasıyla loopback 5050, 5540, 18888 ve 9090
+
+Sabit `container_name` kullanılmaz; bütün container/volume adları Compose proje adıyla ayrılır.
+İkinci checkout için `SAYDIN_*_PORT` değişkenleriyle host portlarını farklılaştırabilirsin.
 
 ### Redis Insight Bağlantısı
 
@@ -37,31 +57,33 @@ Başlatılan servisler:
 3. Aşağıdaki bilgileri gir:
    - **Host:** `redis` *(Docker servis adı — `localhost` değil)*
    - **Port:** `6379`
-   - Şifre yok, boş bırak
+   - **Password:** `.env` içindeki `REDIS_PASSWORD`
 4. **"Add Redis Database"** ile kaydet
 
 > Redis Insight, Compose iç network'ünde çalışır. `localhost` yazılırsa kendi container'ını görür — Redis'e `redis` servis adıyla ulaşılır.
 
 ## 2. Veritabanı Migration
 
-### İlk Kurulum (fresh init — otomatik)
+### İlk Kurulum (one-shot migrator — otomatik)
 
-Fresh (boş volume) `docker compose up -d` sonrası migration'lar **otomatik** uygulanır
-(aşağıdaki "Fresh init" notu) — elle `001_initial.sql` çalıştırmaya gerek yoktur. Şema
-kurulumunu doğrula:
+Güncel güvenli akış önce one-shot `Saydin.DatabaseRoleBootstrap ensure`, sonra versioned migrator
+login/password-file kullanan `database-migrator`'dır. API, ingestion ve monitoring yalnız migrator
+sıfır exit ile tamamlanırsa başlar. Boş DB 24 migration ile bootstrap edilir; yönetilen DB checksum,
+rol grafiği, ACL ve schema fingerprint kontrolünden geçirilir. Elle `001_initial.sql` çalıştırılmaz.
+Kök Compose role-bootstrap → managed migrator zincirini ve per-purpose file-secret mount'larını taşır:
 
 ```bash
-docker exec saydin-postgres psql -U saydin -d saydin \
-  -c "\dt" | grep -E "assets|price_points|users"
+docker compose --env-file .env --env-file .env.database-runtime ps --all database-migrator
+docker compose --env-file .env --env-file .env.database-runtime logs database-migrator
+docker compose --env-file .env --env-file .env.database-runtime run --rm database-migrator --verify-only
 ```
 
-> **Fresh init (tüm migration'lar):** `infrastructure/postgres/migrations/*.sql` dosyaları
-> docker-entrypoint tarafından **yalnız boş volume'da** alfabetik + `ON_ERROR_STOP` ile
-> çalışır. Tüm zinciri (001→014) temiz uygulamak için:
-> ```bash
-> docker compose down -v && docker compose up -d   # DİKKAT: dev volume'larını sıfırlar
-> docker compose logs postgres | grep -E "running /docker-entrypoint|ERROR"  # abort yok mu?
-> ```
+> **Readiness ayrımı:** PostgreSQL `pg_isready` healthcheck'i yalnız bağlantıyı kanıtlar.
+> Şemanın kullanıma hazır olduğunu migrator'ın transaction/checksum/fingerprint doğrulaması ve
+> `saydin_migration_control.state='ready'` sonucu belirler. Partial/ambiguous DB, bilinmeyen yeni
+> version veya uygulanmış dosyada checksum farkı otomatik onarılmaz; migrator non-zero döner ve
+> downstream kapalı kalır. Volume/drop/recreate otomatik yapılmaz.
+>
 > **Migration 008b/013 (Faz 3):** TimescaleDB 2.16.1'de compression **enabled** iken
 > `ALTER COLUMN ... TYPE` yasaktır. `008` retroaktif compression açtığı için 009/011 ALTER'ları
 > fresh init'te zinciri kırıyordu. `008b` compression'ı 009'dan önce kapatır, `013` 012'den sonra
@@ -69,32 +91,41 @@ docker exec saydin-postgres psql -U saydin -d saydin \
 > disable/re-enable penceresini koru. Zaten compress edilmiş **prod** tablolar için 011 üst
 > yorumundaki manuel runbook geçerlidir.
 
-### Migration Stratejisi & İzleme (F4-1 / ADR-001 — Seçenek C hybrid)
+### Migration Stratejisi & İzleme (ADR-001 — C-02 control-plane)
 
 Aktif strateji **numaralandırılmış SQL** dosyalarıdır (EF Core'a tam geçiş post-MVP'ye
 ertelendi — TimescaleDB compression/hypertable EF'le modellenemez; bkz.
-[ADR-001](decisions/ADR-001-migration-strategy.md)). `014_schema_migrations.sql` hafif bir
-**izleme tablosu** ekler (`schema_migrations(version, applied_at, checksum)`); fresh init
-tüm sürümleri back-register eder. Uygulanmışları görmek için:
+[ADR-001](decisions/ADR-001-migration-strategy.md)). `Saydin.DatabaseRoleBootstrap` physical-target
+advisory lock altında cluster-global rol grafiğini; `Saydin.DatabaseMigrator` raw-byte SHA-256,
+aynı target lock'u ve runner-owned transaction'ı yönetir. `schema_migrations`
+her adımın `succeeded`/`skipped_optional`/`failed` durumunu; `saydin_migration_control` tüm hedefin
+`ready` durumunu taşır. Uygulanmışları görmek için:
 
 ```bash
-docker compose exec postgres psql -U saydin -d saydin \
-  -c "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
+docker compose --env-file .env --env-file .env.database-runtime exec postgres \
+  psql -U saydin_admin -d saydin \
+  -c "SELECT version, state, checksum, completed_at FROM schema_migrations ORDER BY version;"
 ```
 
-**Yeni migration ekleme:** Sıradaki numarayla yeni `.sql` dosyası ekle (`015_*.sql`);
+**Yeni migration ekleme:** Sıradaki numarayla yeni `.sql` dosyası ekle (`023_*.sql`);
 mevcut dosyaları **asla değiştirme**. Alfabetik sıralama 008b/013 compression penceresini
 bozmamalı (`014`+ güvenle 013 sonrası sıralanır).
 
-**Var olan (boş olmayan / prod) DB'ye deploy (F4-8):**
+**Var olan (boş olmayan / prod) DB'ye deploy:**
 
 ```bash
-DATABASE_URL='postgres://user:pass@host:5432/db' infrastructure/postgres/apply-migrations.sh
+docker compose --env-file .env --env-file .env.database-runtime up --build -d
+docker compose --env-file .env --env-file .env.database-runtime run --rm database-migrator --verify-only
 ```
 
-Runner `schema_migrations`'a bakıp yalnız **kayıtlı olmayan** migration'ları uygular
-(initdb.d dışındadır → fresh init'te otomatik çalışmaz). 014-öncesi DB'lerde önce `014`
-elle uygulanmalı (geçmişi back-register eder).
+Complete-014 veya managed-through-018 legacy DB yalnız explicit
+`--legacy-privilege-cutover --admin-connection-file` yolunda kabul edilir; business data yeniden
+yazılmaz. Partial/ambiguous veya 014 öncesi DB otomatik baseline edilmez. Böyle bir
+red durumunda servisleri zorla başlatma, geçmiş migration'ları değiştirme veya DB'yi drop/recreate
+etme; staging clone üzerinde audit/backfill planını tamamlayıp yeni additive migration üret.
+`infrastructure/postgres/apply-migrations.sh` yalnız retired compatibility entrypoint'tir;
+fail-closed biçimde exit 64 döner ve hiçbir migration uygulamaz. Normal Compose/CI deploy yolunda
+çağrılmaz, recovery alternatifi olarak kullanılmaz.
 
 ### EF Core ile Yeni Migration Ekleme (post-MVP — şu an KULLANILMIYOR)
 
@@ -114,12 +145,9 @@ docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh -c \
   'dotnet tool install -g dotnet-ef >/dev/null 2>&1; export PATH="$PATH:/root/.dotnet/tools"; \
    dotnet ef migrations add <MigrationAdı> --project src/Saydin.Shared --startup-project src/Saydin.Api'
 
-# (Post-MVP) Veritabanını güncelle — compose ağı + ConnectionStrings env ile:
-docker run --rm -v "$PWD":/src -w /src --network saydin-services_default \
-  -e ConnectionStrings__Postgres="Host=postgres;Database=saydin;Username=saydin;Password=$POSTGRES_PASSWORD" \
-  mcr.microsoft.com/dotnet/sdk:10.0 sh -c \
-  'dotnet tool install -g dotnet-ef >/dev/null 2>&1; export PATH="$PATH:/root/.dotnet/tools"; \
-   dotnet ef database update --project src/Saydin.Shared --startup-project src/Saydin.Api'
+# DB güncellemesi `dotnet ef database update` ile yapılmaz. Additive SQL migration eklenir ve
+# managed one-shot migrator çalıştırılır:
+docker compose --env-file .env --env-file .env.database-runtime run --rm database-migrator
 ```
 
 ## 3. Saydin.Api Çalıştırma
@@ -127,51 +155,40 @@ docker run --rm -v "$PWD":/src -w /src --network saydin-services_default \
 ### Docker ile
 
 ```bash
-# Repo kökünden
-docker build -f src/Saydin.Api/Dockerfile -t saydin-api .
-docker run -p 5080:8080 \
-  -e ConnectionStrings__Postgres="Host=host.docker.internal;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
-  -e ConnectionStrings__Redis="host.docker.internal:6379" \
-  -e Otlp__Endpoint="http://host.docker.internal:4317" \
-  saydin-api
+# Standalone `docker run` yerine aynı datasource/secret/identity sınırını taşıyan Compose servisini kullan:
+docker compose --env-file .env --env-file .env.database-runtime up --build -d saydin-api
 ```
 
 ### .NET SDK ile (Yerel)
 
 ```bash
-# Repo kökünden — User secrets kurulumu (ilk seferinde)
-dotnet user-secrets init --project src/Saydin.Api
-dotnet user-secrets set "ConnectionStrings:Postgres" \
-  "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
-  --project src/Saydin.Api
-dotnet user-secrets set "ConnectionStrings:Redis" "localhost:6379" \
-  --project src/Saydin.Api
-
-dotnet run --project src/Saydin.Api
-# → http://localhost:5203 (HTTP) / https://localhost:7008 (HTTPS) — launchSettings.json
-# → Scalar API dokümantasyonu: http://localhost:5203/scalar/v1 (Development modunda)
+# Raw DB connection string/user-secret kabul edilmez. Explicit PGHOST/PGPORT/PGDATABASE/PGUSER/
+# PGSSLMODE, SAYDIN_DATABASE_* kimlik metadata'sı ve absolute
+# SAYDIN_API_DATABASE_PASSWORD_FILE ile çalıştırılmalıdır. Owner-only file'ın yerel UID'ye ait
+# olması zorunludur. Taşınabilir varsayılan yukarıdaki Compose akışıdır.
 ```
 
 ## 4. Saydin.PriceIngestion Çalıştırma
 
 ```bash
-# .NET ile
-dotnet user-secrets init --project src/Saydin.PriceIngestion
-dotnet user-secrets set "ConnectionStrings:Postgres" \
-  "Host=localhost;Database=saydin;Username=saydin;Password=<YOUR_PASSWORD>" \
-  --project src/Saydin.PriceIngestion
+# DB için API ile aynı explicit topology/identity sınırı ve
+# SAYDIN_INGESTION_DATABASE_PASSWORD_FILE kullanılır. API anahtarları için user-secrets kullanılabilir:
 dotnet user-secrets set "ExternalApis:CoinGecko:ApiKey" "<your-key>" \
   --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ExternalApis:OpenExchangeRates:AppId" "<your-app-id>" \
   --project src/Saydin.PriceIngestion
 dotnet user-secrets set "ExternalApis:TwelveData:ApiKey" "<your-key>" \
   --project src/Saydin.PriceIngestion
+dotnet user-secrets set "ExternalApis:Evds:ApiKey" "<your-key>" \
+  --project src/Saydin.PriceIngestion
 # TCMB için API key gerekmez
 
 dotnet run --project src/Saydin.PriceIngestion
 ```
 
-> **Not:** API key eksikse ilgili adapter graceful skip yapar (servisi durdurmaz). CoinGecko key olmadan 403 alınır ve adapter atlanır. OpenExchangeRates ücretsiz planda aylık 1000 istek sınırı vardır.
+> **Not:** Key gerektiren bir worker etkinse eksik/boş key host başlamadan reddedilir;
+> pencere açılmaz ve HTTP çağrısı yapılmaz. Disabled worker için key boş kalabilir.
+> OpenExchangeRates ücretsiz planda aylık 1000 istek sınırı vardır.
 
 ### Worker Seçici Aktivasyonu (F4-11)
 
@@ -181,14 +198,15 @@ dotnet run --project src/Saydin.PriceIngestion
 
 ```bash
 WORKER_TCMB_ENABLED=true        # TCMB (key gerektirmez)
-WORKER_EVDS_ENABLED=true        # EVDS enflasyon (key gerektirmez)
+WORKER_EVDS_ENABLED=true        # EVDS enflasyon (EVDS_API_KEY zorunlu)
 WORKER_COINGECKO_ENABLED=false  # key gerektirir
 WORKER_OXR_ENABLED=false        # key gerektirir
 WORKER_TWELVEDATA_ENABLED=false # key gerektirir
 ```
 
-Fresh-checkout `.env.example` TCMB + EVDS'i açık gönderir (key-free ulusal-veri kaynakları);
-key gerektiren kaynaklar kapalıdır — böylece kazara dış API / rate-limit tüketilmez. Hiçbir
+Fresh-checkout `.env.example` TCMB + EVDS'i açık gönderir; bu nedenle ingestion profili
+başlatılmadan önce `EVDS_API_KEY` doldurulmalıdır. Diğer key gerektiren kaynaklar kapalıdır.
+Hiçbir
 worker etkin değilse `IngestionOrchestrator` **fail-fast** yapar (`LogCritical` +
 `InvalidOperationException` → host başlatılmaz); en az bir worker `IngestionWorkers:*:Enabled`
 (örn. `WORKER_TCMB_ENABLED`) ile açılmalıdır — böylece "boş" bir ingestion servisi sessizce
@@ -204,30 +222,38 @@ kalır (`LogWarning` + `country`/`city` null) — **istek başarısız olmaz**. 
 
 ## 5. Testleri Çalıştırma
 
-Lokalde .NET SDK olmadığı için testler **`tests` compose profili** (SDK imajı + repo mount +
-compose ağı) ile koşar — `saydin-api` runtime imajı SDK/test projeleri içermez (Faz 3).
+Tekrarlanabilir Docker-first yol **`tests` compose profili**dir (pinned SDK imajı + repo mount +
+compose ağı). Host SDK kullanılsa bile `global.json`, locked restore ve aynı test projeleri
+korunmalıdır; `saydin-api` runtime imajı SDK/test projeleri içermez.
 
 ```bash
-# Tüm solution (unit + integration). Integration için postgres/redis up olmalı.
-docker compose up -d postgres redis
-docker compose run --rm tests
+# Lokal optional mod: tüm solution. Integration için postgres/redis up olmalı;
+# infra yoksa yalnız integration testleri Skipped olabilir.
+docker compose --env-file .env --env-file .env.database-runtime up -d postgres database-migrator redis
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests
 
 # Yalnız unit testler (DB gerekmez)
-docker compose run --rm tests test tests/Saydin.Api.Tests
-docker compose run --rm tests test tests/Saydin.PriceIngestion.Tests
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.Api.Tests
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.PriceIngestion.Tests
 
 # Gerçek PostgreSQL/Redis entegrasyon testleri (F2.6-21)
-docker compose run --rm tests test tests/Saydin.Api.IntegrationTests
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.Api.IntegrationTests
 
 # Sadece build doğrulaması (compose'suz, SDK imajı + mount)
 docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
   dotnet build Saydin.Services.sln -c Debug
 ```
 
-> **Integration testleri (F2.6-21):** Testcontainers BU ortamda kullanılamaz (api
-> container'ında docker.sock yok); testler compose ağındaki `postgres`/`redis`'e bağlanır.
-> DB/Redis erişilemez veya migration 012 uygulanmamışsa testler `SkippableFact` ile
-> **atlanır** (kırmızı olmaz). NuGet önbelleği için `nuget_cache` named volume kullanılır.
+> **Integration testleri (F2.6-21 / RP-02):** Yukarıdaki geliştirici akışı **optional**
+> moddur; DB/Redis erişilemezse `SkippableFact` ile atlama kolaylığı korunur. Required CI job'ı
+> ise `.github/compose.integration.yml` ile host portu açmadan UUID-bazlı disposable
+> iki ayrı TimescaleDB + Redis kurar, `SAYDIN_INTEGRATION_REQUIRED=true` kullanır ve
+> infra/guard hatasında fail-fast olur. CI ayrıca role-bootstrap + migrator `--verify-only`, fresh
+> `24 migration + 2 hypertable + 24 checksum + 24 terminal + ready` kapısını; API integration
+> TRX'inde en az 57, ingestion ledger TRX'inde 39, role-bootstrap TRX'lerinde 76+7, migrator
+> TRX'inde 124 ve DQA TRX'lerinde 82+72 executed test ile sıfır failed/skipped/notExecuted şartını
+> doğrular. Kanonik executable adımlar
+> `.github/workflows/ci.yml` içindeki `integration-test` job'ındadır.
 
 ## 6. Sık Kullanılan Komutlar
 
@@ -236,43 +262,47 @@ docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
 # değilse SDK imajı + repo mount kullan (bkz. Adım 5 build doğrulaması).
 
 # Bağımlılıkları yükle
-dotnet restore
+dotnet restore --locked-mode
 
 # Build
 dotnet build
 
 # Tüm container'ları durdur (repo kökünden)
-docker compose down
+docker compose --env-file .env --env-file .env.database-runtime down
 
 # PostgreSQL'e bağlan
-docker exec -it saydin-postgres psql -U saydin -d saydin
+docker compose --env-file .env --env-file .env.database-runtime exec postgres psql -U saydin_admin -d saydin
 
 # Redis CLI
-docker exec -it saydin-redis redis-cli
+docker compose --env-file .env --env-file .env.database-runtime exec redis redis-cli
 
 # Log izle (Aspire Dashboard yerine terminal)
-docker logs -f saydin-api 2>&1 | jq .
+docker compose --env-file .env --env-file .env.database-runtime logs --follow saydin-api | jq .
 ```
 
 ## 7. API Test Örnekleri
 
 ```bash
-# Sağlık
-curl http://localhost:5080/health | jq
+# Process liveness (public listener)
+curl -fsS http://localhost:5080/health/live
+
+# Server-issued bearer credential üret; token'ı loglama veya repoya yazma.
+INSTALLATION_TOKEN="$(curl -fsS -X POST http://localhost:5080/v1/installations | jq -er .credential)"
+AUTHORIZATION="Authorization: Installation $INSTALLATION_TOKEN"
 
 # Asset listesi
-curl http://localhost:5080/v1/assets | jq
+curl -H "$AUTHORIZATION" http://localhost:5080/v1/assets | jq
 
 # Tek gün fiyat
-curl "http://localhost:5080/v1/assets/USDTRY/price/2020-01-01" | jq
+curl -H "$AUTHORIZATION" "http://localhost:5080/v1/assets/USDTRY/price/2020-01-01" | jq
 
 # Fiyat aralığı
-curl "http://localhost:5080/v1/assets/USDTRY/price-range?from=2020-01-01&to=2020-12-31" | jq
+curl -H "$AUTHORIZATION" "http://localhost:5080/v1/assets/USDTRY/price-range?from=2020-01-01&to=2020-12-31" | jq
 
 # "Ya alsaydım" hesaplama
 curl -X POST http://localhost:5080/v1/what-if/calculate \
   -H "Content-Type: application/json" \
-  -H "X-Device-ID: dev-test-001" \
+  -H "$AUTHORIZATION" \
   -d '{
     "assetSymbol": "USDTRY",
     "buyDate": "2020-01-01",
@@ -284,7 +314,7 @@ curl -X POST http://localhost:5080/v1/what-if/calculate \
 # Karşılaştırma (Compare)
 curl -X POST http://localhost:5080/v1/what-if/compare \
   -H "Content-Type: application/json" \
-  -H "X-Device-ID: dev-test-001" \
+  -H "$AUTHORIZATION" \
   -d '{
     "assetSymbols": ["USDTRY", "BTCTRY"],
     "buyDate": "2020-01-01",
@@ -296,7 +326,7 @@ curl -X POST http://localhost:5080/v1/what-if/compare \
 # Ters senaryo (Reverse What-If)
 curl -X POST http://localhost:5080/v1/what-if/reverse \
   -H "Content-Type: application/json" \
-  -H "X-Device-ID: dev-test-001" \
+  -H "$AUTHORIZATION" \
   -d '{
     "assetSymbol": "USDTRY",
     "buyDate": "2020-01-01",
@@ -308,7 +338,7 @@ curl -X POST http://localhost:5080/v1/what-if/reverse \
 # DCA hesaplama
 curl -X POST http://localhost:5080/v1/what-if/dca \
   -H "Content-Type: application/json" \
-  -H "X-Device-ID: dev-test-001" \
+  -H "$AUTHORIZATION" \
   -d '{
     "assetSymbol": "USDTRY",
     "startDate": "2020-01-01",
@@ -322,7 +352,7 @@ curl -X POST http://localhost:5080/v1/what-if/dca \
 # Senaryo kaydet
 curl -X POST http://localhost:5080/v1/scenarios \
   -H "Content-Type: application/json" \
-  -H "X-Device-ID: dev-test-001" \
+  -H "$AUTHORIZATION" \
   -d '{
     "type": "what_if",
     "assetSymbol": "USDTRY",
@@ -332,40 +362,48 @@ curl -X POST http://localhost:5080/v1/scenarios \
 
 # Senaryoları listele
 curl http://localhost:5080/v1/scenarios \
-  -H "X-Device-ID: dev-test-001" | jq
+  -H "$AUTHORIZATION" | jq
 
 # Uygulama konfigürasyonu
 curl http://localhost:5080/v1/config \
-  -H "X-Device-ID: dev-test-001" | jq
+  -H "$AUTHORIZATION" | jq
 
 # Prometheus metrikleri
-curl http://localhost:5080/metrics
+docker compose --env-file .env --env-file .env.database-runtime \
+  exec saydin-api curl -fsS http://127.0.0.1:9090/metrics
 ```
 
 ## 8. Ortam Değişkenleri
 
 | Değişken | Açıklama | Örnek |
 |---|---|---|
-| `ConnectionStrings__Postgres` | PostgreSQL bağlantı dizesi | `Host=localhost;...` |
+| `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER` / `PGSSLMODE` | Nonsecret PostgreSQL topology ve exact managed login | `postgres` / `5432` / `saydin` / `<prefix>_api_login_v1` / `Disable` |
+| `SAYDIN_<PURPOSE>_DATABASE_PASSWORD_FILE` | Consumer'a özel absolute owner-only password file | `/run/saydin-secrets/api-v1` |
+| `SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256` / `SAYDIN_DATABASE_ROLE_PREFIX` | DB identity ve rol kontratı | 64-hex / bounded prefix |
 | `ConnectionStrings__Redis` | Redis bağlantı dizesi | `localhost:6379` |
 | `Otlp__Endpoint` | OTLP collector endpoint | `http://localhost:4317` |
-| `ExternalApis__CoinGecko__ApiKey` | CoinGecko API anahtarı | (key yoksa graceful skip) |
-| `ExternalApis__OpenExchangeRates__AppId` | Open Exchange Rates App ID | (key yoksa graceful skip) |
-| `ExternalApis__TwelveData__ApiKey` | Twelve Data API anahtarı | (key yoksa graceful skip) |
-| `RateLimiting__Enabled` | IP-bazlı rate limiter (F4-5, varsayılan kapalı) | `false` |
-| `RateLimiting__PermitLimit` | Pencere başına izin verilen istek | `100` |
-| `RateLimiting__WindowSeconds` | Sabit pencere uzunluğu (sn) | `60` |
+| `ExternalApis__CoinGecko__ApiKey` | CoinGecko API anahtarı | Worker enabled ise zorunlu |
+| `ExternalApis__OpenExchangeRates__AppId` | Open Exchange Rates App ID | Worker enabled ise zorunlu |
+| `ExternalApis__TwelveData__ApiKey` | Twelve Data API anahtarı | Worker enabled ise zorunlu |
+| `ExternalApis__Evds__ApiKey` | TCMB EVDS API anahtarı | Worker enabled ise zorunlu |
+| `DistributedSecurityLimiter__Enabled` | Dağıtık IP/network/principal limiter; production'da zorunlu | `true` |
+| `DistributedSecurityLimiter__HmacKeyFile` | Pseudonym key'i taşıyan absolute private file | `/run/saydin-secrets/private/security-limiter-hmac` |
+| `DistributedSecurityLimiter__ExactIpLimit` / `NetworkLimit` / `PrincipalLimit` | Redis TIME penceresindeki üç ayrı üst sınır | `60` / `300` / `120` |
+| `DistributedSecurityLimiter__WindowSeconds` | Atomik Redis pencere uzunluğu | `60` |
+| `InstallationCredentials__SecretFile` | Installation credential HMAC keyring private file | `/run/saydin-secrets/private/installation-keyring.json` |
 | `ForwardedHeaders__KnownProxies` | Güvenilen reverse-proxy IP'leri (CSV) | `10.0.0.5` |
 | `ForwardedHeaders__KnownNetworks` | Güvenilen subnet'ler (CIDR, CSV) | `10.0.0.0/8` |
 | `GeoIp__DatabasePath` | MaxMind GeoLite2 `.mmdb` yolu (opsiyonel) | `/app/geoip/GeoLite2-City.mmdb` |
 
-> **Rate limiting (F4-5 / [ADR-003](decisions/ADR-003-rate-limiting.md)):** IP-bazlı katman
-> varsayılan **kapalıdır**. Production'da açmak için `RateLimiting:Enabled=true` ver ve
-> reverse-proxy arkasındaysan doğru istemci IP'si için `ForwardedHeaders:KnownProxies` /
-> `KnownNetworks`'ü mutlaka yapılandır (aksi halde limiter proxy IP'sine göre partition eder).
+> **Rate limiting ([ADR-003](decisions/ADR-003-rate-limiting.md)):** Production validator limiter'ın
+> açık, HMAC file'ın private ve trusted proxy CIDR'nin bounded olmasını zorunlu kılar. Exact IP,
+> IPv4 /24 veya IPv6 /64 network ve authenticated installation principal ayrı Redis TIME
+> bucket'larıdır. Client IP güvenilir biçimde çözülemezse veya Redis admission sırasında
+> kullanılamazsa 503; limit aşılırsa 429 döner. Kota ve security limiter fail-open değildir.
 
-> **Güvenlik:** API key'leri asla `appsettings.json`'a yazmayın. Geliştirmede `dotnet user-secrets`,
-> production'da environment variable kullanın. Tam strateji (dev/CI/prod katmanları + rotation
+> **Güvenlik:** API key'leri asla `appsettings.json`'a yazmayın. DB parolaları environment,
+> connection URL, argv veya log'a konmaz; yalnız strict file-secret kullanılır. Dış provider
+> secret'ları için geliştirmede `dotnet user-secrets`, production'da secret backend kullanın. Tam strateji (dev/CI/prod katmanları + rotation
 > runbook): [ADR-005](decisions/ADR-005-secrets-management.md).
 
 ## 9. CI/CD — GitHub Actions
@@ -373,8 +411,15 @@ curl http://localhost:5080/metrics
 Her `push` ve `pull_request`'te otomatik çalışır:
 
 1. **Build** — `dotnet build`
-2. **Test** — `dotnet test`
-3. **Docker Build** — `saydin-api` ve `saydin-price-ingestion` image'larını oluşturur
+2. **Unit/coverage** — altı gerçek unit csproj; Cobertura weighted line ≥ %75, branch ≥ %60 ve
+   kritik namespace ratchet'ları. Changed executable-line ≥ %80 kapısı, aynı kaynak satırlarını
+   tekilleştiren altı unit ve dört required gerçek-infrastructure Cobertura raporu üzerinde uygulanır.
+   Eksik/bozuk rapor veya rapor sayısı uyuşmazlığı kapıyı kapatır. RoleBootstrap'ın SQL/ACL ağırlıklı
+   yüzeyi için düşük unit tabanı tek başına kabul sayılmaz; ayrı 7/7 gerçek-PostgreSQL kapısı zorunludur.
+3. **Required integration** — disposable TimescaleDB/Redis, one-shot migrator verify ve fail-closed TRX gate'leri
+4. **Platform/supply chain** — production render/mutation, Prometheus/Alertmanager/OTel/Caddy,
+   NuGet audit+locked graph, dependency/license/vulnerability/secret/IaC ve CodeQL
+5. **Docker Build** — API, ingestion ve database-control image'larını oluşturur
 
 CI pipeline `.github/workflows/` dizininde tanımlıdır.
 
@@ -390,18 +435,20 @@ kaldırıldı). Ek statik analiz: Codacy (`.codacy.yaml`).
 ### "Connection refused" — PostgreSQL
 
 ```bash
-# Container çalışıyor mu?
-docker ps | grep saydin-postgres
+# Compose servisi çalışıyor mu?
+docker compose --env-file .env --env-file .env.database-runtime ps postgres
 
 # Bağlantı testi
-docker exec saydin-postgres pg_isready -U saydin
+docker compose --env-file .env --env-file .env.database-runtime exec postgres \
+  pg_isready -U saydin
 ```
 
 ### Migration uygulanmamış
 
 ```bash
 # Tablo var mı?
-docker exec saydin-postgres psql -U saydin -d saydin -c "\dt"
+docker compose --env-file .env --env-file .env.database-runtime exec postgres \
+  psql -U saydin -d saydin -c "\dt"
 # Yoksa migration adımını tekrarla (bkz. Adım 2)
 ```
 
@@ -409,9 +456,10 @@ docker exec saydin-postgres psql -U saydin -d saydin -c "\dt"
 
 OTLP bağlantısını doğrula:
 ```bash
-# Dashboard container çalışıyor mu?
-docker ps | grep aspire-dashboard
+# `devtools` profili etkin mi?
+docker compose --env-file .env --env-file .env.database-runtime \
+  --profile devtools ps aspire-dashboard
 
 # App'in OTLP'ye bağlandığını log'dan kontrol et
-docker logs saydin-api 2>&1 | grep -i otlp
+docker compose --env-file .env --env-file .env.database-runtime logs saydin-api 2>&1 | grep -i otlp
 ```

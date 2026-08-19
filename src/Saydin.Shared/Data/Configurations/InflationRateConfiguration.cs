@@ -24,5 +24,16 @@ public sealed class InflationRateConfiguration : IEntityTypeConfiguration<Inflat
 
         builder.Property(r => r.CreatedAt).HasDefaultValueSql("NOW()");
         builder.Property(r => r.UpdatedAt).HasDefaultValueSql("NOW()");
+        builder.Property(r => r.ProviderSource)
+            .HasMaxLength(ObservationAuthorityLimits.ProviderSourceBytes);
+        builder.Property(r => r.SourceObservationId)
+            .HasMaxLength(ObservationAuthorityLimits.SourceObservationIdBytes);
+        builder.Property(r => r.PriceKind)
+            .HasMaxLength(ObservationAuthorityLimits.PriceKindBytes);
+        builder.Ignore(r => r.PayloadSha256);
+        builder.Ignore(r => r.PayloadByteLength);
+        builder.Ignore(r => r.IngestionWindowId);
+        builder.Property(r => r.ObservationSha256).HasColumnType("bytea");
+        builder.Property(r => r.SourceRaw).HasColumnType("jsonb");
     }
 }

@@ -7,25 +7,28 @@ namespace Saydin.Api.Services;
 
 public interface IAppConfigService
 {
-    // F2.2-3: deviceId artık IDeviceContext üzerinden (scoped) okunur.
+    // The authenticated installation principal is resolved by the endpoint filter.
     Task<AppConfigResponse> GetConfigAsync(CancellationToken ct);
 }
 
 public sealed class AppConfigService(
     ISavedScenarioRepository scenarioRepository,
-    IDeviceContext deviceContext,
+    IInstallationPrincipalContext principalContext,
     IOptions<PlanOptions> options) : IAppConfigService
 {
     public async Task<AppConfigResponse> GetConfigAsync(CancellationToken ct)
     {
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceContext.DeviceId, ct);
-        var tier = user?.Tier ?? "free";
+        var user = await scenarioRepository.GetUserByIdAsync(principalContext.PrincipalId, ct)
+            ?? throw new InvalidOperationException("Authenticated installation principal is missing.");
+        var tier = user.Tier;
         var tierOptions = options.Value.GetTierOptions(tier);
 
         return new AppConfigResponse(
             Tier:                   tier,
             DailyCalculationLimit:  tierOptions.DailyCalculationLimit,
-            MaxSavedScenarios:      tierOptions.MaxSavedScenarios,
+            // Plan değerindeki 0 artık "sınırsız storage" değildir. API'nin
+            // sistem hard cap'i istemciye effective limit olarak açıklanır.
+            MaxSavedScenarios:      ScenarioLimits.GetEffectiveSaveLimit(tierOptions.MaxSavedScenarios),
             Features: new AppFeatureFlags(
                 Comparison:          tierOptions.Features.Comparison,
                 InflationAdjustment: tierOptions.Features.InflationAdjustment,

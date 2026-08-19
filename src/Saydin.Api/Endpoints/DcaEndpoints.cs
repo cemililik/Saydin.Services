@@ -1,3 +1,4 @@
+using Saydin.Api.Helpers;
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
@@ -21,7 +22,8 @@ public static class DcaEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential();
 
         return app;
     }
@@ -36,8 +38,8 @@ public static class DcaEndpoints
 
         var result = await calculator.CalculateAsync(request, ct);
 
-        // F4-6 (KVKK): ham periyodik tutar yerine kaba aralık; sonuç TL tutarları
-        // (TotalInvestedTry, CurrentValueTry, ProfitLossTry, AverageCostPerUnit) loglanmaz.
+        // API-06: ham periyodik tutar bucket'lanır; exact TL/yüzde sonuçlar
+        // yalnız düşük kardinaliteli outcome'a indirgenir.
         log.WithData(new
         {
             request.AssetSymbol,
@@ -49,9 +51,9 @@ public static class DcaEndpoints
             request.IncludeInflation,
             result = new
             {
-                result.ProfitLossPercent,
                 result.TotalPurchases,
-                result.RealProfitLossPercent,
+                outcome = TelemetryOutcome.From(result.ProfitLossTry),
+                realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
             }
         });
 

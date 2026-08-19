@@ -10,6 +10,8 @@ using Microsoft.Extensions.Time.Testing;
 using Saydin.Api;
 using Saydin.Api.Exceptions;
 using Saydin.Shared.Exceptions;
+using Saydin.Shared.Diagnostics;
+using System.Diagnostics.Metrics;
 
 namespace Saydin.Api.Tests.Exceptions;
 
@@ -114,6 +116,18 @@ public class ExceptionHandlerContractTests
     }
 
     [Fact]
+    public async Task RequestBodyTooLargeHandler_Returns413_WithCodeAndByteLimit()
+    {
+        var handler = new RequestBodyTooLargeExceptionHandler(
+            NullLogger<RequestBodyTooLargeExceptionHandler>.Instance, CreateLocalizer());
+
+        var body = await InvokeAsync(handler, new RequestBodyTooLargeException(32 * 1024));
+
+        AssertContract(body, 413, "https://saydin.app/errors/payload-too-large", ApiErrorCodes.PayloadTooLarge);
+        body.Root.GetProperty("maxBytes").GetInt32().Should().Be(32 * 1024);
+    }
+
+    [Fact]
     public async Task FeatureDisabledHandler_Returns403_WithCodeAndFeature()
     {
         var handler = new FeatureDisabledExceptionHandler(NullLogger<FeatureDisabledExceptionHandler>.Instance, CreateLocalizer());
@@ -128,6 +142,17 @@ public class ExceptionHandlerContractTests
     [Fact]
     public async Task PriceNotFoundHandler_Returns404_WithCodeAndNearestDates()
     {
+        long measurements = 0;
+        using var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, meterListener) =>
+            {
+                if (instrument.Name == "saydin.price.not_found.total")
+                    meterListener.EnableMeasurementEvents(instrument);
+            },
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => measurements += value);
+        listener.Start();
         var handler = new PriceNotFoundExceptionHandler(NullLogger<PriceNotFoundExceptionHandler>.Instance, CreateLocalizer());
 
         var body = await InvokeAsync(handler,
@@ -135,6 +160,7 @@ public class ExceptionHandlerContractTests
 
         AssertContract(body, 404, "https://saydin.app/errors/price-not-found", ApiErrorCodes.PriceNotFound);
         body.Root.GetProperty("nearestDates").GetArrayLength().Should().Be(1);
+        measurements.Should().Be(1);
     }
 
     [Fact]

@@ -46,7 +46,10 @@ public sealed class TierOptions
     [Range(0, int.MaxValue)]
     public int DailyAssetQueryLimit { get; init; } = 500;
 
-    /// <summary>Kaydedilebilecek maksimum senaryo sayısı. 0 = sınırsız.</summary>
+    /// <summary>
+    /// Planın kaydedilmiş senaryo limiti. 0 = plan ek limiti yok; yine de API'nin
+    /// sistem hard cap'i uygulanır ve AppConfig effective değeri döndürür.
+    /// </summary>
     [Range(0, int.MaxValue)]
     public int MaxSavedScenarios { get; init; } = 10;
 

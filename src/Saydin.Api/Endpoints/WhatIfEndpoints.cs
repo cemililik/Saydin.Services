@@ -1,3 +1,4 @@
+using Saydin.Api.Helpers;
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
@@ -27,7 +28,8 @@ public static class WhatIfEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential();
 
         group.MapPost("/compare", CompareAsync)
             .WithName("CompareWhatIf")
@@ -37,7 +39,8 @@ public static class WhatIfEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential();
 
         group.MapPost("/reverse", ReverseCalculateAsync)
             .WithName("ReverseCalculateWhatIf")
@@ -47,7 +50,8 @@ public static class WhatIfEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential();
 
         return app;
     }
@@ -62,7 +66,7 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CalculateAsync(request, ct);
 
-        // F4-6 (KVKK): ham tutar yerine kaba aralık; sonuç TL tutarı (ProfitLossTry) loglanmaz.
+        // API-06: ham tutar bucket'lanır; exact TL/yüzde sonuç yalnız coarse outcome'a iner.
         log.WithData(new
         {
             request.AssetSymbol,
@@ -73,9 +77,8 @@ public static class WhatIfEndpoints
             request.IncludeInflation,
             result = new
             {
-                result.ProfitLossPercent,
-                result.IsProfit,
-                result.RealProfitLossPercent,
+                outcome = TelemetryOutcome.From(result.ProfitLossTry),
+                realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
                 actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
                 actualSellDate = result.ActualSellDate?.ToString(IsoDate),
             }
@@ -94,7 +97,7 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CompareAsync(request, ct);
 
-        // F4-6 (KVKK): ham tutar yerine kaba aralık. Sonuç zaten yalnız yüzde/rank içerir.
+        // API-06: ham tutar bucket'lanır; ranking korunur, exact yüzde outcome'a iner.
         log.WithData(new
         {
             request.AssetSymbols,
@@ -110,7 +113,7 @@ public static class WhatIfEndpoints
                 {
                     r.Rank,
                     symbol = r.Calculation.AssetSymbol,
-                    r.Calculation.ProfitLossPercent
+                    outcome = TelemetryOutcome.From(r.Calculation.ProfitLossTry),
                 })
             }
         });
@@ -128,7 +131,7 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CalculateReverseAsync(request, ct);
 
-        // F4-6 (KVKK): ham hedef tutar yerine kaba aralık; gereken yatırım TL'si loglanmaz.
+        // API-06: ham hedef bucket'lanır; gereken yatırım ve exact yüzde loglanmaz.
         log.WithData(new
         {
             request.AssetSymbol,
@@ -139,9 +142,8 @@ public static class WhatIfEndpoints
             request.IncludeInflation,
             result = new
             {
-                result.ProfitLossPercent,
-                result.IsProfit,
-                result.RealProfitLossPercent,
+                outcome = TelemetryOutcome.From(result.ProfitLossTry),
+                realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
                 actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
                 actualSellDate = result.ActualSellDate?.ToString(IsoDate),
             }

@@ -28,8 +28,8 @@
 |---|---|---|---|
 | PostgreSQL + **TimescaleDB 2.16.1** | 🔴 Evet | 2 hypertable (`price_points` [001], `activity_logs` [008]) + compression (008/008b/013) | **Belirleyici kısıt** — managed free'lerde compression yok |
 | Redis + Lua | 🟠 Evet | `DailyLimitGuard.ScriptEvaluateAsync` (EVAL) | Upstash/Redis Cloud free yeterli |
-| `Saydin.Api` (.NET 10) | 🔴 Evet | Always-on HTTP :8080, `/health` | Container / VM |
-| `Saydin.PriceIngestion` (.NET 10) | 🟠 Evet | Günlük/aylık worker; şu an `Enabled:false` | Always-on container ya da cron job |
+| `Saydin.Api` (.NET 10) | 🔴 Evet | Public HTTP :8080 (`/health/live`) + private management :9090 | Container / VM |
+| `Saydin.PriceIngestion` (.NET 10) | 🟠 Evet | Profile-gated; en az bir provider açık değilse fail-fast | Always-on container ya da zamanlı job |
 | pgadmin, redis-insight, aspire, prometheus, exporter'lar, tests | ⚪ Hayır (dev) | docker-compose | Prod'da çıkarılır / opsiyonel |
 
 ➡️ **Prod-zorunlu çekirdek = 4 servis** (postgres, redis, api, worker). Geri kalanı geliştirme/gözlem.

@@ -1,0 +1,829 @@
+services:
+  postgres:
+    image: ${SAYDIN_TIMESCALE_IMAGE:?digest-pinned TimescaleDB image required}
+    user: "70:70"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    cpus: "${SAYDIN_POSTGRES_CPUS:?postgres CPU limit required}"
+    mem_limit: ${SAYDIN_POSTGRES_MEMORY:?postgres memory limit required}
+    stop_grace_period: 90s
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - max_slot_wal_keep_size=8GB
+      - -c
+      - wal_keep_size=8GB
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/run/saydin-secrets/private/server.crt
+      - -c
+      - ssl_key_file=/run/saydin-secrets/private/server.key
+    environment:
+      POSTGRES_DB: ${SAYDIN_DATABASE:?database required}
+      POSTGRES_USER: saydin_admin
+      POSTGRES_PASSWORD_FILE: /run/saydin-secrets/private/password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_secret:/run/saydin-secrets:ro
+    tmpfs:
+      - /tmp:uid=70,gid=70,mode=0700,size=64m
+      - /run/postgresql:uid=70,gid=70,mode=0700,size=16m
+    networks:
+      data: {}
+      backup-db: {aliases: [postgres-backup]}
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U saydin_admin -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: &bounded-logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+  redis:
+    image: ${SAYDIN_REDIS_IMAGE:?digest-pinned Redis image required}
+    user: "999:999"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_REDIS_CPUS:?redis CPU limit required}"
+    mem_limit: ${SAYDIN_REDIS_MEMORY:?redis memory limit required}
+    stop_grace_period: 30s
+    restart: unless-stopped
+    command: [redis-server, /run/saydin-secrets/private/redis.conf]
+    volumes:
+      - redis_data:/data
+      - redis_secret:/run/saydin-secrets:ro
+    tmpfs:
+      - /tmp:uid=999,gid=999,mode=0700,size=16m
+    networks: [data]
+    healthcheck:
+      # Liveness intentionally does not read or expose the password. A protected
+      # Redis that is accepting commands returns the stable NOAUTH response.
+      test: [CMD-SHELL, "redis-cli --raw ping 2>&1 | grep -Fq 'NOAUTH Authentication required'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging: *bounded-logging
+
+  database-role-bootstrap:
+    image: ${SAYDIN_CONTROL_IMAGE:?digest-pinned control-plane image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 96
+    cpus: "${SAYDIN_JOB_CPUS:?control-plane CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?control-plane memory limit required}
+    stop_grace_period: 30s
+    restart: "no"
+    entrypoint: [dotnet, Saydin.DatabaseRoleBootstrap.dll]
+    command:
+      - ensure
+      - --admin-connection-file
+      - /run/saydin-secrets/private/admin-connection
+      - --deployment-id
+      - ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      - --target-database
+      - ${SAYDIN_DATABASE:?database required}
+      - --system-identifier-sha256
+      - ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      - --role-prefix
+      - ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      - --timescaledb-version
+      - "2.16.1"
+      - --uuid-ossp-version
+      - "1.1"
+      - --backup-v1-valid-until
+      - ${SAYDIN_BACKUP_V1_VALID_UNTIL:?backup v1 validity required}
+      - --migrator-password-file
+      - /run/saydin-secrets/private/migrator-v1
+      - --api-password-file
+      - /run/saydin-secrets/private/api-v1
+      - --ingestion-password-file
+      - /run/saydin-secrets/private/ingestion-v1
+      - --calendar-importer-password-file
+      - /run/saydin-secrets/private/calendar_importer-v1
+      - --exporter-password-file
+      - /run/saydin-secrets/private/exporter-v1
+      - --audit-password-file
+      - /run/saydin-secrets/private/audit-v1
+      - --backup-password-file
+      - /run/saydin-secrets/private/backup-v1
+    volumes:
+      - bootstrap_secret:/run/saydin-secrets:ro
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=16m
+    networks: [backup-db]
+    depends_on:
+      postgres: {condition: service_healthy}
+    logging: *bounded-logging
+
+  database-migrator:
+    image: ${SAYDIN_CONTROL_IMAGE:?digest-pinned control-plane image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 96
+    cpus: "${SAYDIN_JOB_CPUS:?control-plane CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?control-plane memory limit required}
+    stop_grace_period: 30s
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_MIGRATOR_LOGIN:?managed migrator login required}
+      PGSSLMODE: Disable
+      SAYDIN_MIGRATOR_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_BACKUP_V1_VALID_UNTIL:?backup v1 validity required}
+    volumes:
+      - migrator_secret:/run/saydin-secrets:ro
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=16m
+    networks: [data]
+    depends_on:
+      database-role-bootstrap: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+  saydin-api:
+    image: ${SAYDIN_API_IMAGE:?digest-pinned API image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    cpus: "${SAYDIN_API_CPUS:?API CPU limit required}"
+    mem_limit: ${SAYDIN_API_MEMORY:?API memory limit required}
+    stop_grace_period: 60s
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ApiRuntime__PublicPort: "8080"
+      ApiRuntime__ManagementPort: "9090"
+      # The public DNS name serves Caddy traffic. The exact internal service alias
+      # admits Prometheus management-port scrapes without wildcard host filtering.
+      AllowedHosts: ${SAYDIN_PUBLIC_HOST:?public host required};saydin-api
+      ForwardedHeaders__KnownNetworks: ${SAYDIN_PROXY_NETWORK_CIDR:?exact proxy CIDR required}
+      ForwardedHeaders__ForwardLimit: "1"
+      DistributedSecurityLimiter__Enabled: "true"
+      DistributedSecurityLimiter__HmacKeyFile: /run/saydin-secrets/private/security-limiter-hmac
+      InstallationCredentials__SecretFile: /run/saydin-secrets/private/installation-keyring.json
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_API_LOGIN:?managed API login required}
+      PGSSLMODE: Disable
+      SAYDIN_API_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      Otlp__Endpoint: http://otel-collector:4317
+      GeoIp__DatabasePath: /app/geoip/GeoLite2-City.mmdb
+      SAYDIN_SERVICE_VERSION: ${SAYDIN_SERVICE_VERSION:?canonical service version required}
+      SAYDIN_RELEASE_VERSION: ${SAYDIN_RELEASE_VERSION:?release version required}
+      SAYDIN_GIT_SHA: ${SAYDIN_GIT_SHA:?git SHA required}
+    volumes:
+      - api_secret:/run/saydin-secrets:ro
+      - type: volume
+        source: api_config
+        target: /app/appsettings.Production.json
+        read_only: true
+        volume: {nocopy: true, subpath: appsettings.Production.json}
+      - type: bind
+        source: ${SAYDIN_GEOIP_DIRECTORY:?GeoIP directory required}
+        target: /app/geoip
+        read_only: true
+        bind: {create_host_path: false}
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=64m
+    networks: [app, data, management]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      otel-collector: {condition: service_started}
+    healthcheck:
+      test: [CMD, curl, -fsS, -H, "Host: saydin-api", http://127.0.0.1:8080/health/live]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *bounded-logging
+
+  saydin-price-ingestion:
+    image: ${SAYDIN_INGESTION_IMAGE:?digest-pinned ingestion image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    profiles: [ingestion]
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 192
+    cpus: "${SAYDIN_INGESTION_CPUS:?ingestion CPU limit required}"
+    mem_limit: ${SAYDIN_INGESTION_MEMORY:?ingestion memory limit required}
+    stop_grace_period: 90s
+    restart: unless-stopped
+    environment:
+      DOTNET_ENVIRONMENT: Production
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_INGESTION_LOGIN:?managed ingestion login required}
+      PGSSLMODE: Disable
+      SAYDIN_INGESTION_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      Otlp__Endpoint: http://otel-collector:4317
+      SAYDIN_RELEASE_VERSION: ${SAYDIN_RELEASE_VERSION:?release version required}
+      SAYDIN_GIT_SHA: ${SAYDIN_GIT_SHA:?git SHA required}
+    volumes:
+      - ingestion_secret:/run/saydin-secrets:ro
+      - type: volume
+        source: ingestion_config
+        target: /app/appsettings.Production.json
+        read_only: true
+        volume: {nocopy: true, subpath: appsettings.Production.json}
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=64m
+    networks: [data, management, provider-egress]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+      otel-collector: {condition: service_started}
+    healthcheck:
+      test: [CMD-SHELL, "test -f /tmp/saydin-ingestion-healthy && find /tmp/saydin-ingestion-healthy -mmin -2 -print -quit | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    logging: *bounded-logging
+
+  caddy:
+    image: ${SAYDIN_CADDY_IMAGE:?digest-pinned Caddy image required}
+    labels:
+      io.saydin.image-class: first-party-derived
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_CADDY_CPUS:?Caddy CPU limit required}"
+    mem_limit: ${SAYDIN_CADDY_MEMORY:?Caddy memory limit required}
+    stop_grace_period: 45s
+    restart: unless-stopped
+    environment:
+      SAYDIN_PUBLIC_HOST: ${SAYDIN_PUBLIC_HOST:?public host required}
+      SAYDIN_ACME_EMAIL: ${SAYDIN_ACME_EMAIL:?ACME email required}
+    ports:
+      - target: 8080
+        published: "80"
+        protocol: tcp
+        mode: host
+      - target: 8443
+        published: "443"
+        protocol: tcp
+        mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=0700,size=32m
+    networks: [edge, app]
+    depends_on:
+      saydin-api: {condition: service_healthy}
+    logging: *bounded-logging
+
+  postgres-exporter:
+    image: ${SAYDIN_POSTGRES_EXPORTER_IMAGE:?digest-pinned PostgreSQL exporter image required}
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    cpus: "${SAYDIN_EXPORTER_CPUS:?exporter CPU limit required}"
+    mem_limit: ${SAYDIN_EXPORTER_MEMORY:?exporter memory limit required}
+    stop_grace_period: 20s
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_URI: postgres:5432/${SAYDIN_DATABASE:?database required}?sslmode=disable
+      DATA_SOURCE_USER: ${SAYDIN_EXPORTER_LOGIN:?managed exporter login required}
+      DATA_SOURCE_PASS_FILE: /run/saydin-secrets/private/password
+    volumes:
+      - exporter_secret:/run/saydin-secrets:ro
+    tmpfs:
+      - /tmp:uid=65534,gid=65534,mode=0700,size=8m
+    networks: [data, management]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+  redis-exporter:
+    image: ${SAYDIN_REDIS_EXPORTER_IMAGE:?digest-pinned Redis exporter image required}
+    user: "59000:59000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    cpus: "${SAYDIN_EXPORTER_CPUS:?exporter CPU limit required}"
+    mem_limit: ${SAYDIN_EXPORTER_MEMORY:?exporter memory limit required}
+    stop_grace_period: 20s
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD_FILE: /run/saydin-secrets/private/password
+    volumes:
+      - redis_exporter_secret:/run/saydin-secrets:ro
+    networks: [data, management]
+    depends_on:
+      redis: {condition: service_healthy}
+    logging: *bounded-logging
+
+  otel-collector:
+    image: ${SAYDIN_OTEL_IMAGE:?digest-pinned OpenTelemetry Collector image required}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_OTEL_CPUS:?collector CPU limit required}"
+    mem_limit: ${SAYDIN_OTEL_MEMORY:?collector memory limit required}
+    stop_grace_period: 30s
+    restart: unless-stopped
+    command: [--config=/etc/otelcol/config.yml]
+    environment:
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_RELEASE_VERSION: ${SAYDIN_RELEASE_VERSION:?release version required}
+      SAYDIN_GIT_SHA: ${SAYDIN_GIT_SHA:?git SHA required}
+    volumes:
+      - ../otel/otel-collector.production.yml:/etc/otelcol/config.yml:ro
+      - otel_queue:/var/lib/otelcol/queue
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=0700,size=32m
+    networks: [management]
+    depends_on:
+      tempo: {condition: service_started}
+      loki: {condition: service_started}
+    logging: *bounded-logging
+
+  tempo:
+    image: ${SAYDIN_TEMPO_IMAGE:?digest-pinned Tempo image required}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_TEMPO_CPUS:?Tempo CPU limit required}"
+    mem_limit: ${SAYDIN_TEMPO_MEMORY:?Tempo memory limit required}
+    stop_grace_period: 60s
+    restart: unless-stopped
+    command: [-config.file=/etc/tempo/config.yml, -config.expand-env=true]
+    environment:
+      SAYDIN_TEMPO_RETENTION: ${SAYDIN_TEMPO_RETENTION:?Tempo retention required}
+    volumes:
+      - ../otel/tempo.production.yml:/etc/tempo/config.yml:ro
+      - tempo_data:/var/tempo
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=0700,size=32m
+    networks: [management]
+    logging: *bounded-logging
+
+  loki:
+    image: ${SAYDIN_LOKI_IMAGE:?digest-pinned Loki image required}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_LOKI_CPUS:?Loki CPU limit required}"
+    mem_limit: ${SAYDIN_LOKI_MEMORY:?Loki memory limit required}
+    stop_grace_period: 60s
+    restart: unless-stopped
+    command: [-config.file=/etc/loki/config.yml, -config.expand-env=true]
+    environment:
+      SAYDIN_LOKI_RETENTION: ${SAYDIN_LOKI_RETENTION:?Loki retention required}
+    volumes:
+      - ../otel/loki.production.yml:/etc/loki/config.yml:ro
+      - loki_data:/var/loki
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=0700,size=32m
+    networks: [management]
+    logging: *bounded-logging
+
+  prometheus:
+    image: ${SAYDIN_PROMETHEUS_IMAGE:?digest-pinned Prometheus image required}
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_PROMETHEUS_CPUS:?Prometheus CPU limit required}"
+    mem_limit: ${SAYDIN_PROMETHEUS_MEMORY:?Prometheus memory limit required}
+    stop_grace_period: 45s
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${SAYDIN_PROMETHEUS_RETENTION:?Prometheus retention required}
+    volumes:
+      - ../prometheus/prometheus.production.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/rules:/etc/prometheus/rules:ro
+      - blackbox_targets:/etc/prometheus/targets:ro
+      - prometheus_data:/prometheus
+    tmpfs:
+      - /tmp:uid=65534,gid=65534,mode=0700,size=32m
+    networks: [management]
+    depends_on: [otel-collector, tempo, loki, alertmanager, postgres-exporter, redis-exporter]
+    logging: *bounded-logging
+
+  alertmanager:
+    image: ${SAYDIN_ALERTMANAGER_IMAGE:?digest-pinned Alertmanager image required}
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 96
+    cpus: "${SAYDIN_ALERTMANAGER_CPUS:?Alertmanager CPU limit required}"
+    mem_limit: ${SAYDIN_ALERTMANAGER_MEMORY:?Alertmanager memory limit required}
+    stop_grace_period: 30s
+    restart: unless-stopped
+    command:
+      - --config.file=/run/saydin-secrets/private/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - alertmanager_secret:/run/saydin-secrets:ro
+      - alertmanager_data:/alertmanager
+    tmpfs:
+      - /tmp:uid=65534,gid=65534,mode=0700,size=16m
+    networks: [management, alert-egress]
+    logging: *bounded-logging
+
+  blackbox-exporter:
+    image: ${SAYDIN_BLACKBOX_IMAGE:?digest-pinned blackbox exporter image required}
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    cpus: "${SAYDIN_EXPORTER_CPUS:?exporter CPU limit required}"
+    mem_limit: ${SAYDIN_EXPORTER_MEMORY:?exporter memory limit required}
+    stop_grace_period: 20s
+    restart: unless-stopped
+    command: [--config.file=/etc/blackbox/config.yml]
+    volumes:
+      - ./blackbox.yml:/etc/blackbox/config.yml:ro
+    networks: [edge, management]
+    logging: *bounded-logging
+
+  node-exporter:
+    image: ${SAYDIN_NODE_EXPORTER_IMAGE:?digest-pinned node exporter image required}
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    cpus: "${SAYDIN_EXPORTER_CPUS:?exporter CPU limit required}"
+    mem_limit: ${SAYDIN_EXPORTER_MEMORY:?exporter memory limit required}
+    stop_grace_period: 20s
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/var/lib/node-exporter/textfile
+    volumes:
+      - /:/host:ro,rslave
+      - backup_metrics:/var/lib/node-exporter/textfile:ro
+    networks: [management]
+    logging: *bounded-logging
+
+  calendar-release:
+    image: ${SAYDIN_CALENDAR_IMAGE:?digest-pinned calendar image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    profiles: [calendar-import]
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 96
+    cpus: "${SAYDIN_JOB_CPUS:?job CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?job memory limit required}
+    stop_grace_period: 30s
+    restart: "no"
+    command:
+      - import
+      - --data-root
+      - /workspace/tools/calendar-data/data
+      - --calendar
+      - ${SAYDIN_CALENDAR_CODE:?calendar code required}
+      - --release-id
+      - ${SAYDIN_CALENDAR_RELEASE_ID:?calendar release id required}
+      - --release-version
+      - ${SAYDIN_CALENDAR_RELEASE_VERSION:?calendar release version required}
+      - --expected-current-release
+      - ${SAYDIN_CALENDAR_EXPECTED_CURRENT_RELEASE:?expected calendar release required}
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_CALENDAR_IMPORTER_LOGIN:?calendar login required}
+      PGSSLMODE: Disable
+      SAYDIN_CALENDAR_IMPORTER_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+    volumes:
+      - calendar_secret:/run/saydin-secrets:ro
+      - calendar_data:/workspace/tools/calendar-data/data:ro
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=16m
+    networks: [data]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+  calendar-activate:
+    image: ${SAYDIN_CALENDAR_IMAGE:?digest-pinned calendar image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    profiles: [calendar-activate]
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 96
+    cpus: "${SAYDIN_JOB_CPUS:?job CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?job memory limit required}
+    stop_grace_period: 30s
+    restart: "no"
+    command:
+      - activate
+      - --calendar
+      - ${SAYDIN_CALENDAR_CODE:?calendar code required}
+      - --release-id
+      - ${SAYDIN_CALENDAR_RELEASE_ID:?calendar release id required}
+      - --expected-current-release
+      - ${SAYDIN_CALENDAR_EXPECTED_CURRENT_RELEASE:?expected calendar release required}
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_CALENDAR_IMPORTER_LOGIN:?calendar login required}
+      PGSSLMODE: Disable
+      SAYDIN_CALENDAR_IMPORTER_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+    volumes:
+      - calendar_secret:/run/saydin-secrets:ro
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=16m
+    networks: [data]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+  data-quality-audit:
+    image: ${SAYDIN_DQA_IMAGE:?digest-pinned DQA image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    profiles: [audit]
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_JOB_CPUS:?job CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?job memory limit required}
+    stop_grace_period: 60s
+    restart: "no"
+    command:
+      - scan
+      - --input
+      - /run/audit-input/manifest.json
+      - --input-signature
+      - /run/audit-input/manifest.sig
+      - --input-public-key
+      - /run/audit-input/input-public.pem
+      - --signer-mode
+      - oci-kms-instance-principal
+      - --kms-key-id
+      - ${SAYDIN_DQA_KMS_KEY_ID:?DQA KMS key OCID required}
+      - --kms-key-version-id
+      - ${SAYDIN_DQA_KMS_KEY_VERSION_ID:?DQA KMS key-version OCID required}
+      - --kms-crypto-endpoint
+      - ${SAYDIN_DQA_KMS_CRYPTO_ENDPOINT:?DQA KMS crypto endpoint required}
+      - --oci-region
+      - ${SAYDIN_DQA_OCI_REGION:?DQA OCI region required}
+      - --evidence-public-key
+      - /run/saydin-secrets/private/evidence-public.pem
+      - --allowed-evidence-key-ids
+      - ${SAYDIN_DQA_ALLOWED_EVIDENCE_KEY_IDS:?DQA evidence key allowlist required}
+      - --kms-timeout-seconds
+      - "10"
+      - --hmac-key-file
+      - /run/saydin-secrets/private/evidence-hmac
+      - --output
+      - /run/audit-output/evidence
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_AUDIT_LOGIN:?audit login required}
+      PGSSLMODE: Disable
+      SAYDIN_AUDIT_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_BACKUP_V1_VALID_UNTIL:?backup v1 validity required}
+    volumes:
+      - audit_secret:/run/saydin-secrets:ro
+      - audit_input:/run/audit-input:ro
+      - audit_output:/run/audit-output
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=32m
+    networks: [data, kms-egress]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+  database-backup:
+    image: ${SAYDIN_BACKUP_IMAGE:?digest-pinned backup image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    profiles: [backup]
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_JOB_CPUS:?job CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?job memory limit required}
+    stop_grace_period: 120s
+    restart: unless-stopped
+    command: [base-backup-loop]
+    environment:
+      PGHOST: postgres-backup
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_BACKUP_LOGIN:?dedicated physical-backup login required}
+      PGSSLMODE: Require
+      SAYDIN_BACKUP_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      SAYDIN_BACKUP_BUCKET: ${SAYDIN_BACKUP_BUCKET:?off-host backup bucket required}
+      SAYDIN_BACKUP_KMS_KEY_ID: ${SAYDIN_BACKUP_KMS_KEY_ID:?backup KMS key id required}
+      RESTIC_REPOSITORY: ${SAYDIN_BACKUP_REPOSITORY:?encrypted off-host restic repository required}
+      RESTIC_PASSWORD_FILE: /run/saydin-secrets/private/repository-password
+      AWS_WEB_IDENTITY_TOKEN_FILE: /run/saydin-secrets/private/object-store-token
+      AWS_ROLE_ARN: ${SAYDIN_BACKUP_OBJECT_STORE_ROLE:?object-store workload role required}
+      AWS_REGION: ${SAYDIN_BACKUP_REGION:?object-store region required}
+      SAYDIN_BACKUP_RPO_MINUTES: "15"
+      SAYDIN_BACKUP_RTO_MINUTES: "120"
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_BACKUP_METRICS_DIR: /var/lib/node-exporter/textfile
+    volumes:
+      - backup_secret:/run/saydin-secrets:ro
+      - backup_metrics:/var/lib/node-exporter/textfile
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=2g
+    networks: [backup-db, backup-egress]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+  database-wal-archive:
+    image: ${SAYDIN_BACKUP_IMAGE:?digest-pinned backup image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    profiles: [backup]
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_JOB_CPUS:?job CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?job memory limit required}
+    stop_grace_period: 120s
+    restart: unless-stopped
+    command: [wal-stream]
+    environment:
+      PGHOST: postgres-backup
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_BACKUP_LOGIN:?dedicated physical-backup login required}
+      PGSSLMODE: Require
+      SAYDIN_BACKUP_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
+      RESTIC_REPOSITORY: ${SAYDIN_BACKUP_REPOSITORY:?encrypted off-host restic repository required}
+      RESTIC_PASSWORD_FILE: /run/saydin-secrets/private/repository-password
+      AWS_WEB_IDENTITY_TOKEN_FILE: /run/saydin-secrets/private/object-store-token
+      AWS_ROLE_ARN: ${SAYDIN_BACKUP_OBJECT_STORE_ROLE:?object-store workload role required}
+      AWS_REGION: ${SAYDIN_BACKUP_REGION:?object-store region required}
+      SAYDIN_BACKUP_KMS_KEY_ID: ${SAYDIN_BACKUP_KMS_KEY_ID:?backup KMS key id required}
+      SAYDIN_BACKUP_RPO_MINUTES: "15"
+      SAYDIN_BACKUP_RTO_MINUTES: "120"
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_BACKUP_METRICS_DIR: /var/lib/node-exporter/textfile
+    volumes:
+      - backup_secret:/run/saydin-secrets:ro
+      - backup_metrics:/var/lib/node-exporter/textfile
+      - backup_wal_spool:/work/wal
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=64m
+    networks: [backup-db, backup-egress]
+    depends_on:
+      database-migrator: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+networks:
+  edge: {}
+  app:
+    internal: true
+    ipam:
+      config: [{subnet: "${SAYDIN_PROXY_NETWORK_CIDR:?exact proxy CIDR required}"}]
+  data: {internal: true}
+  backup-db:
+    internal: true
+    ipam:
+      config: [{subnet: "${SAYDIN_BACKUP_DATABASE_NETWORK_CIDR:?dedicated backup database CIDR required}"}]
+  management: {internal: true}
+  provider-egress: {}
+  alert-egress: {}
+  backup-egress: {}
+  kms-egress: {}
+
+volumes:
+  postgres_data: {external: true, name: "${SAYDIN_POSTGRES_DATA_VOLUME:?PostgreSQL data volume required}"}
+  redis_data: {external: true, name: "${SAYDIN_REDIS_DATA_VOLUME:?Redis data volume required}"}
+  caddy_data: {external: true, name: "${SAYDIN_CADDY_DATA_VOLUME:?Caddy data volume required}"}
+  caddy_config: {external: true, name: "${SAYDIN_CADDY_CONFIG_VOLUME:?Caddy config volume required}"}
+  prometheus_data: {external: true, name: "${SAYDIN_PROMETHEUS_DATA_VOLUME:?Prometheus data volume required}"}
+  alertmanager_data: {external: true, name: "${SAYDIN_ALERTMANAGER_DATA_VOLUME:?Alertmanager data volume required}"}
+  otel_queue: {external: true, name: "${SAYDIN_OTEL_QUEUE_VOLUME:?OTel durable queue volume required}"}
+  tempo_data: {external: true, name: "${SAYDIN_TEMPO_DATA_VOLUME:?Tempo data volume required}"}
+  loki_data: {external: true, name: "${SAYDIN_LOKI_DATA_VOLUME:?Loki data volume required}"}
+  backup_metrics: {external: true, name: "${SAYDIN_BACKUP_METRICS_VOLUME:?backup metrics volume required}"}
+  backup_wal_spool: {external: true, name: "${SAYDIN_BACKUP_WAL_VOLUME:?backup WAL spool volume required}"}
+  blackbox_targets: {external: true, name: "${SAYDIN_BLACKBOX_TARGETS_VOLUME:?blackbox target volume required}"}
+  postgres_secret: {external: true, name: "${SAYDIN_POSTGRES_SECRET_VOLUME:?PostgreSQL secret volume required}"}
+  redis_secret: {external: true, name: "${SAYDIN_REDIS_SECRET_VOLUME:?Redis secret volume required}"}
+  bootstrap_secret: {external: true, name: "${SAYDIN_BOOTSTRAP_SECRET_VOLUME:?bootstrap secret volume required}"}
+  migrator_secret: {external: true, name: "${SAYDIN_MIGRATOR_SECRET_VOLUME:?migrator secret volume required}"}
+  api_secret: {external: true, name: "${SAYDIN_API_SECRET_VOLUME:?API secret volume required}"}
+  api_config: {external: true, name: "${SAYDIN_API_CONFIG_VOLUME:?API private config volume required}"}
+  ingestion_secret: {external: true, name: "${SAYDIN_INGESTION_SECRET_VOLUME:?ingestion DB secret volume required}"}
+  ingestion_config: {external: true, name: "${SAYDIN_INGESTION_CONFIG_VOLUME:?ingestion private config volume required}"}
+  calendar_secret: {external: true, name: "${SAYDIN_CALENDAR_SECRET_VOLUME:?calendar secret volume required}"}
+  calendar_data: {external: true, name: "${SAYDIN_CALENDAR_DATA_VOLUME:?calendar data volume required}"}
+  exporter_secret: {external: true, name: "${SAYDIN_EXPORTER_SECRET_VOLUME:?PostgreSQL exporter secret volume required}"}
+  redis_exporter_secret: {external: true, name: "${SAYDIN_REDIS_EXPORTER_SECRET_VOLUME:?Redis exporter secret volume required}"}
+  alertmanager_secret: {external: true, name: "${SAYDIN_ALERTMANAGER_SECRET_VOLUME:?Alertmanager secret volume required}"}
+  audit_secret: {external: true, name: "${SAYDIN_AUDIT_SECRET_VOLUME:?audit secret volume required}"}
+  audit_input: {external: true, name: "${SAYDIN_AUDIT_INPUT_VOLUME:?signed audit input volume required}"}
+  audit_output: {external: true, name: "${SAYDIN_AUDIT_OUTPUT_VOLUME:?audit evidence volume required}"}
+  backup_secret: {external: true, name: "${SAYDIN_BACKUP_SECRET_VOLUME:?backup secret volume required}"}

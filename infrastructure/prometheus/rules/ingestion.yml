@@ -1,0 +1,78 @@
+groups:
+  - name: saydin-ingestion
+    rules:
+      - alert: SaydinIngestionFreshnessMetricMissing
+        expr: absent(saydin_ingestion_last_success_timestamp_seconds) or absent(saydin_ingestion_lag_seconds)
+        for: 15m
+        labels: {severity: critical, service: saydin-price-ingestion}
+        annotations:
+          summary: Ingestion freshness signal is absent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+      - alert: SaydinDailyIngestionStale
+        expr: |
+          saydin_ingestion_last_success_timestamp_seconds{cadence="daily"} <= 0
+          or (time() - saydin_ingestion_last_success_timestamp_seconds{cadence="daily"} > 93600)
+          or saydin_ingestion_lag_seconds{cadence="daily"} > 93600
+        for: 15m
+        labels: {severity: critical, service: saydin-price-ingestion}
+        annotations:
+          summary: A bounded ingestion source has no success within 26 hours
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+      - alert: SaydinMonthlyIngestionStale
+        expr: |
+          saydin_ingestion_last_success_timestamp_seconds{cadence="monthly"} <= 0
+          or (time() - saydin_ingestion_last_success_timestamp_seconds{cadence="monthly"} > 3456000)
+          or saydin_ingestion_lag_seconds{cadence="monthly"} > 3456000
+        for: 15m
+        labels: {severity: critical, service: saydin-price-ingestion}
+        annotations:
+          summary: A bounded monthly ingestion source has no success within 40 days
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+      - alert: SaydinIngestionFailureStreak
+        expr: saydin_ingestion_failure_streak >= 3
+        for: 15m
+        labels: {severity: warning, service: saydin-price-ingestion}
+        annotations:
+          summary: A bounded ingestion source has at least three failures after its last success
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+      - alert: SaydinInflationIngestionFailures
+        expr: increase(saydin_inflation_ingestion_failures_total[30m]) > 0
+        labels: {severity: warning, service: saydin-price-ingestion}
+        annotations:
+          summary: Inflation ingestion failures were observed
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+      - alert: SaydinMarketCalendarNotReady
+        expr: increase(saydin_ingestion_calendar_not_ready_total[30m]) > 0
+        labels: {severity: critical, service: saydin-price-ingestion}
+        annotations:
+          summary: An ingestion window was rejected by calendar readiness
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+
+      - alert: SaydinMarketCalendarCoverageMetricMissing
+        expr: absent(saydin_market_calendar_coverage_horizon_days)
+        for: 15m
+        labels: {severity: critical, service: saydin-price-ingestion}
+        annotations:
+          summary: Active market calendar coverage signal is absent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/calendar-release.md
+
+      - alert: SaydinTcmbCalendarCoverageStale
+        expr: saydin_market_calendar_coverage_horizon_days{calendar="tcmb_indicative_fx"} < 0
+        for: 15m
+        labels: {severity: critical, service: saydin-price-ingestion}
+        annotations:
+          summary: Active TCMB calendar does not cover Istanbul yesterday
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/calendar-release.md
+
+      - alert: SaydinBistCalendarCoverageExpiring
+        expr: saydin_market_calendar_coverage_horizon_days{calendar="bist_pay_xist"} < 45
+        for: 15m
+        labels: {severity: critical, service: saydin-price-ingestion}
+        annotations:
+          summary: Active BIST Pay calendar has less than 45 days of coverage
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/calendar-release.md

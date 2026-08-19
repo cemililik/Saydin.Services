@@ -17,11 +17,7 @@ public interface IExternalPriceAdapter
     /// Polly retry ve circuit breaker implementasyonu her adapter'da zorunludur.
     /// </summary>
     /// <param name="assetId">Veritabanındaki asset UUID'si — PricePoint'lere doğrudan atanır.</param>
-    Task<IReadOnlyList<PricePoint>> FetchRangeAsync(
-        Guid assetId,
-        string assetSymbol,
-        string sourceId,
-        DateOnly from,
-        DateOnly to,
+    Task<AdapterOutcome<PricePoint>> FetchRangeAsync(
+        PriceFetchRequest request,
         CancellationToken ct);
 }

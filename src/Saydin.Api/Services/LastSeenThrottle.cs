@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 namespace Saydin.Api.Services;
 
 /// <summary>
-/// `users.last_seen_at` UPDATE'lerini cihaz/zaman bazında throttling yapar.
+/// `users.last_seen_at` UPDATE'lerini installation principal/zaman bazında throttling yapar.
 /// F2.2-12 ([C-B-SavedScenario-3]): Önceki sürümde her listele/kaydet/sil
 /// çağrısı bir UPDATE atıyordu — hot path için gereksiz yazma yükü, replication
 /// lag için risk. Throttle penceresi varsayılan 5 dakikadır; aynı kullanıcı için
@@ -21,7 +21,7 @@ public sealed class LastSeenThrottle(TimeProvider timeProvider) : ILastSeenThrot
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(5);
 
     // SVCR-010: Eviction sınırı — sözlüğün sınırsız büyümesi (adversarial client veya
-    // uzun ömürlü process'te aktif device birikimi) engellenir. Sınır aşıldığında
+    // uzun ömürlü process'te aktif principal birikimi) engellenir. Sınır aşıldığında
     // en eski entry'lerin yarısı atılır; window doğal olarak entry'lerin TTL'ini
     // sağladığı için "stale" tutmuş olsak bile semantik kayıp yok.
     private const int MaxEntries = 100_000;

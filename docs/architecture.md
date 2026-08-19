@@ -138,7 +138,7 @@ flowchart LR
 
 **Lokalize edilen alanlar:**
 - Exception handler `ProblemDetails.Title` alanları
-- `EndpointExtensions` DeviceId doğrulama mesajları
+- `EndpointExtensions` installation credential doğrulama mesajları
 - `WhatIfCalculator` / `SavedScenarioService` validasyon mesajları
 - Asset display name'ler (`Asset_{Symbol}` convention'ı ile, fallback: DB'deki `display_name`)
 
@@ -151,16 +151,15 @@ flowchart LR
 Günlük kullanım kotası kontrolü `DailyLimitGuard` servisi tarafından merkezi olarak yönetilir. Her hesaplama servisi (WhatIfCalculator, DcaCalculator) kendi `usageKeyPrefix` değeriyle bu guard'ı çağırır:
 
 ```
-usage:whatif:{userId}:{yyyy-MM-dd}   → WhatIfCalculator (single + compare + reverse)
-usage:dca:{userId}:{yyyy-MM-dd}      → DcaCalculator
+usage:whatif:{principal}:{redis-day}   → WhatIfCalculator (single + compare + reverse)
+usage:dca:{principal}:{redis-day}      → DcaCalculator
 ```
 
-`GetLimitAndKey` helper metodu ortak kontrol mantığını çıkarır:
-- Premium kullanıcılar → bypass (ne check ne increment)
-- Limit = 0 → unlimited tier, bypass
-- Diğerleri → Redis key oluştur, limit kontrol et
-
-**Fail-open prensibi:** Redis erişilemezse kullanıcı engellemez — hata loglanır, istek devam eder.
+Her acquire exact Redis key'i ve 128-bit nonce'u taşıyan immutable `QuotaLease` döndürür.
+Release yalnız bu lease ile yapılır; gece yarısı ve retry key'i yeniden hesaplamaz. Limit=0
+no-op lease'tir. Finite kota Redis TIME + Lua ile atomiktir; ambiguous ACK aynı nonce ile
+idempotent reconcile edilir. Redis kullanılamazsa **503 `quota_unavailable`** döner; finite kota
+fail-open değildir.
 
 **Compare kotası (ADR-002):** `POST /v1/what-if/compare` sembol sayısından (2-5) bağımsız
 olarak günlük kotadan **1 hesaplama** düşer. Tek What-If, Reverse What-If ve Compare aynı
@@ -173,15 +172,14 @@ alt-kotalar (roadmap'teki compare=5 / reverse=3 / dca=3) post-MVP'ye ertelendi
 | Katman | Mekanizma | Pencere | Amaç |
 |---|---|---|---|
 | 1 | `IDailyLimitGuard` (Redis, yukarıda) | günlük | ürün adilliği / kota |
-| 2 | ASP.NET Core `RateLimiter` middleware | saniye/dakika | burst / DoS koruması |
+| 2 | Redis-backed `DistributedSecurityLimiter` | saniye/dakika | burst / DoS koruması |
 
-Katman 2 **config-gated** ve **varsayılan kapalıdır** (`RateLimiting:Enabled=false`).
-Açıkken IP-bazlı sabit pencere (`PartitionedRateLimiter` + `FixedWindow`,
-`PermitLimit`/`WindowSeconds` config). `/health` ve `/metrics` throttle dışıdır.
-Reddetme: 429 + RFC 7807 ProblemDetails (`type=…/errors/rate-limited`, lokalize, `traceId`,
-`Retry-After`). Doğru istemci IP'si için reverse-proxy ortamında
-`ForwardedHeaders:KnownProxies`/`KnownNetworks` yapılandırılmalıdır. Dağıtık (çok-instance)
-limit, yatay ölçeklenince eklenecek dokümante edilmiş takip işidir
+Katman 2 production'da zorunludur. Redis TIME tabanlı Lua exact IP, IPv4 `/24` veya IPv6
+`/64` network ve authenticated installation principal bucket'larını tüm replica'larda paylaşır.
+Anahtarlar private-file HMAC pseudonym taşır; ham IP/principal Redis key veya loga girmez.
+Güvenilmeyen/malformed forwarded IP ya da Redis hatası 503, limit aşımı 429 + bounded
+`Retry-After` üretir. Public `/health/live` ile private management readiness/metrics yolları
+API admission yüzeyinden ayrıdır
 (bkz. [ADR-003](decisions/ADR-003-rate-limiting.md)).
 
 ## Feature Flags (Özellik Bayrakları)
@@ -231,6 +229,25 @@ toplam yatırılan sermayeyi olduğundan az gösterir. Hafta sonu/tatil durumund
 işlem gününe taşınır; aynı `PriceDate`'e iki alım düşerse tekilleştirilir (F1.3-3 / F1.3-4).
 Kaynak: `DcaCalculator.GeneratePurchaseDates`.
 
+### DCA reel getiri — cash-flow CPI terminal v1
+
+`IncludeInflation=true` için her katkı, planlanan tarihin değil fiilen fiyat bulunan piyasa
+gününün ayındaki exact TÜFE endeksinden terminal fiyat gününün exact TÜFE ayına taşınır.
+Katkı `Cᵢ`, katkı endeksi `Iᵢ`, terminal endeksi `Iₜ`, raw terminal portföy değeri `Vₜ` ise:
+
+- `InflationAdjustedInvestedTry = Σ(Cᵢ × Iₜ / Iᵢ)`
+- `RealProfitLossTry = Vₜ - InflationAdjustedInvestedTry`
+- `RealProfitLossPercent = (Vₜ / InflationAdjustedInvestedTry - 1) × 100`
+
+Hesaplar `decimal` ile yapılır; katkı ve terminal portföy için ara parasal yuvarlama
+yapılmaz. TL alanları ve yüzde yalnız response sınırında sırasıyla 2 haneye
+`MidpointRounding.AwayFromZero` ile yuvarlanır. `RealReturnMethod` değeri
+`cashflow_cpi_terminal_v1`; `InflationTerminalMonth` ve backward-compatible
+`InflationDataAsOf` başarılı hesapta gerçek terminal fiyat gününün exact CPI ayıdır.
+Herhangi bir required CPI ayı eksik veya pozitif değilse nominal alanlar döner, reel
+tutar/yüzde alanları `null` kalır ve incomplete yanıt cache'lenmez. XIRR/yıllıklandırma
+bu sözleşmenin parçası değildir.
+
 ## Senaryo Tipi Normalizasyonu
 
 `SavedScenarioService` senaryo kaydetme sırasında `Type` alanını `ToLowerInvariant()` ile normalize eder. İzin verilen tipler:
@@ -270,9 +287,8 @@ domain-kuralı ihlali, ör. senaryo kotası) · 429 (günlük kota / rate-limit)
 **Hata zarfı sözleşmesi (EC-3/EC-4/EC-9):** Tüm handler'lar `Content-Type:
 application/problem+json` döner ve `Extensions`'a **kararlı, lokalden bağımsız `code`** alanı
 ekler (`Saydin.Api/Exceptions/ApiErrorCodes.cs`; ör. `feature_disabled`, `daily_limit_exceeded`,
-`missing_device_id`) — istemci `type` URI'sine değil **`code`'a göre** dallanır. RateLimiter
-`OnRejected` ve DeviceId guard (`Results.Problem`) da aynı zarfı (`rate_limited` /
-`missing_device_id` / `invalid_device_id`) kullanır. `GlobalExceptionHandler` 5xx gövdesine
+`invalid_installation_credential`) — istemci `type` URI'sine değil **`code`'a göre** dallanır.
+Security limiter ve installation credential filter da aynı zarfı kullanır. `GlobalExceptionHandler` 5xx gövdesine
 teknik mesaj/stack **sızdırmaz**; `ExternalApiExceptionHandler` upstream kaynak adını gövdeye
 **koymaz** (yalnız log'da, EC-9). Kararlı kodlar + tip→kod eşlemesi meta repo
 `docs/architecture/api-contract.md` "Hata Taksonomisi"nde yayınlanır.
@@ -298,16 +314,15 @@ Hata-sözleşmesi regresyonu `Saydin.Api.Tests/Exceptions/ExceptionHandlerContra
 ## Cache Stratejisi (Redis)
 
 ```text
-price:{symbol}:{date}                            → TTL 24 saat  (tek gün fiyatı)
-nearest-price:{symbol}:{date}                    → TTL 24 saat  (en yakın işlem günü fiyatı)
-prices:{symbol}:{from}:{to}:{interval}           → TTL 1 saat   (tarih aralığı)
-latest-date:{symbol}                             → TTL 1 saat   (en son fiyat tarihi)
-whatif:v3:{symbol}:{buy}:{sell}:{amount}:{amountType}{:inf?}:{lang}        → TTL 1 saat (hesaplama; v3: lokalize displayName)
-whatif:reverse:v2:{symbol}:{buy}:{sell}:{amount}:{targetType}{:inf?}:{lang} → TTL 1 saat (ters hesaplama)
-dca:v1:{symbol}:{start}:{end}:{periodicAmount}:{period}:{amountType}{:inf?}:{lang} → TTL 1 saat (DCA)
-assets:sig                                       → TTL 5 dakika (aktif asset listesi içerik imzası)
-assets:list:{sig}                                → TTL 6 saat   (tüm asset listesi — temel alanlar)
-assets:info:{sig}:{lang}                         → TTL 1 saat   (zenginleştirilmiş liste, dil bazlı)
+authority-final-v1:catalog:{revision.sha}:price:{symbol}:{date}                  → TTL 24 saat
+authority-final-v1:catalog:{revision.sha}:nearest-price:{symbol}:{date}          → TTL 24 saat
+authority-final-v1:catalog:{revision.sha}:prices:{symbol}:{from}:{to}:{interval} → TTL 1 saat
+authority-final-v1:catalog:{revision.sha}:latest-date:{symbol}                   → TTL 1 saat
+authority-final-v1:catalog:{revision.sha}:whatif:v3:{...}:{lang}                 → TTL 1 saat
+authority-final-v1:catalog:{revision.sha}:whatif:reverse:v2:{...}:{lang}         → TTL 1 saat
+authority-final-v1:catalog:{revision.sha}:dca:v2:{...}:{lang}                    → TTL 1 saat
+authority-final-v1:catalog:{revision.sha}:assets:list                            → TTL 6 saat
+authority-final-v1:catalog:{revision.sha}:assets:info:{lang}                     → TTL 1 saat
 ```
 
 > Tam ve yetkili cache key referansı (TTL gerekçeleri, fail-open politikası dahil):
@@ -317,17 +332,18 @@ Cache anahtarı normalize edilmiş parametrelerle oluşturulur.
 
 **`whatif` cache versiyonlama:** Lokalize `assetDisplayName` eklendikten sonra anahtar `whatif:v3:...:lang` olarak güncellendi. Dil kodu (`tr`/`en`) cache key'in parçasıdır — farklı dillerdeki istekler ayrı cache'lenir.
 
-**Asset listesi cache stratejisi:**
-- `assets:sig` — aktif asset sayısını tutar (5 dk TTL). İmza değeri değiştiğinde `assets:list` ve `assets:info` otomatik yenilenir.
-- `assets:list:{sig}` — temel asset listesi (6 saat TTL). Sadece sembol/isim/kategori alanları.
-- `assets:info:{sig}:{lang}` — `firstPriceDate`/`lastPriceDate` dahil zenginleştirilmiş liste (1 saat TTL, dil bazlı). Flutter tarih picker aralığı için kullanılır. Lokalize `displayName` içerdiği için dil kodu cache key'e dahildir.
+**Asset listesi cache stratejisi:** DB-owned monoton catalog revision + SHA bütün data-bearing
+key'lere bağlanır; salt count imzası yoktur. Cache envelope catalog identity, requested symbol/date
+ve yalnız complete-final authority taşıyan sonucu doğrular. Eski namespace veya malformed/null
+envelope miss sayılıp silinir; authority/DB hatası cache degradation adı altında yutulmaz.
 
 ## Observability
 
-- **Structured logging:** Serilog → Console (JSON) + OTLP sink → Aspire Dashboard
-- **Tracing:** OpenTelemetry → OTLP → Aspire Dashboard (her iş akışı adımı custom Activity ile izlenir)
-- **Metrics:** OpenTelemetry + Prometheus scrape (`/metrics`)
-- **Health checks:** `/health` → PostgreSQL + Redis bağlantı kontrolleri
+- **Structured logging:** Serilog → Console (JSON) + OTLP → Collector → durable Loki
+- **Tracing:** OpenTelemetry → Collector disk queue → durable Tempo
+- **Metrics:** OpenTelemetry + management listener (`:9090/metrics`) Prometheus scrape
+- **Health checks:** public `:8080/health/live` yalnız process liveness; private management
+  `:9090/health/ready` zorunlu PostgreSQL readiness kontrolü
 
 Detaylı referans: [architecture/observability.md](architecture/observability.md) ·
 İlgili: [architecture/database-schema.md](architecture/database-schema.md) ·
@@ -335,11 +351,11 @@ Detaylı referans: [architecture/observability.md](architecture/observability.md
 
 ## Faz 3 Sistemik Değişiklikler
 
-- **`IDeviceContext` (scoped):** İş service'leri (`IWhatIfCalculator`, `IDcaCalculator`,
-  `ISavedScenarioService`, `IAppConfigService`) artık `deviceId` parametresi taşımaz; device id
-  `RequireDeviceId` filter tarafından scoped `IDeviceContext`'e yazılır ve servislere enjekte
-  edilir. HTTP sözleşmesi (`X-Device-ID` header) değişmedi. `IDailyLimitGuard`/`IPlanLimitResolver`
-  altyapı bileşeni olarak `deviceId`'yi açık parametre tutar.
+- **`IInstallationPrincipalContext` (scoped):** `POST /v1/installations` server-issued 256-bit
+  credential üretir; korumalı endpoint'ler `Authorization: Installation <token>` ister.
+  Filter HMAC verifier ile principal'ı çözer ve scoped context'e yazar. Legacy client-chosen
+  `X-Device-ID` authentication/ownership yüzeyi yoktur; activity kolonundaki eski ad yalnız
+  server-issued bounded principal pseudonym taşır.
 - **`TimeProvider`:** API servisleri/handler/repository `DateTime.UtcNow` yerine enjekte edilen
   `TimeProvider` (singleton `TimeProvider.System`) kullanır → testlerde `FakeTimeProvider` ile
   deterministik saat (gün-dönümü flaky'liği yok).
