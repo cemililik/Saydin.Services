@@ -59,6 +59,15 @@ internal sealed class MigrationRunner(
     private const string PrincipalRetentionVersion = "022_principal_retention";
     private const string ApiSecurityAdmissionVersion = "023_installation_lifecycle_admission";
     private const string CredentialRehashVersion = "024_installation_credential_rehash";
+    private const string IngestionCalendarRebindVersion = "025_ingestion_calendar_rebind";
+
+    // 025 replaces the enforce_ingestion_window_calendar_release body created by 017, so the
+    // pinned body digest is stage-dependent: a chain that stops before 025 still carries the
+    // 017 body and must not be reported as fingerprint drift.
+    private const string IngestionWindowCalendarBodySha256Before025 =
+        "757f159bc79d46513b43dc58dff2127d097128ac1ba0d22e470a1cfc933fcc1a";
+    private const string IngestionWindowCalendarBodySha256From025 =
+        "ae2468290e4f09338e9120f25bafa65e3575b1f6dc941aa65e4867f733de428a";
     private static readonly string[] LegacyVersions =
     [
         "001_initial",
@@ -117,6 +126,8 @@ internal sealed class MigrationRunner(
             migration => migration.Version == ApiSecurityAdmissionVersion);
         var requiresCredentialRehash = manifest.Migrations.Any(
             migration => migration.Version == CredentialRehashVersion);
+        var requiresIngestionCalendarRebind = manifest.Migrations.Any(
+            migration => migration.Version == IngestionCalendarRebindVersion);
         var sqlBodies = manifest.Migrations
             .Where(migration => migration.Kind == MigrationKind.Sql)
             .ToDictionary(
@@ -195,7 +206,8 @@ internal sealed class MigrationRunner(
                             requireApiTrust: false,
                             requirePrincipalRetention: false,
                             requireApiSecurityAdmission: false,
-                            requireCredentialRehash: false, cancellationToken);
+                            requireCredentialRehash: false,
+                            requireIngestionCalendarRebind: false, cancellationToken);
                         var legacyOptionalStatus = await ValidateLegacyOptionalStepAsync(
                             connection, cancellationToken);
                         if (options.VerifyOnly)
@@ -233,7 +245,7 @@ internal sealed class MigrationRunner(
                         requiresAuthoritativeCalendars, requiresScenarioIntegrity,
                         requiresPrivilegeSeparation, requiresPriceAuthority, requiresApiTrust,
                         requiresPrincipalRetention, requiresApiSecurityAdmission,
-                        requiresCredentialRehash,
+                        requiresCredentialRehash, requiresIngestionCalendarRebind,
                         cancellationToken);
                     await VerifyImpactPostconditionsAsync(
                         connection, manifest, impacts, trustedPrefixCount, cancellationToken);
@@ -320,7 +332,7 @@ internal sealed class MigrationRunner(
                     requiresAuthoritativeCalendars, requiresScenarioIntegrity,
                     requiresPrivilegeSeparation, requiresPriceAuthority, requiresApiTrust,
                     requiresPrincipalRetention, requiresApiSecurityAdmission,
-                    requiresCredentialRehash,
+                    requiresCredentialRehash, requiresIngestionCalendarRebind,
                     cancellationToken);
                 await AssertTargetIdentityAsync(connection, target, cancellationToken);
                 await SetControlStateAsync(connection, "ready", manifest.Checksum, null, cancellationToken);
@@ -1297,8 +1309,12 @@ internal sealed class MigrationRunner(
         bool requirePrincipalRetention,
         bool requireApiSecurityAdmission,
         bool requireCredentialRehash,
+        bool requireIngestionCalendarRebind,
         CancellationToken cancellationToken)
     {
+        var ingestionWindowCalendarBodySha256 = requireIngestionCalendarRebind
+            ? IngestionWindowCalendarBodySha256From025
+            : IngestionWindowCalendarBodySha256Before025;
         var checks = new (string Code, string Sql)[]
         {
             ("core_tables_missing", """
@@ -1561,7 +1577,7 @@ internal sealed class MigrationRunner(
                     ('activate_market_calendar_release','9c7680d37e98ae75475ccac4afc96798f958cf0ea897c7f2ded6fdb19879c9c9'),
                     ('enforce_active_market_calendar_release','5bade313804c0e597b9af28a6edb1143600eaefd5345cb347fe9daedd5f4ee6f'),
                     ('enforce_asset_market_calendar_source','32086cca3e0712a9fac701f54b7801ef43a1bfb2574d1fdcb03485680cbbe2f4'),
-                    ('enforce_ingestion_window_calendar_release','ae2468290e4f09338e9120f25bafa65e3575b1f6dc941aa65e4867f733de428a'),
+                    ('enforce_ingestion_window_calendar_release','__INGESTION_WINDOW_CALENDAR_BODY_SHA256__'),
                     ('enforce_market_calendar_release_assembly','7a00eb9a7c0a8e266ff7f10543efa757924dec410fe573eac728a38adbe679db'),
                     ('provision_asset_market_calendar','32c07aca82ae50c6b3638015df2792bd421a4aa3e09f85aea9089dd0b3ec7392'),
                     ('seal_market_calendar_release','d41d5fb586594ec56de83c6a85e71108a292e8d1adb23863dae4b9de137a3e4c'),
@@ -1580,7 +1596,8 @@ internal sealed class MigrationRunner(
                   LEFT JOIN pg_proc p ON p.proname=expected.name
                   LEFT JOIN pg_namespace n ON n.oid=p.pronamespace AND n.nspname='public'
                  WHERE n.oid IS NOT NULL
-                """ : "SELECT TRUE"),
+                """.Replace("__INGESTION_WINDOW_CALENDAR_BODY_SHA256__",
+                    ingestionWindowCalendarBodySha256, StringComparison.Ordinal) : "SELECT TRUE"),
             ("scenario_integrity_constraints_missing", requireScenarioIntegrity ? """
                 SELECT COUNT(*) = 3 AND bool_and(convalidated)
                   FROM pg_constraint
@@ -1652,7 +1669,7 @@ internal sealed class MigrationRunner(
         if (requirePrivilegeSeparation)
             await VerifyPrivilegeSeparationAsync(
                 connection, requirePriceAuthority, requireApiTrust,
-                requireCredentialRehash, cancellationToken);
+                requireCredentialRehash, ingestionWindowCalendarBodySha256, cancellationToken);
         if (requirePriceAuthority)
             await VerifyPriceAuthorityAsync(connection, cancellationToken);
         if (requireApiTrust)
@@ -1669,6 +1686,7 @@ internal sealed class MigrationRunner(
         bool requirePriceAuthority,
         bool requireApiTrust,
         bool requireCredentialRehash,
+        string ingestionWindowCalendarBodySha256,
         CancellationToken cancellationToken)
     {
         await AssertSecurityFingerprintAsync(connection, "role_contract_singleton_mismatch", """
@@ -1999,7 +2017,7 @@ internal sealed class MigrationRunner(
                 ('activate_market_calendar_release','9c7680d37e98ae75475ccac4afc96798f958cf0ea897c7f2ded6fdb19879c9c9',true,$2),
                 ('enforce_active_market_calendar_release','5bade313804c0e597b9af28a6edb1143600eaefd5345cb347fe9daedd5f4ee6f',false,NULL),
                 ('enforce_asset_market_calendar_source','32086cca3e0712a9fac701f54b7801ef43a1bfb2574d1fdcb03485680cbbe2f4',false,NULL),
-                ('enforce_ingestion_window_calendar_release','ae2468290e4f09338e9120f25bafa65e3575b1f6dc941aa65e4867f733de428a',false,NULL),
+                ('enforce_ingestion_window_calendar_release',$4::text,false,NULL),
                 ('enforce_market_calendar_release_assembly','7a00eb9a7c0a8e266ff7f10543efa757924dec410fe573eac728a38adbe679db',true,NULL),
                 ('provision_asset_market_calendar','32c07aca82ae50c6b3638015df2792bd421a4aa3e09f85aea9089dd0b3ec7392',false,NULL),
                 ('seal_market_calendar_release','d41d5fb586594ec56de83c6a85e71108a292e8d1adb23863dae4b9de137a3e4c',true,$2),
@@ -2025,7 +2043,8 @@ internal sealed class MigrationRunner(
               LEFT JOIN pg_catalog.pg_proc function ON function.proname=expected.name
                AND function.pronamespace='public'::pg_catalog.regnamespace
             """, cancellationToken, options.Contract.Owner.Name,
-            options.Contract.CalendarImporterCapability.Name, options.Contract.AuditCapability.Name);
+            options.Contract.CalendarImporterCapability.Name, options.Contract.AuditCapability.Name,
+            ingestionWindowCalendarBodySha256);
 
         await AssertSecurityFingerprintAsync(connection, "write_fence_function_security_mismatch", """
             SELECT count(*)=3 AND bool_and(

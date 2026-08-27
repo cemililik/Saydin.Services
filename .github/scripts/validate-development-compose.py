@@ -19,7 +19,7 @@ SDK_IMAGE = "mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8
 LOCAL_TEST_ENTRYPOINT = "/src/.github/scripts/run-local-tests.sh"
 # Container-local heartbeat path asserted against docker-compose.yml. The validator
 # never opens it — it only checks that the ingestion service declares this prefix.
-INGESTION_HEARTBEAT_PREFIX = "/tmp/saydin-ingestion-"  # NOSONAR (python:S5443)
+INGESTION_HEARTBEAT_PREFIX = "/tmp/saydin-ingestion-"  # NOSONAR
 
 
 def escape_identity_query_delimiter(document: dict) -> None:

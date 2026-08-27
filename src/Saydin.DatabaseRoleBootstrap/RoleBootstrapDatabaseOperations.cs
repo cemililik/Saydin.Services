@@ -531,7 +531,7 @@ internal sealed partial class RoleBootstrapRunner
         }
         await RejectUnexpectedMembershipsAsync(connection, transaction, adminRole, cancellationToken);
         await VerifyDatabaseControlPlaneAsync(
-            connection, transaction, managedRoles, adminRole, cancellationToken);
+            connection, transaction, managedRoles, adminRole, allowedNoLoginRole, cancellationToken);
         await VerifyTimescaleTransitionControlPlaneAsync(
             connection, transaction, adminRole, cancellationToken);
         await VerifyPrincipalRetentionTransitionControlPlaneAsync(
@@ -627,6 +627,7 @@ internal sealed partial class RoleBootstrapRunner
         NpgsqlTransaction transaction,
         IReadOnlySet<string> managedRoles,
         string adminRole,
+        string? allowedNoLoginRole,
         CancellationToken cancellationToken)
     {
         await using (var owner = new NpgsqlCommand("""
@@ -778,7 +779,13 @@ internal sealed partial class RoleBootstrapRunner
             direct.Parameters.AddWithValue(name);
             var effective = await direct.ExecuteScalarAsync(cancellationToken) is true;
             var parsed = await ReadRoleAsync(connection, transaction, name, cancellationToken);
-            if (parsed?.CanLogin == true)
+            // A login being retired is already NOLOGIN here, but it keeps its capability
+            // membership until RevokeLoginMembershipsAsync runs after this verification.
+            // Judging it by CanLogin alone would expect no pg_control access while the
+            // inherited grant is still live, which fails closed on every migrator/audit
+            // retirement. Judge the retiring role by its managed purpose instead.
+            var retiring = string.Equals(name, allowedNoLoginRole, StringComparison.Ordinal);
+            if (parsed?.CanLogin == true || (retiring && parsed is not null))
             {
                 if (parsed.Marker is null || !options.Contract.TryResolveManagedMarker(
                         parsed.Marker, out var resolved))

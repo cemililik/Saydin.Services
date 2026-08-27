@@ -229,7 +229,7 @@ public sealed class MigrationRunnerIntegrationTests
 
         var duplicate = await new MigrationRunner(options, TextWriter.Null).RunAsync();
         duplicate.Applied.Should().Be(0);
-        duplicate.AlreadyApplied.Should().Be(27);
+        duplicate.AlreadyApplied.Should().Be(28, "27 canonical migrations plus the signed 026 tail");
         (await database.ScalarAsync<long>(
             "SELECT count(*) FROM public.dbm004_fixture WHERE marker='redacted'"))
             .Should().Be(rowCount);
@@ -364,7 +364,7 @@ public sealed class MigrationRunnerIntegrationTests
             Options(database.ConnectionString, TestPaths.MigrationsDirectory, legacyCutover: true),
             TextWriter.Null).RunAsync();
 
-        first.Applied.Should().Be(10);
+        first.Applied.Should().Be(11, "015 through 025 are pending after the 014 baseline");
         first.BackupPostBootstrapRequired.Should().BeTrue();
         (await database.ScalarAsync<bool>($"""
             SELECT EXISTS(
@@ -701,7 +701,7 @@ public sealed class MigrationRunnerIntegrationTests
                 impactConfiguration: package.Configuration), TextWriter.Null,
             allowCanonicalPrefixFixture: true).RunAsync();
 
-        result.Applied.Should().Be(27);
+        result.Applied.Should().Be(28, "27 canonical migrations plus the signed 026 tail");
         (await database.ScalarAsync<string>(
             "SELECT state FROM schema_migrations WHERE version='026_impact_test'"))
             .Should().Be("succeeded");
@@ -1277,7 +1277,7 @@ public sealed class MigrationRunnerIntegrationTests
 
         var result = await RunAsync(database.ConnectionString, legacyCutover: true);
 
-        result.Applied.Should().Be(10, "015 through 024 must be applied after the verified 014 baseline");
+        result.Applied.Should().Be(11, "015 through 025 must be applied after the verified 014 baseline");
         (await database.ScalarAsync<string>("""
             SELECT md5(string_agg(symbol || ':' || source, ',' ORDER BY symbol)) FROM assets
             """)).Should().Be(before);

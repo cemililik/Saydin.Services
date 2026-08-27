@@ -13,6 +13,7 @@
 |------|---------|-----------|---------|
 | Integration tests (TimescaleDB + Redis) | 67 testin 12'si `Npgsql.PostgresException 42501: permission denied for table activity_logs` | `EfActivityLogBatchStore` idempotent yazımı `ON CONFLICT (id,created_at)` **hedefli** arbiter kullanıyordu; TimescaleDB hypertable'ında index inference `SELECT` yetkisi ister, migration 019 ise API capability rolüne yalnız `INSERT` verir | Arbiter kaldırıldı → `ON CONFLICT DO NOTHING` (§2) |
 | Integration tests — role-bootstrap adımı | İlk düzeltmeden sonra ulaşılabilen adımda 13 testin 1'i `login_authentication_failed` | Test, Api'yi v2'ye rotate ettikten sonra `ensure`'ü bayat v1 parolasıyla çağırıyordu; `ensure` current (en yüksek) sürümü verilen sırla doğrular | Test girdisi kardeş lifecycle testleriyle hizalandı (§2b) |
+| Integration tests — migrator adımı | Bir sonraki turda açılan adımda 14 test metodu (19 vaka) | Üç ayrı kök neden: aşama-kör calendar gövde pin'i (production), 025 ile güncellenmeyen dört sayı beklentisi, migrator/audit emekliliğinde `pg_control` etkin-ACL kontrolünün `allowedNoLoginRole`'ü görmemesi (production) | §2c |
 | Dependency, license, vulnerability, secret and IaC gates | `Dependency review is not supported on this repository` (5 sn'de fail) | Repo'da Dependency Graph kapalıydı | `PUT /repos/…/vulnerability-alerts` ile Dependabot alerts + Dependency Graph açıldı |
 | SonarCloud Code Analysis | Quality Gate: `new_reliability_rating=4`, `new_security_rating=5`, `new_duplicated_lines_density=4.9%` | 2.663 bulgunun 1.919'u analiz kapsamı dışında kalması gereken artefaktlarda | Kapsam daraltıldı + gerçek bug/vulnerability'ler düzeltildi |
 | Codacy Static Code Analysis | 169 yeni bulgu (eşik 0) | Ağırlıklı olarak kontrol-düzlemi ve self-test script'lerinde yapısal yanlış-pozitif | Gerçek olanlar düzeltildi; artefakt yolu hariç tutuldu; kalanlar için Codacy tarafında pattern kararı gerekiyor (§4) |
@@ -96,6 +97,71 @@ login olabilir) aynen korunuyor; yalnız bayat sır girdisi düzeltildi.
 
 ---
 
+## 2c. Migrator suite — 025 eklendiğinde güncellenmeyen türetilmiş beklentiler
+
+Role-bootstrap düzeltmesi migrator adımını da açtı (koşum 5m41s → 16m29s). Orada 14 test
+metodu (19 vaka) düştü; üç ayrı kök neden:
+
+### (a) Calendar fonksiyon gövde pin'i aşama-körüydü — **production hatası** (9 metod)
+
+`MigrationRunner` sekiz calendar fonksiyonunun gövde SHA-256'sını pinliyor. Migration
+**025** `enforce_ingestion_window_calendar_release`'i `CREATE OR REPLACE` ile yeniden
+tanımlıyor, fakat pin her iki fingerprint bloğunda da **yalnız post-025** değerine
+güncellenmişti. Fingerprint ise her aşamada değerlendiriliyor, dolayısıyla 025'ten önce
+duran her zincir `schema_fingerprint_mismatch` veriyordu.
+
+Kanıt (üç bağımsız kaynak aynı iki değeri veriyor):
+
+| Kaynak | Değer |
+|--------|-------|
+| 017 dosyasındaki gövdenin SHA-256'sı | `757f159b…933fcc1a` |
+| Canlı dev DB (zincir 024'te duruyor) | `757f159b…933fcc1a` |
+| `019_privilege_separation.sql:320` pin'i (değişmez dosya) | `757f159b…933fcc1a` |
+| 025 dosyasındaki gövdenin SHA-256'sı | `ae246829…33de428a` |
+| `MigrationRunner.cs` pin'i (her iki blok) | `ae246829…33de428a` |
+
+**Düzeltme:** 015–024 için zaten var olan desen 025'e genişletildi —
+`IngestionCalendarRebindVersion` sabiti, manifest'ten türetilen
+`requiresIngestionCalendarRebind` bayrağı ve aşamaya göre seçilen pin. 025 içermeyen
+zincir 017 gövdesini, içeren zincir 025 gövdesini bekler.
+
+### (b) Migration sayısı beklentileri bir eksik kaldı (4 metod)
+
+025 eklendiğinde zincir 26 → 27 dosyaya çıktı; dört beklenti güncellenmemişti. Hepsi tam
+1 fark veriyordu:
+
+| Test | Beklenen | Olması gereken |
+|------|----------|----------------|
+| `BlankDatabase_WithSignedTail_…` | `Applied` 27 | **28** (27 kanonik + imzalı `026_impact_test` tail) |
+| `ImpactOnline_KillAfterCommittedBatch_…` | `AlreadyApplied` 27 | **28** (aynı paket) |
+| `BackupPostBootstrap_LegacyUpgrade_…` | `Applied` 10 | **11** (014 baseline'dan sonra 015–025) |
+| `Complete014Legacy_Cutover…` | `Applied` 10 | **11** (gerekçe metni de "015 through 025") |
+
+Aynı dosyadaki kanonik-zincir beklentileri (27) doğrudur ve dokunulmadı; zaten geçiyorlardı.
+
+### (c) Migrator/audit login emekliliği fail-closed oluyordu — **production hatası** (1 metod)
+
+`RetireAsync` önce rolü `NOLOGIN` yapıyor, `VerifyContractAsync`'i
+`allowedNoLoginRole` ile çağırıyor, capability üyeliğini ise **daha sonra**
+(`RevokeLoginMembershipsAsync`) kaldırıyor. Ancak `VerifyContractAsync`,
+`allowedNoLoginRole`'ü `VerifyRoleAttributes`'a geçirirken
+`VerifyDatabaseControlPlaneAsync`'e **geçirmiyordu**. Oradaki `pg_control_system()`
+etkin-ACL döngüsü beklentiyi yalnız `CanLogin`'den türettiği için, emekliye ayrılan rol
+şöyle görünüyordu: beklenen erişim yok, fiilen (miras yoluyla) erişim var →
+`pg_control_effective_acl_mismatch`.
+
+Bu yalnız **migrator** ve **audit** login'lerini vurur; tek pg_control EXECUTE hakkı olan
+capability'ler bunlar. Role-bootstrap suite'inin emeklilik testleri Api login'ini
+emekliye ayırdığı için sorunu görmüyordu — hata ancak migrator suite'i çalışabildiğinde
+ortaya çıktı. Etkisi operasyoneldir: **migrator credential rotation + retirement
+production'da fail-closed olurdu.**
+
+**Düzeltme:** `allowedNoLoginRole` `VerifyDatabaseControlPlaneAsync`'e geçirildi;
+emekliye ayrılan rol, üyeliği hâlâ canlı olduğu için `CanLogin` yerine managed marker
+purpose'una göre değerlendiriliyor.
+
+---
+
 ## 3. SonarCloud
 
 ### 3.1 Analiz kapsamı — `.sonarcloud.properties`
@@ -135,6 +201,21 @@ login olabilir) aynen korunuyor; yalnız bayat sır girdisi düzeltildi.
 | `python:S5443` | `validate-development-compose.py` | `/tmp/saydin-ingestion-` bu script'in açtığı bir dizin değil, `docker-compose.yml`'e karşı doğrulanan **sözleşme değeridir** |
 | `python:S5332` | `monitoring-runtime-self-test.py` | `http://metadata.invalid/` kasıtlı olarak TLS'siz ve çözülemez bir mutasyon hedefidir; https yapmak testin ölçtüğü özelliği yok eder |
 | `yaml:S2068` | `ci.yml:223` | Blok içindeki her parola `openssl rand` ile çalışma anında üretilip `::add-mask::` ile maskelenir; literal olan yalnız connection-string **anahtar adıdır** |
+
+### 3.3b Suppression mekanizmaları hakkında ampirik bulgu
+
+- Satır içi `NOSONAR` **bayrağın raporlandığı satırın sonunda** olmalıdır; bir satır
+  üstte durduğunda yok sayılır. İlk denemede S6418 ve S5344 bu yüzden hayatta kalmıştı.
+- `NOSONAR` C# tarafında çalışıyor (S6418 ve S5344 kapandı).
+- `.sonarcloud.properties` içindeki `sonar.issue.ignore.multicriteria` anahtarlarını
+  **Automatic Analysis yok sayar**; yalnız `sonar.sources` / `sonar.exclusions` /
+  `sonar.inclusions` / `sonar.tests` ailesi okunur. Exclusion'ların okunduğu
+  `new_lines` 102.182 → 79.687 ve duplication %4,95 → %0,56 ile doğrulandı.
+- `python:S5443` ne satır içi NOSONAR'a ne de multicriteria'ya yanıt verdi. Kural,
+  Sonar taksonomisinde Security Hotspot ailesindendir ("… is security-sensitive");
+  bu ailede doğru kapanış yolu **SonarCloud arayüzünde "Safe" olarak işaretlemek**
+  ya da §5'teki scanner geçişidir. Kod tarafında kapatmak `/tmp` literalini yapay
+  biçimde parçalamayı gerektirir ve dosyayı kötüleştirir; yapılmadı.
 
 ### 3.4 Kapatılmayanlar ve nedeni
 
