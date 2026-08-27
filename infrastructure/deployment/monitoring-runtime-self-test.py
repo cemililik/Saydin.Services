@@ -10,6 +10,12 @@ import tempfile
 from pathlib import Path
 
 
+# Deliberately non-TLS, non-resolvable probe target. The mutation below proves the
+# validator rejects an unreviewed blackbox instance; making it https would remove the
+# very property under test.
+UNREVIEWED_PROBE_TARGET = "http://metadata.invalid/"  # NOSONAR (python:S5332)
+
+
 def load_validator(path: Path):
     spec = importlib.util.spec_from_file_location("prometheus_runtime_validator", path)
     if spec is None or spec.loader is None:
@@ -54,11 +60,12 @@ def main() -> int:
         series_path = workspace / "series.json"
 
         def validate(rule_value: dict, target_value: dict,
-                     series_value: dict = series,
+                     series_value: dict | None = None,
                      require_ingestion: bool = False) -> list[str]:
+            resolved_series = series if series_value is None else series_value
             rule_path.write_text(json.dumps(rule_value), encoding="utf-8")
             target_path.write_text(json.dumps(target_value), encoding="utf-8")
-            series_path.write_text(json.dumps(series_value), encoding="utf-8")
+            series_path.write_text(json.dumps(resolved_series), encoding="utf-8")
             return validator.validate(
                 root / "infrastructure/prometheus/rules", rule_path, target_path, series_path,
                 "https://api.validation.test/health/live", require_ingestion)
@@ -79,7 +86,7 @@ def main() -> int:
             "arbitrary_probe": lambda _r, t: next(
                 item for item in t["data"]["activeTargets"]
                 if item["labels"]["job"] == "blackbox-https")["labels"].__setitem__(
-                    "instance", "http://metadata.invalid/"),
+                    "instance", UNREVIEWED_PROBE_TARGET),
         }
         for name, mutate in mutations.items():
             candidate_rules = copy.deepcopy(rules)

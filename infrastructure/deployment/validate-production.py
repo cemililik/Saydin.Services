@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-DIGEST = re.compile(r"^[^\s@:]+(?:[/:][^\s@]+)+@sha256:[0-9a-f]{64}$")
+DIGEST = re.compile(r"^[^\s@:]+(?:[/:][^\s@:/]+)+@sha256:[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 PLACEHOLDER = re.compile(r"change[_-]?me|example\.invalid|placeholder|replace[_-]?me", re.I)
 SECRET_KEY = re.compile(r"password|secret|token|api[_-]?key|app[_-]?id|connectionstrings", re.I)

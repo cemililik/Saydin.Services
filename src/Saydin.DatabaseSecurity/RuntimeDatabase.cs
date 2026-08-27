@@ -23,7 +23,7 @@ public sealed record RuntimeDatabaseOptions(
 {
     private const int CurrentLoginVersion = 1;
     private static readonly Regex HostPattern =
-        new("^[a-zA-Z0-9.:[\\]-]{1,253}$", RegexOptions.CultureInvariant);
+        new("^[a-zA-Z0-9.:[\\]-]{1,253}$", RegexOptions.CultureInvariant, RegexTimeouts.Default);
     private static readonly string[] RawSecretEnvironmentNames =
     [
         "DATABASE_URL",

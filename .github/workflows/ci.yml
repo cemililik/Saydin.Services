@@ -220,7 +220,7 @@ jobs:
 
       - name: İzole integration ortamı üret
         shell: bash
-        run: |
+        run: | # NOSONAR (yaml:S2068) — passwords here are generated at run time and ::add-mask::'d; only a connection-string key name is literal.
           # Each entry is independently validated, nonsecret metadata.
           # shellcheck disable=SC2129
           set -euo pipefail

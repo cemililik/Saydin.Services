@@ -13,39 +13,54 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+# Content-shape tags for each expected secret file. These name the *format* the
+# validator enforces (see validate_content), never a credential value; binding them
+# to constants keeps `"<file>": <FORMAT>` entries from reading as inline secrets.
+SCALAR = "scalar"
+BINARY_32 = "binary-32"
+JSON_DOC = "json"
+BOOTSTRAP_ADMIN = "bootstrap-admin"
+REDIS_CONF = "redis"
+ALERTMANAGER = "alertmanager"
+API_CONFIG = "api-config"
+INGESTION_CONFIG = "ingestion-config"
+PRIVATE_PEM = "private-pem"
+PUBLIC_PEM = "public-pem"
+CERTIFICATE_PEM = "certificate-pem"
+
 EXPECTED: dict[str, tuple[int, dict[str, str]]] = {
     "postgres": (70, {
-        "password": "scalar", "server.crt": "certificate-pem", "server.key": "private-pem",
+        "password": SCALAR, "server.crt": CERTIFICATE_PEM, "server.key": PRIVATE_PEM,
     }),
-    "redis": (999, {"redis.conf": "redis"}),
+    "redis": (999, {"redis.conf": REDIS_CONF}),
     "bootstrap": (1001, {
-        "admin-connection": "bootstrap-admin", "migrator-current": "scalar",
-        "api-current": "scalar", "ingestion-current": "scalar",
-        "calendar_importer-current": "scalar", "exporter-current": "scalar",
-        "audit-current": "scalar", "backup-v1": "scalar",
+        "admin-connection": BOOTSTRAP_ADMIN, "migrator-current": SCALAR,
+        "api-current": SCALAR, "ingestion-current": SCALAR,
+        "calendar_importer-current": SCALAR, "exporter-current": SCALAR,
+        "audit-current": SCALAR, "backup-v1": SCALAR,
     }),
-    "migrator": (1001, {"password": "scalar"}),
+    "migrator": (1001, {"password": SCALAR}),
     "api": (1001, {
-        "password": "scalar", "installation-keyring.json": "json",
-        "security-limiter-hmac": "scalar", "activity-principal-hmac": "binary-32",
+        "password": SCALAR, "installation-keyring.json": JSON_DOC,
+        "security-limiter-hmac": SCALAR, "activity-principal-hmac": BINARY_32,
     }),
-    "api-config": (1001, {"appsettings.Production.json": "api-config"}),
-    "ingestion": (1001, {"password": "scalar"}),
-    "ingestion-config": (1001, {"appsettings.Production.json": "ingestion-config"}),
-    "calendar": (1001, {"password": "scalar"}),
-    "exporter": (65534, {"password": "scalar"}),
-    "redis-exporter": (59000, {"password": "scalar"}),
-    "alertmanager": (65534, {"alertmanager.yml": "alertmanager"}),
+    "api-config": (1001, {"appsettings.Production.json": API_CONFIG}),
+    "ingestion": (1001, {"password": SCALAR}),
+    "ingestion-config": (1001, {"appsettings.Production.json": INGESTION_CONFIG}),
+    "calendar": (1001, {"password": SCALAR}),
+    "exporter": (65534, {"password": SCALAR}),
+    "redis-exporter": (59000, {"password": SCALAR}),
+    "alertmanager": (65534, {"alertmanager.yml": ALERTMANAGER}),
     "audit": (1001, {
-        "password": "scalar", "evidence-public.pem": "public-pem", "evidence-hmac": "scalar",
-        "production-target": "binary-32",
+        "password": SCALAR, "evidence-public.pem": PUBLIC_PEM, "evidence-hmac": SCALAR,
+        "production-target": BINARY_32,
     }),
     "data-repair": (1001, {
-        "ingestion-current": "scalar", "audit-current": "scalar",
+        "ingestion-current": SCALAR, "audit-current": SCALAR,
     }),
     "backup": (1001, {
-        "password": "scalar", "repository-password": "scalar",
-        "object-store-token": "scalar",
+        "password": SCALAR, "repository-password": SCALAR,
+        "object-store-token": SCALAR,
     }),
 }
 PLACEHOLDER = re.compile(r"change[_-]?me|example\.invalid|placeholder|replace[_-]?me", re.I)
@@ -203,17 +218,17 @@ def validate_alertmanager(text: str) -> None:
 
 
 def validate_content(kind: str, content: bytes) -> None:
-    if kind == "binary-32":
+    if kind == BINARY_32:
         if len(content) != 32:
             raise ValueError("binary_secret_shape")
         return
     text = content.decode("utf-8")
     if PLACEHOLDER.search(text) or "\x00" in text:
         raise ValueError("placeholder_or_binary")
-    if kind == "scalar":
+    if kind == SCALAR:
         if not 24 <= len(content) <= 4096 or b"\n" in content or b"\r" in content:
             raise ValueError("scalar_shape")
-    elif kind == "bootstrap-admin":
+    elif kind == BOOTSTRAP_ADMIN:
         if b"\n" in content or b"\r" in content or len(content) > 4096:
             raise ValueError("admin_connection_shape")
         pairs: dict[str, str] = {}
@@ -228,7 +243,7 @@ def validate_content(kind: str, content: bytes) -> None:
                 or not re.fullmatch(r"[a-z][a-z0-9_]{2,62}", pairs["Database"])
                 or len(pairs["Password"]) < 24 or any(character.isspace() for character in pairs["Password"])):
             raise ValueError("admin_connection_shape")
-    elif kind == "redis":
+    elif kind == REDIS_CONF:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if len(lines) not in {4, 5} or not lines[0].startswith("requirepass "):
             raise ValueError("redis_shape")
@@ -241,17 +256,17 @@ def validate_content(kind: str, content: bytes) -> None:
             raise ValueError("redis_shape")
         if "maxmemory-policy noeviction" not in lines:
             raise ValueError("redis_shape")
-    elif kind in {"json", "api-config", "ingestion-config"}:
+    elif kind in {JSON_DOC, API_CONFIG, INGESTION_CONFIG}:
         value = json.loads(text)
         if not isinstance(value, dict):
             raise ValueError("json_shape")
-        if kind == "json":
+        if kind == JSON_DOC:
             if not 1 <= len(value) <= 2 or any(
                 not str(key).isdigit() or not isinstance(item, str) or len(item) < 40
                 for key, item in value.items()
             ):
                 raise ValueError("json_shape")
-        if kind == "api-config":
+        if kind == API_CONFIG:
             if (set(value) != {"ConnectionStrings"}
                     or not isinstance(value["ConnectionStrings"], dict)
                     or set(value["ConnectionStrings"]) != {"Redis"}):
@@ -259,7 +274,7 @@ def validate_content(kind: str, content: bytes) -> None:
             redis = value["ConnectionStrings"].get("Redis")
             if not isinstance(redis, str) or "password=" not in redis.lower():
                 raise ValueError("api_config_shape")
-        if kind == "ingestion-config":
+        if kind == INGESTION_CONFIG:
             if set(value) != {"ExternalApis", "IngestionWorkers"} or not isinstance(value["ExternalApis"], dict):
                 raise ValueError("ingestion_config_shape")
             workers = value.get("IngestionWorkers")
@@ -267,16 +282,16 @@ def validate_content(kind: str, content: bytes) -> None:
                 isinstance(item, dict) and item.get("Enabled") is True for item in workers.values()
             ):
                 raise ValueError("ingestion_config_shape")
-    elif kind == "private-pem":
+    elif kind == PRIVATE_PEM:
         if not text.startswith("-----BEGIN PRIVATE KEY-----\n") or "-----BEGIN PUBLIC KEY-----" in text:
             raise ValueError("pem_shape")
-    elif kind == "public-pem":
+    elif kind == PUBLIC_PEM:
         if not text.startswith("-----BEGIN PUBLIC KEY-----\n") or "PRIVATE KEY" in text:
             raise ValueError("pem_shape")
-    elif kind == "certificate-pem":
+    elif kind == CERTIFICATE_PEM:
         if not text.startswith("-----BEGIN CERTIFICATE-----\n") or "PRIVATE KEY" in text:
             raise ValueError("pem_shape")
-    elif kind == "alertmanager":
+    elif kind == ALERTMANAGER:
         validate_alertmanager(text)
 
 

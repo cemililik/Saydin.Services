@@ -160,3 +160,8 @@ round-trip ve provisioned volume owner/mode kanıtları üretilmeden production 
 - Merge kararı verilebilir; ancak açık Medium/Low backlog kabulü ve canonical integration CI koşusu
   PR korumasında zorunlu kalmalıdır.
 - Production release, yukarıdaki dış ortam receipt'leri olmadan onaylanmamalıdır.
+
+> **Devam kaydı (2026-08-27):** PR #16 açıldıktan sonra CI'da kırmızı kalan üç kapı
+> (integration suite, dependency review, SonarCloud/Codacy) ayrıca ele alındı.
+> Kök nedenler, uygulanan düzeltmeler ve bilinçli olarak kapatılmayanlar:
+> [09-ci-gate-remediation.md](09-ci-gate-remediation.md).

@@ -308,13 +308,13 @@ public sealed class EvdsInflationWorker(
             var first = await Task.WhenAny(operationTask, renewalTask, deadlineTask);
             if (first == deadlineTask && !operationTask.IsCompleted)
             {
-                linked.Cancel();
+                await linked.CancelAsync();
                 _ = ObserveDetachedAsync(operationTask, claim.WindowId);
                 throw new ProviderDeadlineExceededException(claim.WindowId);
             }
             if (first == renewalTask)
             {
-                linked.Cancel();
+                await linked.CancelAsync();
                 try { await renewalTask; }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
@@ -333,8 +333,8 @@ public sealed class EvdsInflationWorker(
         }
         finally
         {
-            deadlineCancellation.Cancel();
-            linked.Cancel();
+            await deadlineCancellation.CancelAsync();
+            await linked.CancelAsync();
             try { await renewalTask; }
             catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
         }

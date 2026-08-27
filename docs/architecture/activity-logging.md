@@ -540,7 +540,23 @@ Saydin.Api/
 
 **`ActivityLogWriter` (BackgroundService consumer):**
 - `BatchSize = 50`. `ReadAllAsync` ile bir kayıt gelince kuyruktaki ek kayıtları
-  `TryRead` ile 50'ye kadar toplar, `SaveChangesAsync` ile tek batch yazar.
+  `TryRead` ile 50'ye kadar toplar; `EfActivityLogBatchStore` bunları tek transaction
+  içindeki bir `NpgsqlBatch` ile yazar.
+- **Idempotency (KRİTİK — ayrıca bir yetki sözleşmesi):** her satır
+  `INSERT … ON CONFLICT DO NOTHING` ile yazılır, böylece transient bir hatadan sonra
+  yeniden gönderilen batch mükerrer satır üretmez. `ON CONFLICT` **bilinçli olarak
+  hedefsizdir** (`(id,created_at)` ya da `ON CONSTRAINT …` yazılmaz): bir arbiter
+  belirtmek PostgreSQL'i index inference'a zorlar ve TimescaleDB hypertable'ında bu
+  çıkarım `public.activity_logs` üzerinde **SELECT** yetkisi ister. Migration 019 API
+  capability rolüne yalnız `INSERT` verir — audit izi API için kasıtla yazılır-okunmaz —
+  bu yüzden hedefli arbiter `42501 permission denied` ile fail-closed olur ve
+  `ActivityLogWriter` fatal yola girerek host'u durdurur. Hedefsiz biçim tek başına
+  `INSERT` ile çalışır ve burada birebir eşdeğerdir: `pk(id,created_at)` tablodaki tek
+  unique/exclusion kısıtıdır. CHECK ihlalleri (`chk_activity_action`) `ON CONFLICT`
+  kapsamında değildir; hata vermeye ve writer'ın toxic-row bisection yoluna düşmeye
+  devam eder. **`activity_logs`'a yeni bir unique index eklenirse bu eşdeğerlik bozulur
+  — o durumda hedefsiz `ON CONFLICT` istenmeyen susturma yapar ve bu yol yeniden
+  değerlendirilmelidir.**
 - **Retry:** transient hatada toplam 3 deneme, exponential backoff (200ms, 400ms).
 - **Toksik satır:** `DbUpdateException`'da batch **bisection** ile bölünür; tek satıra
   inince o satır drop edilir (`outcome=toxic_row` metric) — bir bozuk satır tüm batch'i

@@ -173,6 +173,7 @@ Tam liste ve her biri için "nasıl kapanır": [07-excellence-roadmap.md](07-exc
 | [06-remediation-audit.md](06-remediation-audit.md) | Önceki review bulgularının gerçek kapanma denetimi |
 | [07-excellence-roadmap.md](07-excellence-roadmap.md) | 191 `excellence-gap` — birinci sınıfa giden fark |
 | [08-remediation-execution.md](08-remediation-execution.md) | Uygulanan aksiyonlar, güncel kanıt ve açık riskler |
+| [09-ci-gate-remediation.md](09-ci-gate-remediation.md) | PR #16 kırmızı CI kapıları, SonarCloud ve Codacy bulgu kapanışı |
 
 ## Yöntem sınırı (dürüstlük kaydı)
 

@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using Saydin.DatabaseSecurity;
 
 namespace Saydin.CalendarData;
 
@@ -49,7 +50,7 @@ public sealed class CalendarAcquisition(
     Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
 {
     private static readonly Regex OutputNamePattern = new(
-        "^[a-z0-9][a-z0-9._-]{0,79}$", RegexOptions.CultureInvariant);
+        "^[a-z0-9][a-z0-9._-]{0,79}$", RegexOptions.CultureInvariant, RegexTimeouts.Default);
     private readonly Func<TimeSpan, CancellationToken, Task> _retryDelay =
         retryDelay ?? ((delay, token) => Task.Delay(delay, timeProvider, token));
 

@@ -50,6 +50,13 @@ public static class PostgresScramSha256Verifier
         byte[]? serverKey = null;
         try
         {
+            // NOSONAR (csharpsquid:S5344) — Iterations mirrors PostgreSQL's own
+            // scram_iterations default (4096, RFC 5802 / PostgreSQL's SCRAM-SHA-256
+            // implementation). This is not a password-at-rest KDF: the derived value
+            // is a server-side authentication verifier the server itself regenerates
+            // with the same count, and the plaintext never leaves this process. Raising
+            // it here would diverge from the verifier PostgreSQL produces for the same
+            // role via PASSWORD/\password, so the count is an interop constant.
             saltedPassword = Rfc2898DeriveBytes.Pbkdf2(
                 password, salt, Iterations, HashAlgorithmName.SHA256, DerivedKeyBytes);
             clientKey = HMACSHA256.HashData(saltedPassword, "Client Key"u8);

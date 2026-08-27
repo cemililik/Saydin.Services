@@ -188,7 +188,7 @@ def validate(root: Path) -> list[str]:
         errors.append("telemetry_artifact_invalid:prometheus")
     else:
         api_job = re.search(
-            r"^\s*- job_name:\s*saydin-api\s*$.*?(?=^\s*- job_name:|\Z)",
+            r"^\s*- job_name:\s*saydin-api\s*$.*?(?=(?:^\s*- job_name:)|\Z)",
             prometheus,
             re.M | re.S,
         )
@@ -197,7 +197,7 @@ def validate(root: Path) -> list[str]:
         if api_job is not None and "saydin-api:8080" in api_job.group(0):
             errors.append("api_public_scrape_forbidden")
         blackbox_job = re.search(
-            r"^\s*- job_name:\s*blackbox-https\s*$.*?(?=^\s*- job_name:|\Z)",
+            r"^\s*- job_name:\s*blackbox-https\s*$.*?(?=(?:^\s*- job_name:)|\Z)",
             prometheus,
             re.M | re.S,
         )

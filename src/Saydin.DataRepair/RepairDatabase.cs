@@ -266,13 +266,13 @@ internal sealed class RepairDatabase
                 await faultInjector.OnCheckpointAsync(
                     RepairDatabaseCheckpoint.RollbackBeforeCas, connection, transaction,
                     current.Snapshot.Id, cancellationToken);
-                var restored = await RollbackCasAsync(
+                await RollbackCasAsync(
                     connection, transaction, current, prior.RollbackState,
                     calendarRebind, cancellationToken);
                 await faultInjector.OnCheckpointAsync(
                     RepairDatabaseCheckpoint.RollbackAfterCasBeforeVerification,
                     connection, transaction, current.Snapshot.Id, cancellationToken);
-                restored = await ReadWindowAsync(
+                var restored = await ReadWindowAsync(
                     connection, transaction, current.Snapshot.Id, true, cancellationToken);
                 if (!RepairCryptography.FixedEquals(restored.SnapshotSha256, prior.PreimageSha256) ||
                     !RepairCryptography.FixedEquals(

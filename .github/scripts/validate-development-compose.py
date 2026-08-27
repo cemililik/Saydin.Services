@@ -17,6 +17,9 @@ POST_BOOTSTRAP_CONSUMERS = {
 }
 SDK_IMAGE = "mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c"
 LOCAL_TEST_ENTRYPOINT = "/src/.github/scripts/run-local-tests.sh"
+# Container-local heartbeat path asserted against docker-compose.yml. The validator
+# never opens it — it only checks that the ingestion service declares this prefix.
+INGESTION_HEARTBEAT_PREFIX = "/tmp/saydin-ingestion-"  # NOSONAR (python:S5443)
 
 
 def escape_identity_query_delimiter(document: dict) -> None:
@@ -59,7 +62,7 @@ def validate(document: dict) -> list[str]:
     environment = ingestion.get("environment") or {}
     heartbeat = str(environment.get("LivenessProbe__HeartbeatPath", ""))
     heartbeat_test = " ".join(str(value) for value in (ingestion.get("healthcheck") or {}).get("test") or [])
-    if not heartbeat.startswith("/tmp/saydin-ingestion-") or "$LivenessProbe__HeartbeatPath" not in heartbeat_test:
+    if not heartbeat.startswith(INGESTION_HEARTBEAT_PREFIX) or "$LivenessProbe__HeartbeatPath" not in heartbeat_test:
         errors.append("ingestion_heartbeat_contract")
     tests = services.get("tests") or {}
     if str(tests.get("image", "")) != SDK_IMAGE:

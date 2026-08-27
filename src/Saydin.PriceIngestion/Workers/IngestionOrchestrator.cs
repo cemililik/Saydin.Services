@@ -107,7 +107,7 @@ public sealed class IngestionOrchestrator : BackgroundService
         if (ReferenceEquals(completedTask, shutdownSignal.Task)
             || (stoppingToken.IsCancellationRequested && !completedTask.IsFaulted))
         {
-            linkedCts.Cancel();
+            await linkedCts.CancelAsync();
             await DrainAsync(running, fatalWorker: null);
             // Başka bir hosted service daha önce fatal/non-zero işaretlediyse normal
             // host cancellation bu kanıtı sessizce başarıya çevirmemelidir.
@@ -131,7 +131,7 @@ public sealed class IngestionOrchestrator : BackgroundService
         _logger.LogCritical(fatal,
             "Worker fatal hata: {Worker}; sibling worker'lar iptal ediliyor",
             completedWorker.Name);
-        linkedCts.Cancel();
+        await linkedCts.CancelAsync();
         await DrainAsync(running, completedWorker.Name);
 
         ExceptionDispatchInfo.Capture(fatal).Throw();

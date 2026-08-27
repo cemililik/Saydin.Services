@@ -1039,9 +1039,7 @@ internal sealed class MigrationRunner(
             await transaction.CommitAsync(cancellationToken);
             await _faultInjector.AfterCommitAsync(migration, cancellationToken);
             await AssertTargetIdentityAsync(connection, target, cancellationToken);
-            await output.WriteLineAsync(finalState == "succeeded"
-                ? $"applied: {migration.FileName}"
-                : $"skipped optional: {migration.FileName}");
+            await output.WriteLineAsync($"skipped optional: {migration.FileName}");
             return finalState;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

@@ -27,13 +27,23 @@ internal sealed class EfActivityLogBatchStore(IServiceScopeFactory scopeFactory)
             await using var batch = new NpgsqlBatch(connection, transaction);
             foreach (var entry in entries)
             {
+                // ON CONFLICT is deliberately written WITHOUT a conflict target.
+                // Naming an arbiter (`(id,created_at)` or `ON CONSTRAINT`) makes
+                // PostgreSQL infer the index, and on a TimescaleDB hypertable that
+                // inference requires SELECT on public.activity_logs. Migration 019
+                // grants the API capability INSERT only — the audit trail is
+                // deliberately write-only for the API — so a targeted arbiter fails
+                // closed with 42501. The bare form needs INSERT alone and is exactly
+                // equivalent here: pk(id,created_at) is the sole unique/exclusion
+                // constraint on the table. CHECK violations (e.g. chk_activity_action)
+                // still raise and stay on the writer's toxic-row bisection path.
                 var command = new NpgsqlBatchCommand("""
                     INSERT INTO public.activity_logs(
                         id,user_id,device_id,action,ip_address,country,city,
                         device_os,os_version,app_version,data,status_code,
                         duration_ms,error_code,created_at)
                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-                    ON CONFLICT (id,created_at) DO NOTHING
+                    ON CONFLICT DO NOTHING
                     """);
                 command.Parameters.Add(Parameter(NpgsqlDbType.Uuid, entry.Id));
                 command.Parameters.Add(Parameter(NpgsqlDbType.Uuid, entry.UserId));

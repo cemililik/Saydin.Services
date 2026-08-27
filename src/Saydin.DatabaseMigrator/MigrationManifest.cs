@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using Saydin.DatabaseSecurity;
 
 namespace Saydin.DatabaseMigrator;
 
@@ -25,7 +26,8 @@ internal sealed class MigrationManifest
 {
     private static readonly Regex FileNamePattern = new(
         "^[0-9]{3}[a-z]?_[a-z0-9_]+\\.(sql|sh)$",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexTimeouts.Default);
 
     private MigrationManifest(IReadOnlyList<MigrationDefinition> migrations, string checksum)
     {

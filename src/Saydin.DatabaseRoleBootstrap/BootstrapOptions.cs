@@ -38,7 +38,8 @@ internal sealed record BootstrapOptions(
     TimeSpan? DrainTimeout = null)
 {
     private static readonly Regex ExtensionVersionPattern =
-        new("^[0-9]+(?:\\.[0-9]+){1,3}$", RegexOptions.CultureInvariant);
+        new("^[0-9]+(?:\\.[0-9]+){1,3}$", RegexOptions.CultureInvariant,
+            RegexTimeouts.Default);
 
     public string ContractSha256 => Contract.ContractSha256(TimescaleVersion, UuidOsspVersion);
 

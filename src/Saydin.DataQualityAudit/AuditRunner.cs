@@ -666,7 +666,7 @@ internal sealed class AuditRunner(
         {
             if (row.Marker is null || !roleContract.TryResolveManagedMarker(row.Marker, out var role) ||
                 role.Purpose != "backup" || !string.Equals(role.Name, row.Name, StringComparison.Ordinal) ||
-                row.CanLogin != true || row.Superuser || row.CreateDatabase || row.CreateRole || row.Inherit ||
+                row.CanLogin is not true || row.Superuser || row.CreateDatabase || row.CreateRole || row.Inherit ||
                 !row.Replication || row.BypassRls || row.ConnectionLimit != 2 || !row.ConfigIsNull ||
                 !string.Equals(row.ValidUntilUtc,
                     RoleContract.FormatBackupValidUntil(role.ValidUntilUtc!.Value),

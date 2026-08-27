@@ -37,13 +37,14 @@ public sealed class RoleContract
     private const int MaximumLoginVersion = 32;
     private const string MarkerVersion = "saydin-role-bootstrap/v1";
     private static readonly Regex DeploymentPattern =
-        new("^[a-z][a-z0-9-]{2,11}$", RegexOptions.CultureInvariant);
+        new("^[a-z][a-z0-9-]{2,11}$", RegexOptions.CultureInvariant, RegexTimeouts.Default);
     private static readonly Regex DatabasePattern =
-        new("^[a-zA-Z][a-zA-Z0-9_]{0,62}$", RegexOptions.CultureInvariant);
+        new("^[a-zA-Z][a-zA-Z0-9_]{0,62}$", RegexOptions.CultureInvariant, RegexTimeouts.Default);
     private static readonly Regex PrefixPattern =
-        new("^saydin_[a-z][a-z0-9_]{2}_[0-9a-f]{24}$", RegexOptions.CultureInvariant);
+        new("^saydin_[a-z][a-z0-9_]{2}_[0-9a-f]{24}$", RegexOptions.CultureInvariant,
+            RegexTimeouts.Default);
     private static readonly Regex HashPattern =
-        new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
+        new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant, RegexTimeouts.Default);
 
     private RoleContract(string deploymentId, string database, string systemIdentifierSha256, string prefix)
     {

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using Saydin.DatabaseSecurity;
 
 namespace Saydin.DatabaseMigrator;
 
@@ -120,13 +121,17 @@ internal sealed class MigrationImpactSet
     private const int MaximumSignatureBytes = 1_024;
     private const int MaximumPublicKeyBytes = 16 * 1024;
     private static readonly Regex VersionPattern = new(
-        "^[0-9]{3}[a-z]?_[a-z0-9_]+$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        "^[0-9]{3}[a-z]?_[a-z0-9_]+$", RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexTimeouts.Default);
     private static readonly Regex Sha256Pattern = new(
-        "^[0-9a-f]{64}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        "^[0-9a-f]{64}$", RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexTimeouts.Default);
     private static readonly Regex RelationPattern = new(
-        "^public\\.[a-z][a-z0-9_]{0,62}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        "^public\\.[a-z][a-z0-9_]{0,62}$", RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexTimeouts.Default);
     private static readonly Regex IdentifierPattern = new(
-        "^[a-z][a-z0-9_]{0,62}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        "^[a-z][a-z0-9_]{0,62}$", RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexTimeouts.Default);
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNameCaseInsensitive = false,
@@ -540,7 +545,8 @@ internal static class CanonicalJson
 internal static class SqlImpactAnalyzer
 {
     private static readonly Regex TokenPattern = new(
-        "[a-z_][a-z0-9_$]*|[0-9]+|[.;(),]", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        "[a-z_][a-z0-9_$]*|[0-9]+|[.;(),]", RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexTimeouts.Default);
 
     public static SqlImpactAnalysis Analyze(string sql)
     {

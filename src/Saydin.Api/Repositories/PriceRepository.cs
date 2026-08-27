@@ -234,7 +234,7 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
                 IsFinal = row.IsFinal,
                 ObservationSha256 = row.ObservationSha256,
                 AuthorityContractVersion = row.AuthorityContractVersion,
-                HasSourceRaw = row.HasSourceRaw == true,
+                HasSourceRaw = row.HasSourceRaw is true,
             })
             .ToArray();
     }
