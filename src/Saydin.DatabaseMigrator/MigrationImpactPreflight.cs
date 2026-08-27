@@ -249,17 +249,20 @@ internal static class MigrationImpactPreflight
                AND relation.relname=pg_catalog.split_part($1,'.',2)
             """, connection);
         root.Parameters.AddWithValue(relation.Name);
-        await using var reader = await root.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken) || !reader.GetBoolean(3))
-            throw new MigratorRejectedException("migration_impact_relation_missing", relation.Name);
-        var rootOid = reader.GetInt64(0);
-        var actualTablespace = reader.GetString(1);
-        var rootBytes = reader.GetInt64(2);
-        if (await reader.ReadAsync(cancellationToken) ||
-            !string.Equals(actualTablespace, relation.Tablespace, StringComparison.Ordinal))
-            throw new MigratorRejectedException(
-                "migration_impact_tablespace_contract_mismatch", relation.Name);
-        await reader.DisposeAsync();
+        long rootOid, rootBytes;
+        string actualTablespace;
+        await using (var reader = await root.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken) || !reader.GetBoolean(3))
+                throw new MigratorRejectedException("migration_impact_relation_missing", relation.Name);
+            rootOid = reader.GetInt64(0);
+            actualTablespace = reader.GetString(1);
+            rootBytes = reader.GetInt64(2);
+            if (await reader.ReadAsync(cancellationToken) ||
+                !string.Equals(actualTablespace, relation.Tablespace, StringComparison.Ordinal))
+                throw new MigratorRejectedException(
+                    "migration_impact_tablespace_contract_mismatch", relation.Name);
+        }
 
         var relationOids = new List<long> { rootOid };
         long chunkBytes = 0;

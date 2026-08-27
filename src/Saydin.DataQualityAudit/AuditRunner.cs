@@ -577,13 +577,15 @@ internal sealed class AuditRunner(
                     (SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='contract_version')
                   ]::smallint[])
             """, connection, transaction);
-        await using var fingerprintReader = await fingerprint.ExecuteReaderAsync(cancellationToken);
-        if (!await fingerprintReader.ReadAsync(cancellationToken))
-            throw new AuditRejectedException("constraint_fingerprint_probe_failed", AuditExitCodes.RuntimeFailure);
-        var priceOk = fingerprintReader.GetBoolean(0);
-        var inflationOk = fingerprintReader.GetBoolean(1);
-        var windowsOk = fingerprintReader.GetBoolean(2);
-        await fingerprintReader.DisposeAsync();
+        bool priceOk, inflationOk, windowsOk;
+        await using (var fingerprintReader = await fingerprint.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await fingerprintReader.ReadAsync(cancellationToken))
+                throw new AuditRejectedException("constraint_fingerprint_probe_failed", AuditExitCodes.RuntimeFailure);
+            priceOk = fingerprintReader.GetBoolean(0);
+            inflationOk = fingerprintReader.GetBoolean(1);
+            windowsOk = fingerprintReader.GetBoolean(2);
+        }
         if (!priceOk)
             _findings.Add("DQ-003", AuditSeverity.Critical, "price_primary_key_drift", "price_points");
         if (!inflationOk)

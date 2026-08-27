@@ -296,6 +296,25 @@ istenen yöndedir; repo'daki 12 gerçek digest-pinned image'ın hiçbiri etkilen
 validator'larda; `[0-9]` kabul edilen girdi kümesini bilinçli olarak ASCII ile
 sınırlıyor. Kuralı uygulamak doğrulayıcıyı gevşetirdi.
 
+### 3.3e Dördüncü tur — kalan gerçek bulgular
+
+| Kural | Konum | Düzeltme |
+|-------|-------|----------|
+| `S1172` | `InstallationEndpoints.cs:47` | `IInstallationPrincipalContext` `Set()` sunmadığından handler zaten somut `InstallationPrincipalContext`'i çözüyor; enjekte edilen parametre ölüydü, kaldırıldı |
+| `S3966` ×4 | `AuditRunner.cs`, `MigrationImpactPreflight.cs`, `OnlineMigrationExecutor.cs` ×2 | `await using var` + açık `DisposeAsync()` birlikteydi. Açık dispose **gereklidir** (Npgsql bağlantı başına tek açık reader'a izin verir, sonraki komut ondan önce çalışıyor); fazlalık olan method-kapsamlı `using`'di. Reader'lar kendi `await using (…) { … }` bloklarına alındı: erken serbest bırakma exception yolları dahil korunuyor, çift dispose kalktı |
+| `python:S8786` ×3 | `validate-observability.py` | `labels` satırında `[ \t]*`/`.*` çakışması, `resource_to_telemetry_conversion` deseninde DOTALL `.*?` ile `#?`/`[ \t]*` çakışması, inline alert taramasında tek desende üç `[^}\n]*` koşusu. Sonuncusu iki sınırlı geçişe bölündü (`{…}` bloğu izole edilip alanlar ondan okunuyor) |
+
+Üç regex değişikliğinin tamamı gerçek artefaktlar üzerinde eşdeğerlik ölçülerek yapıldı:
+`labels` deseni 43 gerçek eşleşmede, `resource_to_telemetry_conversion` canlı
+`otel-collector.production.yml` üzerinde, inline alert taraması 42 gerçek alarm adında —
+**hepsinde 0 sapma**.
+
+**`release_manifest.py:32` ("Remove this redundant call") uygulanmadı.** Bulgunun
+gerekçesi doğrulanamadı: `data_repair` gerçekten `RUNTIME_IMAGE_ENV_KEYS` içinde bir
+anahtardır ve filtre fiilen eliyor (`EXTERNAL_RUNTIME_IMAGES != EXPECTED_RUNTIME_IMAGES`),
+yani çağrı fazlalık değildir. Release doğrulayıcısında gerekçesi anlaşılmayan bir
+değişiklik yapılmadı.
+
 ### 3.4 Kapatılmayanlar ve nedeni
 
 | Kural | Adet | Neden kapatılmadı |

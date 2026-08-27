@@ -199,14 +199,15 @@ internal sealed class OnlineMigrationExecutor(
                  ORDER BY job_id
                 """, connection, transaction);
             inspect.Parameters.AddWithValue(plan.Relation);
-            await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken))
-                throw new MigratorRejectedException("migration_online_compression_policy_missing");
-            compressionJobId = reader.GetInt32(0);
-            compressionWasScheduled = reader.GetBoolean(1);
-            if (await reader.ReadAsync(cancellationToken))
-                throw new MigratorRejectedException("migration_online_compression_policy_ambiguous");
-            await reader.DisposeAsync();
+            await using (var reader = await inspect.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await reader.ReadAsync(cancellationToken))
+                    throw new MigratorRejectedException("migration_online_compression_policy_missing");
+                compressionJobId = reader.GetInt32(0);
+                compressionWasScheduled = reader.GetBoolean(1);
+                if (await reader.ReadAsync(cancellationToken))
+                    throw new MigratorRejectedException("migration_online_compression_policy_ambiguous");
+            }
             if (compressionWasScheduled.Value)
                 await SetCompressionJobScheduledAsync(
                     connection, transaction, compressionJobId.Value, false, cancellationToken);
@@ -559,14 +560,17 @@ internal sealed class OnlineMigrationExecutor(
             """, connection, transaction);
         inspect.Parameters.AddWithValue(version);
         inspect.Parameters.AddWithValue(manifestSha256);
-        await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-            throw new MigratorRejectedException("migration_online_checkpoint_missing");
-        int? jobId = reader.IsDBNull(0) ? null : reader.GetInt32(0);
-        bool? scheduled = reader.IsDBNull(1) ? null : reader.GetBoolean(1);
-        if (await reader.ReadAsync(cancellationToken))
-            throw new MigratorRejectedException("migration_online_checkpoint_contract_mismatch");
-        await reader.DisposeAsync();
+        int? jobId;
+        bool? scheduled;
+        await using (var reader = await inspect.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+                throw new MigratorRejectedException("migration_online_checkpoint_missing");
+            jobId = reader.IsDBNull(0) ? null : reader.GetInt32(0);
+            scheduled = reader.IsDBNull(1) ? null : reader.GetBoolean(1);
+            if (await reader.ReadAsync(cancellationToken))
+                throw new MigratorRejectedException("migration_online_checkpoint_contract_mismatch");
+        }
         if (jobId.HasValue && scheduled == true)
         {
             await SetLocalRoleAsync(

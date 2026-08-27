@@ -21,7 +21,7 @@ def rule_label_keys(text: str) -> set[str]:
     lines = text.splitlines()
     index = 0
     while index < len(lines):
-        match = re.match(r"^([ \t]*)labels:[ \t]*(.*)$", lines[index])
+        match = re.match(r"^([ \t]*)labels:[ \t]*(\S.*|)$", lines[index])
         if match is None:
             index += 1
             continue
@@ -45,6 +45,9 @@ def rule_label_keys(text: str) -> set[str]:
     return result
 
 
+INLINE_BLOCK = re.compile(r"\{[^}\n]*\}")
+INLINE_ALERTNAME = re.compile(r"alertname:[ \t]*([A-Za-z][A-Za-z0-9]+)")
+INLINE_EMPTY_EXPECTATION = re.compile(r"exp_alerts:[ \t]*\[\]")
 JOB_HEADER = re.compile(r"^[ \t]*- job_name:[ \t]*(\S+)[ \t]*$", re.M)
 
 
@@ -112,10 +115,16 @@ def validate(root: Path) -> list[str]:
         for match in re.finditer(
                 r"^[ \t]*alertname:[ \t]*(\S+)[ \t]*\n[ \t]*exp_alerts:[ \t]*(\[\])?", text, re.M):
             (negative if match.group(2) else positive).add(match.group(1))
-        for match in re.finditer(
-                r"\{[^}\n]*alertname:[ \t]*([A-Za-z][A-Za-z0-9]+)[^}\n]*exp_alerts:[ \t]*\[\][^}\n]*\}",
-                text):
-            negative.add(match.group(1))
+        # Two bounded passes instead of one pattern that interleaves several `[^}\n]*`
+        # runs with the captured name: each brace block is isolated first, then the two
+        # fields are read from it. Same accepted set, no cross-field backtracking.
+        for block in INLINE_BLOCK.finditer(text):
+            body = block.group(0)
+            if INLINE_EMPTY_EXPECTATION.search(body) is None:
+                continue
+            named = INLINE_ALERTNAME.search(body)
+            if named is not None:
+                negative.add(named.group(1))
     if alert_names - positive:
         errors.append("alert_positive_test_inventory_mismatch")
     # A continuously firing dead-man switch has no healthy non-firing state.
@@ -180,7 +189,7 @@ def validate(root: Path) -> list[str]:
         errors.append("log_pipeline_missing")
     if not re.search(r"key:\s*service\.instance\.id\s+value:\s*\$\{env:SAYDIN_DEPLOYMENT_ID\}\s.*?action:\s*insert", otel, re.S):
         errors.append("service_instance_fallback_invalid")
-    if not re.search(r"resource_to_telemetry_conversion:[ \t]*\n[ \t]*#?.*?enabled:\s*false", otel, re.S):
+    if not re.search(r"resource_to_telemetry_conversion:[ \t]*\n.*?enabled:[ \t]*false", otel, re.S):
         errors.append("resource_label_conversion_enabled")
     if not re.search(
             r"health_check:[ \t]*\n(?:[ \t]*#.*\n)*[ \t]*endpoint:[ \t]*0\.0\.0\.0:13133[ \t]*$",

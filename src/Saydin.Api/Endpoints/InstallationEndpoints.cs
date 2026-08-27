@@ -44,7 +44,6 @@ public static class InstallationEndpoints
         HttpContext http,
         IInstallationCredentialKeyring keyring,
         IInstallationRepository repository,
-        IInstallationPrincipalContext principalContext,
         CancellationToken ct)
     {
         using var generated = keyring.Generate();
