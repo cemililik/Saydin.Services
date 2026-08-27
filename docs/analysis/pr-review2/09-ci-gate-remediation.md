@@ -14,6 +14,7 @@
 | Integration tests (TimescaleDB + Redis) | 67 testin 12'si `Npgsql.PostgresException 42501: permission denied for table activity_logs` | `EfActivityLogBatchStore` idempotent yazımı `ON CONFLICT (id,created_at)` **hedefli** arbiter kullanıyordu; TimescaleDB hypertable'ında index inference `SELECT` yetkisi ister, migration 019 ise API capability rolüne yalnız `INSERT` verir | Arbiter kaldırıldı → `ON CONFLICT DO NOTHING` (§2) |
 | Integration tests — role-bootstrap adımı | İlk düzeltmeden sonra ulaşılabilen adımda 13 testin 1'i `login_authentication_failed` | Test, Api'yi v2'ye rotate ettikten sonra `ensure`'ü bayat v1 parolasıyla çağırıyordu; `ensure` current (en yüksek) sürümü verilen sırla doğrular | Test girdisi kardeş lifecycle testleriyle hizalandı (§2b) |
 | Integration tests — migrator adımı | Bir sonraki turda açılan adımda 14 test metodu (19 vaka) | Üç ayrı kök neden: aşama-kör calendar gövde pin'i (production), 025 ile güncellenmeyen dört sayı beklentisi, migrator/audit emekliliğinde `pg_control` etkin-ACL kontrolünün `allowedNoLoginRole`'ü görmemesi (production) | §2c |
+| build-and-test | Aynı commit'te paralel koşumlardan yalnız birinde fail (iki ayrı turda) | `RetryWithoutHeader_WaitsBeforeIssuingNextAttempt` Polly'nin jitter'lı ilk gecikmesi için garanti olmayan bir alt sınır varsayıyordu | Test, saatin donmuş olması invariant'ına dayandırıldı (§2d) |
 | Dependency, license, vulnerability, secret and IaC gates | `Dependency review is not supported on this repository` (5 sn'de fail) | Repo'da Dependency Graph kapalıydı | `PUT /repos/…/vulnerability-alerts` ile Dependabot alerts + Dependency Graph açıldı |
 | SonarCloud Code Analysis | Quality Gate: `new_reliability_rating=4`, `new_security_rating=5`, `new_duplicated_lines_density=4.9%` | 2.663 bulgunun 1.919'u analiz kapsamı dışında kalması gereken artefaktlarda | Kapsam daraltıldı + gerçek bug/vulnerability'ler düzeltildi |
 | Codacy Static Code Analysis | 169 yeni bulgu (eşik 0) | Ağırlıklı olarak kontrol-düzlemi ve self-test script'lerinde yapısal yanlış-pozitif | Gerçek olanlar düzeltildi; artefakt yolu hariç tutuldu; kalanlar için Codacy tarafında pattern kararı gerekiyor (§4) |
@@ -168,6 +169,36 @@ production'da fail-closed olurdu.**
 **Düzeltme:** `allowedNoLoginRole` `VerifyDatabaseControlPlaneAsync`'e geçirildi;
 emekliye ayrılan rol, üyeliği hâlâ canlı olduğu için `CanLogin` yerine managed marker
 purpose'una göre değerlendiriliyor.
+
+---
+
+## 2d. `build-and-test` flake'i — jitter'a alt sınır varsayan test
+
+`build-and-test` iki ayrı turda, aynı commit'te **paralel koşumlardan yalnız birinde**
+düştü (biri 1m17s'de fail, diğeri 2m14s'de pass). Kök neden altyapı değil, tek bir
+zamana bağlı test:
+
+```
+HttpResilienceExtensionsTests.RetryWithoutHeader_WaitsBeforeIssuingNextAttempt
+  Expected handler.CallCount to be 1 because the first jittered delay has a
+  one-second lower bound, but found 2.
+```
+
+Test, sahte saati 500 ms ilerletip retry'ın **henüz** ateşlenmemiş olmasını bekliyordu;
+gerekçe olarak "ilk jitter'lı gecikmenin bir saniyelik alt sınırı var" deniyordu. Bu
+varsayım yanlıştır: pipeline `BackoffType = Exponential` + `UseJitter = true` kullanıyor
+ve Polly v8'in decorrelated jitter'ı ilk denemede yapılandırılmış `Delay`'in (2 sn)
+**altında** değer üretebilir. Test çoğu zaman geçiyordu çünkü dağılım genellikle 500
+ms'in üzerinde kalıyor — yani kalıcı bir zar atışıydı.
+
+**Düzeltme.** Test artık dağılıma değil, pipeline'ın gerçekten garanti ettiği sözleşmeye
+dayanıyor: gecikme enjekte edilen `TimeProvider` üzerinde planlanır, dolayısıyla sahte
+saat donmuşken retry kaç scheduler turu geçerse geçsin ateşlenemez. Ters yarış (timer'ın
+tek bir `Advance`'ten sonra kaydolup hiç due olmaması) için saat sınırlı adımlarla
+ilerletiliyor; toplam ilerleme 3 dakikalık pipeline bütçesinin çok altında kalıyor, yani
+gözlenen şey retry'dır, total-timeout değil.
+
+Doğrulama: düzeltilmiş test 8 ardışık izole koşumda 8/8 geçti.
 
 ---
 

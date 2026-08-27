@@ -33,14 +33,18 @@ public sealed class HttpResilienceExtensionsTests
 
         handler.CallCount.Should().Be(1);
         fetch.IsCompleted.Should().BeFalse();
-        await Task.Yield();
-        time.Advance(TimeSpan.FromMilliseconds(500));
-        await Task.Yield();
-        handler.CallCount.Should().Be(1,
-            "the first jittered delay has a one-second lower bound");
 
-        time.Advance(TimeSpan.FromSeconds(3));
-        await WaitUntilAsync(() => handler.CallCount >= 2);
+        // Polly's exponential backoff is jittered, so the first delay has no guaranteed
+        // lower bound — asserting one (e.g. "at least a second") is a coin flip that CI
+        // eventually loses. The contract the pipeline really provides is that the delay
+        // is scheduled on the injected TimeProvider: while the fake clock is frozen the
+        // retry cannot be issued, however many scheduler turns pass.
+        for (var turn = 0; turn < 50; turn++)
+            await Task.Yield();
+        handler.CallCount.Should().Be(1,
+            "the retry is scheduled on the injected clock, never issued inline");
+
+        await AdvanceUntilAsync(time, () => handler.CallCount >= 2);
         stop.Cancel();
         await FluentActions.Awaiting(() => fetch)
             .Should().ThrowAsync<OperationCanceledException>();
@@ -126,6 +130,27 @@ public sealed class HttpResilienceExtensionsTests
             .AddSaydinResilience(time, retryDelayOverride);
         var provider = services.BuildServiceProvider();
         return (provider.GetRequiredService<IHttpClientFactory>().CreateClient("test"), handler, time);
+    }
+
+    /// <summary>
+    /// Drives the fake clock forward until <paramref name="predicate"/> holds. Advancing
+    /// in bounded steps (rather than once) removes the race where the pipeline registers
+    /// its timer after a single <c>Advance</c> call and would then never become due. The
+    /// step cap keeps the total advanced time far below the pipeline's 3 minute budget so
+    /// a retry — not a total-timeout — is what the predicate observes.
+    /// </summary>
+    private static async Task AdvanceUntilAsync(FakeTimeProvider time, Func<bool> predicate)
+    {
+        var step = HttpResilienceExtensions.BaseRetryDelay * 4;
+        for (var advance = 0; advance < 10 && !predicate(); advance++)
+        {
+            time.Advance(step);
+            for (var turn = 0; turn < 50 && !predicate(); turn++)
+                await Task.Yield();
+        }
+
+        if (!predicate())
+            throw new TimeoutException("Retry was not issued after advancing the fake clock.");
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate)
