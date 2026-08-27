@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 
-HOST = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])$")
+HOST = re.compile(r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$")
 
 
 def validate(root: Path, public_host: str, expected_uid: int = 65534) -> bool:

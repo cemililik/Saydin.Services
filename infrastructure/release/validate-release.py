@@ -10,9 +10,9 @@ RELEASE_WORKFLOWS = (
     "release-images.yml", "deploy-staging.yml", "promote-production.yml",
     "rollback-production.yml", "restore-drill.yml",
 )
-ACTION = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.M)
+ACTION = re.compile(r"^[ \t]*(?:-[ \t]*)?uses:[ \t]*([^\s#]+)", re.M)
 PINNED = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@[0-9a-f]{40}$")
-FORBIDDEN = re.compile(r"(?i)(PGPASSWORD=|DATABASE_URL=|POSTGRES_PASSWORD=|--password(?:=|\s))")
+FORBIDDEN = re.compile(r"(?i)(PGPASSWORD=|DATABASE_URL=|POSTGRES_PASSWORD=|--password[=\s])")
 
 
 def main() -> int:

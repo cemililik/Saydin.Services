@@ -10,6 +10,9 @@ import tempfile
 from pathlib import Path
 
 
+OTEL_COLLECTOR_CONFIG = "infrastructure/otel/otel-collector.production.yml"
+
+
 def load_validator(path: Path):
     spec = importlib.util.spec_from_file_location("saydin_observability_validator", path)
     if spec is None or spec.loader is None:
@@ -26,11 +29,11 @@ def main() -> int:
         print("observability_self_test_failed:baseline", file=sys.stderr)
         return 2
     mutations = {
-        "missing_otel": ("infrastructure/otel/otel-collector.production.yml", None),
+        "missing_otel": (OTEL_COLLECTOR_CONFIG, None),
         "malformed_empty_loki": ("infrastructure/otel/loki.production.yml", ""),
-        "nop_exporter": ("infrastructure/otel/otel-collector.production.yml", "\nexporters:\n  nop: {}\n"),
-        "missing_queue": ("infrastructure/otel/otel-collector.production.yml", ("storage: file_storage", "storage: memory")),
-        "missing_release_tag": ("infrastructure/otel/otel-collector.production.yml", ("service.version", "service.release")),
+        "nop_exporter": (OTEL_COLLECTOR_CONFIG, "\nexporters:\n  nop: {}\n"),
+        "missing_queue": (OTEL_COLLECTOR_CONFIG, ("storage: file_storage", "storage: memory")),
+        "missing_release_tag": (OTEL_COLLECTOR_CONFIG, ("service.version", "service.release")),
         "missing_tempo_retention": ("infrastructure/otel/tempo.production.yml", ("block_retention:", "block_lifetime:")),
         "missing_loki_retention": ("infrastructure/otel/loki.production.yml", ("retention_enabled: true", "retention_enabled: false")),
         "public_api_scrape": ("infrastructure/prometheus/prometheus.production.yml", ("saydin-api:9090", "saydin-api:8080")),
@@ -47,11 +50,11 @@ def main() -> int:
             "SaydinDailyIngestionStale", "SaydinNonexistentAlert")),
         "watchdog_removed": ("infrastructure/prometheus/rules/tls-runtime.yml", (
             "SaydinWatchdog", "RemovedWatchdog")),
-        "instance_identity_overwrite": ("infrastructure/otel/otel-collector.production.yml", (
+        "instance_identity_overwrite": (OTEL_COLLECTOR_CONFIG, (
             "action: insert", "action: upsert")),
-        "resource_label_explosion": ("infrastructure/otel/otel-collector.production.yml", (
+        "resource_label_explosion": (OTEL_COLLECTOR_CONFIG, (
             "enabled: false", "enabled: true")),
-        "loopback_health_endpoint": ("infrastructure/otel/otel-collector.production.yml", (
+        "loopback_health_endpoint": (OTEL_COLLECTOR_CONFIG, (
             "endpoint: 0.0.0.0:13133", "endpoint: 127.0.0.1:13133")),
         "unbounded_metric_inventory": ("infrastructure/release/deploy-release.sh", (
             "&start=$series_start&end=$series_end", "")),

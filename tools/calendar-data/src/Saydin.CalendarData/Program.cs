@@ -61,21 +61,21 @@ try
 }
 catch (CalendarDataException ex)
 {
-    Console.Error.WriteLine(ex.Message);
+    await Console.Error.WriteLineAsync(ex.Message);
     Environment.ExitCode = 2;
 }
 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 {
-    Console.Error.WriteLine($"bundle_unreadable:{ex.GetType().Name}");
+    await Console.Error.WriteLineAsync($"bundle_unreadable:{ex.GetType().Name}");
     Environment.ExitCode = 2;
 }
 catch (DatabaseSecurityRejectedException ex)
 {
-    Console.Error.WriteLine($"database_security_rejected:{ex.Code}");
+    await Console.Error.WriteLineAsync($"database_security_rejected:{ex.Code}");
     Environment.ExitCode = 78;
 }
 catch (NpgsqlException ex)
 {
-    Console.Error.WriteLine($"database_operation_failed:{ex.SqlState ?? "unknown"}");
+    await Console.Error.WriteLineAsync($"database_operation_failed:{ex.SqlState ?? "unknown"}");
     Environment.ExitCode = 3;
 }

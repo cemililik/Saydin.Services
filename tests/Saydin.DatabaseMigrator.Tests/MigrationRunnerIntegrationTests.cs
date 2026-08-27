@@ -1767,7 +1767,8 @@ public sealed class MigrationRunnerIntegrationTests
             $compress$;
             """);
 
-        (await RunAsync(database.ConnectionString)).Applied.Should().Be(2);
+        (await RunAsync(database.ConnectionString)).Applied.Should().Be(
+            3, "023, 024 and 025 remain after the through-022 prefix");
 
         await database.ExecuteAsync($"""
             SET ROLE "{database.Contract.ApiCapability.Name}";
@@ -2058,7 +2059,7 @@ public sealed class MigrationRunnerIntegrationTests
         pre022Failure.Which.SqlState.Should().Be(PostgresErrorCodes.InsufficientPrivilege);
 
         var result = await RunAsync(database.ConnectionString);
-        result.Applied.Should().Be(3);
+        result.Applied.Should().Be(4, "022 through 025 remain after the through-021 prefix");
         result.AlreadyApplied.Should().Be(23);
 
         (await database.ScalarAsync<bool>($"""
@@ -2315,7 +2316,7 @@ public sealed class MigrationRunnerIntegrationTests
             """)).Should().BeTrue();
 
         var rerun = await RunAsync(database.ConnectionString);
-        rerun.Applied.Should().Be(3);
+        rerun.Applied.Should().Be(4, "022 through 025 remain after the through-021 prefix");
         rerun.AlreadyApplied.Should().Be(23);
         var verifyExit = await MigratorApplication.RunAsync(
             ["--verify-only"], ApplicationEnvironment(database.ConnectionString),

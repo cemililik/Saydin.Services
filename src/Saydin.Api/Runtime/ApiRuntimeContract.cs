@@ -38,9 +38,13 @@ public sealed class ApiRuntimeContract
             throw Invalid("forwarded_headers_forward_limit_must_be_one");
 
         foreach (var proxy in proxies)
-        foreach (var network in networks)
-            if (Contains(network, proxy))
-                throw Invalid("forwarded_headers_trust_duplicate");
+        {
+            foreach (var network in networks)
+            {
+                if (Contains(network, proxy))
+                    throw Invalid("forwarded_headers_trust_duplicate");
+            }
+        }
 
         return new ApiRuntimeContract
         {

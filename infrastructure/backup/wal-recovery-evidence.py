@@ -170,7 +170,7 @@ def evidence(selection_path: Path, expected_id: str, wal_root: Path, target_text
                 if name in segments:
                     raise ValueError("wal_restore_duplicate_segment")
                 segments[name] = child
-            elif name.endswith(".partial") or name.endswith(".history"):
+            elif name.endswith((".partial", ".history")):
                 continue
             else:
                 raise ValueError("wal_restore_entry_invalid")

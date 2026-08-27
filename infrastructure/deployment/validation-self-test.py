@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 
 
+# Deliberately over-broad RFC1918 range. It exists only as a mutation the production
+# validator must reject; nothing in this self-test binds or dials it.
+OVER_BROAD_PRIVATE_CIDR = "172.16.0.0/12"  # NOSONAR
+
+
 def load_validator(directory: Path):
     spec = importlib.util.spec_from_file_location(
         "saydin_production_validator", directory / "validate-production.py")
@@ -80,7 +85,7 @@ def main() -> int:
         "service_version_missing": lambda value: value["services"]["saydin-api"]["environment"].pop("SAYDIN_SERVICE_VERSION"),
         "service_version_unbound": lambda value: value["services"]["saydin-api"]["environment"].__setitem__("SAYDIN_SERVICE_VERSION", "different-release"),
         "malformed_host": lambda value: value["services"]["saydin-api"]["environment"].__setitem__("AllowedHosts", "https://api.validation.test"),
-        "broad_proxy_cidr": lambda value: value["services"]["saydin-api"]["environment"].__setitem__("ForwardedHeaders__KnownNetworks", "172.16.0.0/12"),
+        "broad_proxy_cidr": lambda value: value["services"]["saydin-api"]["environment"].__setitem__("ForwardedHeaders__KnownNetworks", OVER_BROAD_PRIVATE_CIDR),
         "proxy_forward_limit": lambda value: value["services"]["saydin-api"]["environment"].__setitem__("ForwardedHeaders__ForwardLimit", "2"),
         "api_network_scope": lambda value: value["services"]["saydin-api"].__setitem__("networks", ["app", "data"]),
         "api_on_monitoring_core": lambda value: value["services"]["saydin-api"].__setitem__(
@@ -93,7 +98,7 @@ def main() -> int:
         "application_database_plaintext": lambda value: value["services"]["saydin-api"]["environment"].__setitem__("PGSSLMODE", "Disable"),
         "exporter_database_plaintext": lambda value: value["services"]["postgres-exporter"]["environment"].__setitem__("DATA_SOURCE_URI", "postgres:5432/saydin?sslmode=disable"),
         "migrator_login_version_misbound": lambda value: value["services"]["database-migrator"]["environment"].__setitem__("SAYDIN_DATABASE_LOGIN_VERSION", value["services"]["database-migrator"]["environment"].pop("SAYDIN_MIGRATOR_LOGIN_VERSION")),
-        "backup_broad_network": lambda value: value["networks"]["backup-db"]["ipam"]["config"][0].__setitem__("subnet", "172.16.0.0/12"),
+        "backup_broad_network": lambda value: value["networks"]["backup-db"]["ipam"]["config"][0].__setitem__("subnet", OVER_BROAD_PRIVATE_CIDR),
         "backup_on_app_data": lambda value: value["services"]["database-backup"].__setitem__("networks", ["data", "backup-egress"]),
         "backup_staging_tmpfs": lambda value: value["services"]["database-backup"].__setitem__(
             "volumes", [item for item in value["services"]["database-backup"]["volumes"]

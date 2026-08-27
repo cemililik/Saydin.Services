@@ -30,7 +30,7 @@ internal static class BoundedHttpContent
                 if (output.Length + read > ProviderTransportLimits.MaxResponseBytes)
                     throw new ProviderTransportPayloadTooLargeException();
                 hash.AppendData(buffer, 0, read);
-                output.Write(buffer, 0, read);
+                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
             }
             return new ProviderPayload(output.ToArray(), hash.GetHashAndReset());
         }

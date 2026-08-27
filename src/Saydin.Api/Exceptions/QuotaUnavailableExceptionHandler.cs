@@ -11,14 +11,14 @@ public sealed class QuotaUnavailableExceptionHandler(
     IStringLocalizer<ErrorMessages> localizer) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
-        HttpContext context,
+        HttpContext httpContext,
         Exception exception,
         CancellationToken cancellationToken)
     {
         if (exception is not QuotaUnavailableException) return false;
 
-        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-        await context.Response.WriteAsJsonAsync(new ProblemDetails
+        httpContext.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await httpContext.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type = "https://saydin.app/errors/quota-unavailable",
             Title = localizer["QuotaUnavailable"],
@@ -27,7 +27,7 @@ public sealed class QuotaUnavailableExceptionHandler(
             Extensions =
             {
                 ["code"] = ApiErrorCodes.QuotaUnavailable,
-                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? httpContext.TraceIdentifier,
             },
         }, options: null, contentType: MediaTypeNames.Application.ProblemJson,
             cancellationToken);

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 
-ACTION = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.M)
+ACTION = re.compile(r"^[ \t]*(?:-[ \t]*)?uses:[ \t]*([^\s#]+)", re.M)
 PINNED = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@[0-9a-f]{40}$")
 
 
@@ -127,7 +127,7 @@ def main() -> int:
             integration_compose,
             re.M | re.S,
         )
-        if match is None or len(re.findall(r"^      PGSSLMODE: Disable\s*$", match.group(1), re.M)) != 1:
+        if match is None or len(re.findall(r"^ {6}PGSSLMODE: Disable[ \t]*$", match.group(1), re.M)) != 1:
             errors.append(f"integration_migrator_sslmode_missing:{service}:Disable")
     try:
         unit_runner = (root / ".github" / "scripts" / "run-unit-coverage.sh").read_text(

@@ -139,6 +139,15 @@ zincir 017 gövdesini, içeren zincir 025 gövdesini bekler.
 
 Aynı dosyadaki kanonik-zincir beklentileri (27) doğrudur ve dokunulmadı; zaten geçiyorlardı.
 
+Bir sonraki koşumda aynı sınıftan üç kayıt daha ortaya çıktı (migrator suite 19 → 3 hata);
+bunlar prefix-uygulayan testlerin kuyruk sayılarıydı:
+
+| Test | Beklenen | Olması gereken |
+|------|----------|----------------|
+| `ApiSecurityAdmissionUpgrade_PreservesCompressedHistoricalChunks` | `Applied` 2 | **3** (through-022 prefix'ten sonra 023–025) |
+| `PrincipalRetentionUpgrade_…` | `Applied` 3 | **4** (through-021 prefix'ten sonra 022–025) |
+| `PrincipalRetention_FaultAfterBody…` | `Applied` 3 | **4** (aynı) |
+
 ### (c) Migrator/audit login emekliliği fail-closed oluyordu — **production hatası** (1 metod)
 
 `RetireAsync` önce rolü `NOLOGIN` yapıyor, `VerifyContractAsync`'i
@@ -216,6 +225,26 @@ purpose'una göre değerlendiriliyor.
   bu ailede doğru kapanış yolu **SonarCloud arayüzünde "Safe" olarak işaretlemek**
   ya da §5'teki scanner geçişidir. Kod tarafında kapatmak `/tmp` literalini yapay
   biçimde parçalamayı gerektirir ve dosyayı kötüleştirir; yapılmadı.
+
+### 3.3c İkinci tur — kalan Reliability/Blocker/Security kayıtları
+
+Quality Gate yeşile döndükten sonra listedeki kalan kayıtlardan riski düşük ve değeri
+gerçek olanlar kapatıldı:
+
+| Kural | Konum | Düzeltme |
+|-------|-------|----------|
+| `S2699` (Blocker) | `SavedScenarioRepositoryIntegrationTests.cs` | Test yalnız "timeout olmadı" ile kanıtlıyordu; `CreateWithinLimitAsync` sonucu üzerinde açık iddia eklendi |
+| `S6966` | `ProviderPayload.cs`, `CalendarData/Program.cs` ×4 | `Write`/`WriteLine` → `await WriteAsync`/`WriteLineAsync`; CLI'nin sınırlı stderr sözleşmesi değişmedi |
+| `S6708` | `run-local-tests.sh` | `[` → `[[` |
+| `S8786` ×7 | `check-doc-links.py`, `validate-workflows.py`, `validate-release.py`, `validate-observability.py` | `\s` satır sonlarını da kapsadığından `.*` ile örtüşüp geri-izleme üretiyordu; tek satırda eşleşen desenler `[ \t]`'ye daraltıldı |
+| `S5850` + `S6395` + `S8786` | `validate-observability.py` prometheus job blokları | Lookahead ile sonlanan `.*?` taraması yerine ardışık `- job_name:` başlıkları arasında dilimleme (`prometheus_job`). Gerçek `prometheus.production.yml` üzerindeki 11 job + var olmayan bir ad için eski/yeni çıktı birebir aynı |
+| `S6395`, `S6353`, `S6326` ×5 | `validate-blackbox-targets.py`, `validate-release.py`, `validate-private-material.py` | Gereksiz grup, tek karakterlik alternasyon ve boşluk dizileri sadeleştirildi |
+| `S1313` ×3 | `validation-self-test.py`, `volume-contract-self-test.py` | Kasıtlı olarak reddedilmesi beklenen RFC1918/link-local fixture'ları adlandırılmış sabitlere alındı |
+| `S4070` | `PriceRepository.cs` | `NpgsqlDbType.Array \| <element>` Npgsql'in belgelenmiş array-parametre yazımıdır; gerekçeli NOSONAR |
+| `S2681` | `ApiRuntimeContract.cs` | İç içe `foreach` aynı girintideydi; süslü parantez eklendi |
+| `S927` ×3 | `QuotaUnavailableExceptionHandler.cs`, `RequestBodyTooLargeExceptionHandler.cs` | Parametre adları `IExceptionHandler` sözleşmesine hizalandı |
+| `S131` ×3 | `run-local-tests.sh` | `case` bloklarına açıklamalı `*)` eklendi; iki kapsam koruması da hâlâ reddediyor (doğrulandı) |
+| `S1192`, `pythonic` | `observability-self-test.py`, `wal-recovery-evidence.py` | Yinelenen literal sabite alındı; zincirli `endswith` tuple'a çevrildi |
 
 ### 3.4 Kapatılmayanlar ve nedeni
 

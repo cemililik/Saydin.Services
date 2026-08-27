@@ -22,13 +22,15 @@ case "$1" in
           fi
           break
           ;;
+        *) ;;  # keep scanning: only the first .csproj argument decides the scope
       esac
     done
-    if [ "$explicit_project" != true ]; then
+    if [[ "$explicit_project" != true ]]; then
       printf '%s\n' "local_test_scope_rejected:explicit_project_required:$1" >&2
       exit 64
     fi
     ;;
+  *) ;;  # every other dotnet verb performs no project discovery
 esac
 
 # The root development Compose service has no purpose-specific PostgreSQL credentials.
@@ -40,6 +42,7 @@ for argument in "$@"; do
       printf '%s\n' "local_test_scope_rejected:use_required_integration_stack:$argument" >&2
       exit 64
       ;;
+    *) ;;  # in-scope argument
   esac
 done
 

@@ -219,7 +219,10 @@ public sealed class SavedScenarioRepositoryIntegrationTests(DatabaseFixture db)
                 effectiveLimit: 5,
                 CancellationToken.None);
 
-            await save.WaitAsync(TimeSpan.FromSeconds(2));
+            // The per-user advisory lock held by `blocker` must not serialize a different
+            // user's insert: the save has to complete on its own while that lock is live.
+            var saved = await save.WaitAsync(TimeSpan.FromSeconds(2));
+            saved.UserId.Should().Be(otherUserId);
             await transaction.RollbackAsync();
         }
         finally

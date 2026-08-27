@@ -21,7 +21,7 @@ def rule_label_keys(text: str) -> set[str]:
     lines = text.splitlines()
     index = 0
     while index < len(lines):
-        match = re.match(r"^(\s*)labels:\s*(.*)$", lines[index])
+        match = re.match(r"^([ \t]*)labels:[ \t]*(.*)$", lines[index])
         if match is None:
             index += 1
             continue
@@ -43,6 +43,24 @@ def rule_label_keys(text: str) -> set[str]:
             result.add(nested.group(2))
             index += 1
     return result
+
+
+JOB_HEADER = re.compile(r"^[ \t]*- job_name:[ \t]*(\S+)[ \t]*$", re.M)
+
+
+def prometheus_job(document: str, name: str) -> str | None:
+    """Return the scrape_config block for `name`, or None when it is absent.
+
+    Slicing between consecutive `- job_name:` headers keeps each block bounded without a
+    lookahead-terminated `.*?` scan, which backtracked across the whole document.
+    """
+    headers = list(JOB_HEADER.finditer(document))
+    for index, header in enumerate(headers):
+        if header.group(1) != name:
+            continue
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(document)
+        return document[header.start():end]
+    return None
 
 
 def validate(root: Path) -> list[str]:
@@ -92,7 +110,7 @@ def validate(root: Path) -> list[str]:
             errors.append("rule_test_unreadable")
             continue
         for match in re.finditer(
-                r"^\s*alertname:\s*(\S+)\s*\n\s*exp_alerts:\s*(\[\])?", text, re.M):
+                r"^[ \t]*alertname:[ \t]*(\S+)[ \t]*\n[ \t]*exp_alerts:[ \t]*(\[\])?", text, re.M):
             (negative if match.group(2) else positive).add(match.group(1))
         for match in re.finditer(
                 r"\{[^}\n]*alertname:\s*([A-Za-z][A-Za-z0-9]+)[^}\n]*exp_alerts:\s*\[\][^}\n]*\}",
@@ -187,22 +205,14 @@ def validate(root: Path) -> list[str]:
     except (OSError, UnicodeError, ValueError):
         errors.append("telemetry_artifact_invalid:prometheus")
     else:
-        api_job = re.search(
-            r"^\s*- job_name:\s*saydin-api\s*$.*?(?=(?:^\s*- job_name:)|\Z)",
-            prometheus,
-            re.M | re.S,
-        )
-        if api_job is None or "targets: [saydin-api:9090]" not in api_job.group(0):
+        api_job = prometheus_job(prometheus, "saydin-api")
+        if api_job is None or "targets: [saydin-api:9090]" not in api_job:
             errors.append("api_management_scrape_missing")
-        if api_job is not None and "saydin-api:8080" in api_job.group(0):
+        if api_job is not None and "saydin-api:8080" in api_job:
             errors.append("api_public_scrape_forbidden")
-        blackbox_job = re.search(
-            r"^\s*- job_name:\s*blackbox-https\s*$.*?(?=(?:^\s*- job_name:)|\Z)",
-            prometheus,
-            re.M | re.S,
-        )
-        if (blackbox_job is None or "file_sd_configs:" not in blackbox_job.group(0)
-                or "replacement: blackbox-exporter:9115" not in blackbox_job.group(0)):
+        blackbox_job = prometheus_job(prometheus, "blackbox-https")
+        if (blackbox_job is None or "file_sd_configs:" not in blackbox_job
+                or "replacement: blackbox-exporter:9115" not in blackbox_job):
             errors.append("blackbox_static_target_contract_missing")
 
     tls_rules = (rule_root / "tls-runtime.yml").read_text(encoding="utf-8")

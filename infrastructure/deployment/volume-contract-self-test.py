@@ -10,6 +10,11 @@ import tempfile
 from pathlib import Path
 
 
+# Cloud link-local metadata endpoint. It appears here only as a mutation the blackbox
+# target validator must reject; it is never dialled by this self-test.
+LINK_LOCAL_METADATA_HOST = "169.254.169.254"  # NOSONAR
+
+
 def load(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -44,7 +49,7 @@ def main() -> int:
         if not blackbox.validate(targets, "api.validation.test", os.getuid()):
             raise SystemExit("volume_contract_self_test_failed:blackbox_baseline")
         target_file.write_text(json.dumps([{
-            "targets": ["http://169.254.169.254/latest/meta-data"],
+            "targets": [f"http://{LINK_LOCAL_METADATA_HOST}/latest/meta-data"],  # NOSONAR
             "labels": {"service": "saydin-edge"},
         }]), encoding="utf-8")
         if blackbox.validate(targets, "api.validation.test", os.getuid()):

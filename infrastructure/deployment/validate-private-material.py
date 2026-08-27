@@ -104,7 +104,7 @@ def _section_blocks(lines: list[str], section: str, item_indent: int) -> list[li
 def _receiver_blocks(lines: list[str]) -> dict[str, list[str]]:
     receivers: dict[str, list[str]] = {}
     for block in _section_blocks(lines, "receivers", 2):
-        match = re.fullmatch(r"  - name:\s*([a-z0-9-]+)\s*", block[0])
+        match = re.fullmatch(r" {2}- name:\s*([a-z0-9-]+)\s*", block[0])
         if match is None or match.group(1) in receivers:
             raise ValueError("alertmanager_receiver_shape")
         receivers[match.group(1)] = block
@@ -133,11 +133,11 @@ def _receiver_webhooks(block: list[str]) -> list[tuple[str, bool]]:
 
 
 def _parse_webhook(lines: list[str]) -> tuple[str, bool]:
-    url_match = re.fullmatch(r"      - url:\s*(\S+)\s*", lines[0])
+    url_match = re.fullmatch(r" {6}- url:\s*(\S+)\s*", lines[0])
     if url_match is None:
         raise ValueError("alertmanager_webhook_shape")
     send_resolved = any(
-        re.fullmatch(r"        send_resolved:\s*true\s*", line) is not None
+        re.fullmatch(r" {8}send_resolved:\s*true\s*", line) is not None
         for line in lines[1:]
     )
     return url_match.group(1), send_resolved
@@ -184,10 +184,10 @@ def validate_alertmanager(text: str) -> None:
     watchdog_route = watchdog_routes[0]
     receiver = next((match.group(1) for line in watchdog_route
                      if (match := re.fullmatch(
-                         r"      receiver:\s*([a-z0-9-]+)\s*", line))), None)
+                         r" {6}receiver:\s*([a-z0-9-]+)\s*", line))), None)
     repeat = next((match.group(1) for line in watchdog_route
                    if (match := re.fullmatch(
-                       r"      repeat_interval:\s*(\S+)\s*", line))), None)
+                       r" {6}repeat_interval:\s*(\S+)\s*", line))), None)
     if receiver != "external-watchdog" or repeat is None or _duration_seconds(repeat) > 60:
         raise ValueError("alertmanager_watchdog_route")
 

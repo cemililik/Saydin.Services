@@ -11,17 +11,17 @@ public sealed class RequestBodyTooLargeExceptionHandler(
     IStringLocalizer<ErrorMessages> localizer) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
-        HttpContext context,
+        HttpContext httpContext,
         Exception exception,
-        CancellationToken ct)
+        CancellationToken cancellationToken)
     {
         if (exception is not RequestBodyTooLargeException ex)
             return false;
 
         logger.LogWarning("İstek gövdesi endpoint limitini aştı: maxBytes={MaxBytes}", ex.MaxBytes);
-        context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+        httpContext.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
 
-        await context.Response.WriteAsJsonAsync(new ProblemDetails
+        await httpContext.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type = "https://saydin.app/errors/payload-too-large",
             Title = localizer["PayloadTooLarge"],
@@ -29,11 +29,11 @@ public sealed class RequestBodyTooLargeExceptionHandler(
             Detail = string.Format(localizer["PayloadTooLargeDetail"], ex.MaxBytes),
             Extensions =
             {
-                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? httpContext.TraceIdentifier,
                 ["code"] = ApiErrorCodes.PayloadTooLarge,
                 ["maxBytes"] = ex.MaxBytes,
             }
-        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, ct);
+        }, options: null, contentType: MediaTypeNames.Application.ProblemJson, cancellationToken);
 
         return true;
     }

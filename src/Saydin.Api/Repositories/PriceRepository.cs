@@ -199,7 +199,9 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
         var rows = await context.Database.SqlQueryRaw<BulkNearestPriceRow>(
                 sql,
                 new NpgsqlParameter(
-                "requested_dates", NpgsqlDbType.Array | NpgsqlDbType.Date)
+                // NpgsqlDbType.Array is combined with the element type by design; this is
+                // Npgsql's documented spelling for an array parameter, not a flags misuse.
+                "requested_dates", NpgsqlDbType.Array | NpgsqlDbType.Date) // NOSONAR
                 {
                     Value = dates.ToArray(),
                 },
