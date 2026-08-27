@@ -172,7 +172,7 @@ def load_policy(path: Path) -> dict:
             if any(not 0 <= float(limits[key]) <= 100 for key in ("line", "branch")):
                 raise ValueError
         return value
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except (OSError, KeyError, TypeError, ValueError):
         fail("policy_invalid")
 
 

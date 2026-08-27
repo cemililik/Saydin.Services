@@ -12,9 +12,13 @@ ACTION = re.compile(r"^[ \t]*(?:-[ \t]*)?uses:[ \t]*([^\s#]+)", re.M)
 PINNED = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@[0-9a-f]{40}$")
 
 
+GITHUB_DIR = ".github"
+SHELL_FILE_LISTING = "git ls-files -z -- '*.sh'"
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
-    workflow_root = root / ".github" / "workflows"
+    workflow_root = root / GITHUB_DIR / "workflows"
     workflows = sorted({*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")})
     errors: list[str] = []
 
@@ -52,7 +56,7 @@ def main() -> int:
             if not PINNED.fullmatch(reference):
                 errors.append(f"action_not_full_sha:{path.name}:{reference}")
     try:
-        ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        ci = (root / GITHUB_DIR / "workflows" / "ci.yml").read_text(encoding="utf-8")
     except OSError:
         errors.append("ci_missing")
         ci = ""
@@ -111,7 +115,7 @@ def main() -> int:
     if expected_summary not in ci:
         errors.append(f"fresh_schema_summary_stale:{expected_migrations}")
     try:
-        integration_compose = (root / ".github" / "compose.integration.yml").read_text(
+        integration_compose = (root / GITHUB_DIR / "compose.integration.yml").read_text(
             encoding="utf-8")
     except OSError:
         errors.append("integration_compose_missing")
@@ -130,7 +134,7 @@ def main() -> int:
         if match is None or len(re.findall(r"^ {6}PGSSLMODE: Disable[ \t]*$", match.group(1), re.M)) != 1:
             errors.append(f"integration_migrator_sslmode_missing:{service}:Disable")
     try:
-        unit_runner = (root / ".github" / "scripts" / "run-unit-coverage.sh").read_text(
+        unit_runner = (root / GITHUB_DIR / "scripts" / "run-unit-coverage.sh").read_text(
             encoding="utf-8")
     except OSError:
         errors.append("unit_coverage_runner_missing")
@@ -172,11 +176,11 @@ def main() -> int:
     for token in (
         "unit_project_inventory_mismatch",
         ".github/scripts/verify-integration-trx.py",
-        "git ls-files -z -- '*.sh'",
+        SHELL_FILE_LISTING,
     ):
-        if token not in unit_runner and token != "git ls-files -z -- '*.sh'":
+        if token not in unit_runner and token != SHELL_FILE_LISTING:
             errors.append(f"unit_runner_gate_missing:{token}")
-        if token == "git ls-files -z -- '*.sh'" and token not in ci:
+        if token == SHELL_FILE_LISTING and token not in ci:
             errors.append("tracked_shell_admission_missing")
     for relative in (
         ".github/scripts/run-development-compose-smoke.sh",
@@ -190,7 +194,7 @@ def main() -> int:
         if re.search(r"already_applied=[0-9]+", script):
             errors.append(f"migration_count_literal_forbidden:{relative}")
     try:
-        restore = (root / ".github" / "workflows" / "restore-drill.yml").read_text(
+        restore = (root / GITHUB_DIR / "workflows" / "restore-drill.yml").read_text(
             encoding="utf-8")
     except OSError:
         errors.append("restore_workflow_missing")

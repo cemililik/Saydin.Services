@@ -26,9 +26,9 @@ public sealed class EvdsInflationWorker(
     private TimeOnly MonthlyRunUtcTime => new(
         configuration.GetValue<int?>($"{ConfigKey}:DailyRunUtcHour") ?? 10,
         configuration.GetValue<int?>($"{ConfigKey}:DailyRunUtcMinute") ?? 0);
-    private TimeSpan LogicalRetryDelay => TimeSpan.FromMinutes(30);
-    private TimeSpan LeaseDuration => TimeSpan.FromMinutes(30);
-    private TimeSpan ProviderDeadline => HttpResilienceExtensions.TotalRequestTimeout;
+    private static TimeSpan LogicalRetryDelay => TimeSpan.FromMinutes(30);
+    private static TimeSpan LeaseDuration => TimeSpan.FromMinutes(30);
+    private static TimeSpan ProviderDeadline => HttpResilienceExtensions.TotalRequestTimeout;
     private TimeSpan FailureFinalizeTimeout => TimeSpan.FromMilliseconds(
         configuration.GetValue<int?>($"{ConfigKey}:FailureFinalizeTimeoutMs") ?? 5_000);
 

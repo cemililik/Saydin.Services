@@ -43,6 +43,10 @@ class ManifestError(ValueError):
     pass
 
 
+AMD64 = "linux/amd64"
+ARM64 = "linux/arm64"
+
+
 def fail(code: str) -> None:
     raise ManifestError(code)
 
@@ -132,14 +136,14 @@ def verify(manifest: object) -> dict[str, object]:
             fail(f"invalid_image_digest:{name}")
         if image["sourceCommit"] != source["commitSha"]:
             fail(f"image_source_commit_mismatch:{name}")
-        if image["platforms"] != ["linux/amd64", "linux/arm64"]:
+        if image["platforms"] != [AMD64, ARM64]:
             fail(f"invalid_platforms:{name}")
-        platform_digests = exact_keys(image["platformDigests"], {"linux/amd64", "linux/arm64"}, f"platformDigests:{name}")
+        platform_digests = exact_keys(image["platformDigests"], {AMD64, ARM64}, f"platformDigests:{name}")
         if any(not isinstance(value, str) or not DIGEST.fullmatch(value) for value in platform_digests.values()):
             fail(f"invalid_platform_digest:{name}")
         if len(set(platform_digests.values())) != 2 or digest in platform_digests.values():
             fail(f"invalid_platform_digest_set:{name}")
-        sbom = exact_keys(image["sbom"], {"linux/amd64", "linux/arm64"}, f"sbom:{name}")
+        sbom = exact_keys(image["sbom"], {AMD64, ARM64}, f"sbom:{name}")
         for platform, value in sbom.items():
             pair = exact_keys(value, {"spdxSha256", "cycloneDxSha256"}, f"sbom:{name}:{platform}")
             if any(not isinstance(item, str) or not SHA256.fullmatch(item) for item in pair.values()):

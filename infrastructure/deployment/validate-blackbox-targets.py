@@ -38,7 +38,7 @@ def validate(root: Path, public_host: str, expected_uid: int = 65534) -> bool:
         value = json.loads(path.read_text(encoding="utf-8"))
         if value != [{"targets": [expected_url], "labels": {"service": "saydin-edge"}}]:
             raise ValueError("target_contract")
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return False
     return True
 

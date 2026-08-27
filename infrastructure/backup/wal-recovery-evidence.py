@@ -225,7 +225,7 @@ def main() -> int:
             )
             return 0
         raise ValueError("wal_recovery_evidence_usage")
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+    except (OSError, ValueError) as error:
         print(f"wal_recovery_evidence_failed:{error}", file=sys.stderr)
         return 2
 

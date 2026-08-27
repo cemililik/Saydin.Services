@@ -26,7 +26,7 @@ REQUIRED_CANONICAL = (
 INLINE_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
 REFERENCE_LINK = re.compile(r"^\s*\[[^\]]+\]:\s*(?P<target><[^>]+>|\S+)", re.MULTILINE)
 URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-DEV_COMPOSE_COMMAND = re.compile(r"^docker compose[ \t]+.*$", re.MULTILINE)
+DEV_COMPOSE_COMMAND = re.compile(r"^docker compose[ \t].*$", re.MULTILINE)
 
 
 def markdown_files() -> list[Path]:

@@ -13,6 +13,10 @@ NAMES = {
 }
 
 
+AMD64 = "linux/amd64"
+ARM64 = "linux/arm64"
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -49,11 +53,11 @@ def main() -> int:
             "sourceCommit": args.source_commit,
             "reference": args.reference,
             "digest": args.digest,
-            "platforms": ["linux/amd64", "linux/arm64"],
-            "platformDigests": {"linux/amd64": args.amd64_digest, "linux/arm64": args.arm64_digest},
+            "platforms": [AMD64, ARM64],
+            "platformDigests": {AMD64: args.amd64_digest, ARM64: args.arm64_digest},
             "sbom": {
-                "linux/amd64": {"spdxSha256": digest(args.amd64_spdx), "cycloneDxSha256": digest(args.amd64_cyclonedx)},
-                "linux/arm64": {"spdxSha256": digest(args.arm64_spdx), "cycloneDxSha256": digest(args.arm64_cyclonedx)},
+                AMD64: {"spdxSha256": digest(args.amd64_spdx), "cycloneDxSha256": digest(args.amd64_cyclonedx)},
+                ARM64: {"spdxSha256": digest(args.arm64_spdx), "cycloneDxSha256": digest(args.arm64_cyclonedx)},
             },
         }
         args.output.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")

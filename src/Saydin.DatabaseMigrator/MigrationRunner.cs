@@ -789,7 +789,7 @@ internal sealed class MigrationRunner(
             throw new MigratorRejectedException("managed_role_membership_contract_mismatch");
     }
 
-    private async Task VerifyBackupIsolationAndAvailabilityAsync(
+    private static async Task VerifyBackupIsolationAndAvailabilityAsync(
         NpgsqlConnection connection,
         IEnumerable<ManagedRole> managedRoles,
         CancellationToken cancellationToken)
@@ -1068,7 +1068,7 @@ internal sealed class MigrationRunner(
         }
     }
 
-    private async Task<DatabaseState> ClassifyAsync(
+    private static async Task<DatabaseState> ClassifyAsync(
         NpgsqlConnection connection,
         MigrationManifest manifest,
         CancellationToken cancellationToken)

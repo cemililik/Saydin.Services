@@ -964,7 +964,7 @@ internal sealed partial class RoleBootstrapRunner
             throw TopologyRejected("managed_role_attribute_mismatch");
     }
 
-    private async Task<ExistingRole?> ReadRoleAsync(
+    private static async Task<ExistingRole?> ReadRoleAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         string name,

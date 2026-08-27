@@ -58,7 +58,7 @@ def main() -> int:
             raise ValueError("restore_base_before_target_missing")
         print(max(eligible)[1])
         return 0
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         print(f"restore_snapshot_selector_failed:{exc}", file=sys.stderr)
         return 2
 

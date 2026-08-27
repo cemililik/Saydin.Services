@@ -108,7 +108,7 @@ def main() -> int:
         errors = validate(args.rule_root, args.rules_response, args.targets_response,
                           args.series_response, args.expected_probe,
                           args.require_ingestion)
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         errors = ["runtime_response_invalid"]
     if errors:
         for error in errors:

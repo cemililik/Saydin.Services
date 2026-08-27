@@ -109,6 +109,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         print(f"release_ci_admission_failed:{exc}", file=sys.stderr)
         raise SystemExit(2) from exc

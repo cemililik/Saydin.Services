@@ -113,7 +113,7 @@ def validate(root: Path) -> list[str]:
                 r"^[ \t]*alertname:[ \t]*(\S+)[ \t]*\n[ \t]*exp_alerts:[ \t]*(\[\])?", text, re.M):
             (negative if match.group(2) else positive).add(match.group(1))
         for match in re.finditer(
-                r"\{[^}\n]*alertname:\s*([A-Za-z][A-Za-z0-9]+)[^}\n]*exp_alerts:\s*\[\][^}\n]*\}",
+                r"\{[^}\n]*alertname:[ \t]*([A-Za-z][A-Za-z0-9]+)[^}\n]*exp_alerts:[ \t]*\[\][^}\n]*\}",
                 text):
             negative.add(match.group(1))
     if alert_names - positive:
@@ -157,7 +157,7 @@ def validate(root: Path) -> list[str]:
             if not text.strip():
                 raise ValueError
             texts[name] = text
-        except (OSError, UnicodeError, ValueError):
+        except (OSError, ValueError):
             errors.append(f"telemetry_artifact_invalid:{name}")
 
     otel = texts.get("otel", "")
@@ -178,12 +178,12 @@ def validate(root: Path) -> list[str]:
         errors.append("trace_pipeline_missing")
     if not re.search(r"logs:\s.*?exporters:\s*\[otlphttp/loki\]", otel, re.S):
         errors.append("log_pipeline_missing")
-    if not re.search(r"key:\s*service\.instance\.id\s+value:\s*\$\{env:SAYDIN_DEPLOYMENT_ID\}\s+.*?action:\s*insert", otel, re.S):
+    if not re.search(r"key:\s*service\.instance\.id\s+value:\s*\$\{env:SAYDIN_DEPLOYMENT_ID\}\s.*?action:\s*insert", otel, re.S):
         errors.append("service_instance_fallback_invalid")
-    if not re.search(r"resource_to_telemetry_conversion:\s*\n\s*#?.*?enabled:\s*false", otel, re.S):
+    if not re.search(r"resource_to_telemetry_conversion:[ \t]*\n[ \t]*#?.*?enabled:\s*false", otel, re.S):
         errors.append("resource_label_conversion_enabled")
     if not re.search(
-            r"health_check:\s*\n(?:\s*#.*\n)*\s*endpoint:\s*0\.0\.0\.0:13133\s*$",
+            r"health_check:[ \t]*\n(?:[ \t]*#.*\n)*[ \t]*endpoint:[ \t]*0\.0\.0\.0:13133[ \t]*$",
             otel,
             re.M):
         errors.append("otel_network_health_endpoint_invalid")
@@ -202,7 +202,7 @@ def validate(root: Path) -> list[str]:
         prometheus = prometheus_path.read_text(encoding="utf-8")
         if not prometheus.strip():
             raise ValueError
-    except (OSError, UnicodeError, ValueError):
+    except (OSError, ValueError):
         errors.append("telemetry_artifact_invalid:prometheus")
     else:
         api_job = prometheus_job(prometheus, "saydin-api")

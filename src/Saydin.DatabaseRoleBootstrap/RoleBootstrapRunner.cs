@@ -601,7 +601,7 @@ internal sealed partial class RoleBootstrapRunner(BootstrapOptions options, Text
         await finalize.CommitAsync(cancellationToken);
     }
 
-    private async Task<bool> HasActiveSessionsAsync(
+    private static async Task<bool> HasActiveSessionsAsync(
         NpgsqlConnection connection,
         string role,
         CancellationToken cancellationToken,

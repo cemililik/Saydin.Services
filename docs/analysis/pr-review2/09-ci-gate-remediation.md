@@ -246,6 +246,25 @@ gerçek olanlar kapatıldı:
 | `S131` ×3 | `run-local-tests.sh` | `case` bloklarına açıklamalı `*)` eklendi; iki kapsam koruması da hâlâ reddediyor (doğrulandı) |
 | `S1192`, `pythonic` | `observability-self-test.py`, `wal-recovery-evidence.py` | Yinelenen literal sabite alındı; zincirli `endswith` tuple'a çevrildi |
 
+### 3.3d Üçüncü tur — merge öncesi son tarama
+
+| Kural | Adet | Düzeltme |
+|-------|------|----------|
+| `python:S5713` | 15 | `json.JSONDecodeError` ve `UnicodeError` zaten `ValueError`'dan türüyor; `except` demetlerinden çıkarıldı (davranış birebir aynı, `issubclass` ile doğrulandı) |
+| `python:S8786` | 7 | Kalan belirsiz regex'ler: `[ \t]+` ile `.*` çakışması, `\s+`/`\s*` ile DOTALL `.*?` çakışması ve `DIGEST`'in ilk segmentinin `/`'yi de kapsaması. Hepsi tek-anlamlı hale getirildi; gerçek `otel-collector.production.yml`, 12 digest-pinned image ve 26 doküman eşleşmesi üzerinde eski/yeni çıktı doğrulandı |
+| `csharpsquid:S2325` | 7 | Instance durumuna dokunmayan private yardımcılar `static` yapıldı |
+| `python:S1192` / `shelldre:S1192` | 6 | `.github`, shell dosya listesi komutu ve `linux/amd64`/`linux/arm64` sabitlere alındı |
+
+`DIGEST` düzeltmesi tek bir davranış farkı üretiyor: `a//b@sha256:…` gibi **geçersiz**
+bir image referansı artık reddediliyor. Fail-closed bir doğrulayıcı için bu sıkılaşma
+istenen yöndedir; repo'daki 12 gerçek digest-pinned image'ın hiçbiri etkilenmiyor.
+
+**`python:S6353` (8 kayıt) bilinçli olarak uygulanmadı.** Kural `[0-9]` yerine `\d`
+öneriyor; ancak Python 3'te `str` desenlerinde `\d` **Unicode** rakamlarını da kapsar
+(`re.ASCII` verilmedikçe). Bu kayıtların tamamı boyut/sürüm/TTL doğrulayan fail-closed
+validator'larda; `[0-9]` kabul edilen girdi kümesini bilinçli olarak ASCII ile
+sınırlıyor. Kuralı uygulamak doğrulayıcıyı gevşetirdi.
+
 ### 3.4 Kapatılmayanlar ve nedeni
 
 | Kural | Adet | Neden kapatılmadı |

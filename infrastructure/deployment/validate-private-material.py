@@ -328,7 +328,7 @@ def validate_material(root: Path, expected_uid: int,
             if stat.S_IMODE(value_stat.st_mode) not in {0o400, 0o600}:
                 return "file_mode"
             validate_content(kind, read_bounded(path))
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return "content_or_io"
     return None
 

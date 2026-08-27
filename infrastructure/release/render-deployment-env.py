@@ -118,7 +118,7 @@ def main() -> int:
         args.output.write_text("".join(f"{key}={values[key]}\n" for key in sorted(values)), encoding="utf-8")
         args.output.chmod(0o600)
         return 0
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, KeyError, TypeError, ValueError) as exc:
         print(f"deployment_env_rejected:{exc}", file=sys.stderr)
         return 2
 
