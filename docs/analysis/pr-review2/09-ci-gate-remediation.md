@@ -308,6 +308,30 @@ bu Dependency Graph'ı da etkinleştirir. Doğrulama: `GET /repos/…/dependency
 
 ---
 
+## 6b. CI kapı sonucu (482c405)
+
+| Kapı | Durum |
+|------|-------|
+| Integration tests (TimescaleDB + Redis) | **pass** — 67 + 106 + 97 + 33 + 13 + 185 |
+| Merged unit and real-integration changed-line coverage | **pass** (bu PR'da ilk kez çalışabildi) |
+| build-and-test | pass |
+| SonarCloud Code Analysis | **pass** — Quality Gate OK |
+| Dependency, license, vulnerability, secret and IaC gates | pass |
+| Production render, observability and mutation gates | pass |
+| CodeQL / CodeQL C# SAST | pass |
+| Codacy Static Code Analysis | fail — §4'teki yapısal yanlış-pozitifler; Codacy UI aksiyonu gerekir |
+
+SonarCloud yeni-kod metrikleri: `new_bugs` 587 → **0**, `new_vulnerabilities` 29 → **0**,
+duplication %4,95 → **%0,56**; reliability/security/maintainability rating **A/A/A**.
+
+Kapıların katman katman açıldığına dikkat: her düzeltme, o ana kadar hiç çalışamamış bir
+sonraki suite'i çalıştırdı (Api → role-bootstrap → migrator → coverage). Bu, PR
+açıklamasındaki "canonical integration matrisi lokal olarak yeniden çalıştırılmadı"
+notunun doğrudan sonucudur ve iki gerçek production hatasını (§2c-a, §2c-c) ancak bu
+sayede görünür kıldı.
+
+---
+
 ## 7. Doğrulama kanıtı (lokal)
 
 | Kapı | Sonuç |
