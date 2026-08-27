@@ -15,8 +15,10 @@ ve cross-component belgeler **Saydın meta repo** `docs/`'unda yaşar (aşağıy
 | [`cache-strategy.md`](cache-strategy.md) | Redis cache key sözleşmesi, TTL'ler, kullanım sayaçları (`usage:*`). Cache değişikliklerinden önce/sonra **zorunlu okuma** (CLAUDE.md). |
 | [`development-guide.md`](development-guide.md) | .NET geliştirme iş akışı: Docker, migration, test, config anahtarları, sorun giderme. |
 | [`high-traffic-checklist.md`](high-traffic-checklist.md) | MVP sonrası backend ölçeklendirme/ops kontrol listesi (eşik-tetikleyicili). |
+| [`deployment/`](deployment/README.md) | Production'a alma: hosting karar tarihçesi + kanonik digest-only manifest/release/runbook yolları. |
+| [`runbooks/`](runbooks/README.md) | Production alarm, release, restore ve operator-only DataRepair prosedürleri. |
 | [`architecture/`](architecture/) | Derin teknik referanslar (aşağıda). |
-| [`decisions/`](decisions/README.md) | Backend mimari karar kayıtları (ADR-001..006) + ADR organizasyon konvansiyonu. |
+| [`decisions/`](decisions/README.md) | Backend mimari karar kayıtları (ADR-001..011) + ADR organizasyon konvansiyonu. |
 
 ### `architecture/` — derin teknik referanslar
 
@@ -34,9 +36,9 @@ ve cross-component belgeler **Saydın meta repo** `docs/`'unda yaşar (aşağıy
 ## Mimari karar kayıtları (ADR) — iki uzay
 
 - **Backend ADR'lar** → [`decisions/`](decisions/README.md) (bu repo, bağımsız `ADR-001+` uzayı):
-  migration stratejisi, compare kotası, rate limiting, GeoIP dağıtımı, secrets, activity-log finansal politika.
+  migration stratejisi, compare kotası, rate limiting, GeoIP dağıtımı, secrets, activity-log finansal politika, hosting/deployment.
 - **Ürün / cross-component ADR'lar** → Saydın meta repo `docs/decisions/` (bağımsız `ADR-001..ADR-014`):
-  no-kafka, TimescaleDB, daily-granularity, device-id auth, monorepo, Flutter kararları, plan-config vb.
+  no-kafka, TimescaleDB, daily-granularity, monorepo, Flutter kararları, plan-config vb.
 - İki numara uzayı **kasıtlı olarak ayrıdır**; çakışma beklenir. Detay: [`decisions/README.md`](decisions/README.md).
 
 ## Meta repo'da ne var? (burada DEĞİL)

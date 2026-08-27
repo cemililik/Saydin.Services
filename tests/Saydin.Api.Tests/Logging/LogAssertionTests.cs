@@ -14,8 +14,8 @@ namespace Saydin.Api.Tests.Logging;
 
 /// <summary>
 /// F2.6-15 / F2.6-8: <see cref="TestLogger{T}"/> sink'inin gerçek bir senaryoda log
-/// assertion yaptığını gösterir. Önceden DailyLimitGuard fail-open (Redis down) yolunda
-/// warning loglar ama NullLogger ile bu doğrulanamıyordu (review C-F-25 / C-Çapraz-C).
+/// assertion yaptığını gösterir. DailyLimitGuard Redis down yolunda fail-closed olur
+/// ve yalnız kararlı hata kodunu loglar.
 /// </summary>
 public class LogAssertionTests
 {
@@ -28,26 +28,35 @@ public class LogAssertionTests
     };
 
     [Fact]
-    public async Task DailyLimitGuard_RedisDown_FailsOpenAndLogsWarning()
+    public async Task DailyLimitGuard_RedisDown_FailsClosedAndLogsOnlyStableCode()
     {
         var redis = Substitute.For<IConnectionMultiplexer>();
         var db    = Substitute.For<IDatabase>();
         redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(db);
-        db.StringGetAsync(Arg.Any<RedisKey>(), Arg.Any<CommandFlags>())
-          .ThrowsAsync(new RedisConnectionException(ConnectionFailureType.UnableToConnect, "test"));
+        db.ExecuteAsync("TIME", Arg.Any<object[]>())
+          .ThrowsAsync(new RedisConnectionException(
+              ConnectionFailureType.UnableToConnect, "raw-secret-ip-sentinel"));
 
         var logger = new TestLogger<DailyLimitGuard>();
+        var pseudonymizer = Substitute.For<IQuotaSubjectPseudonymizer>();
+        pseudonymizer.PseudonymizeQuotaSubject(Arg.Any<string>())
+            .Returns("q1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         var sut = new DailyLimitGuard(
             redis,
             Microsoft.Extensions.Options.Options.Create(new PlanOptions()),
+            pseudonymizer,
             new FakeTimeProvider(),
             logger);
 
-        // Fail-open: Redis erişilemez → exception kullanıcıya yansımaz.
-        var act = () => sut.CheckAsync(FreeUser, FreeUser.DeviceId!, "usage:whatif:");
-        await act.Should().NotThrowAsync();
+        var act = () => sut.CheckAsync(FreeUser, "raw-device-sentinel", "usage:whatif:");
+        await act.Should().ThrowAsync<QuotaUnavailableException>();
 
-        // ...ama telemetri için bir Warning loglanır (TestLogger ile doğrulanır).
         logger.Entries.Should().Contain(e => e.Level == LogLevel.Warning);
+        logger.Entries.Select(entry => entry.Message)
+            .Should().OnlyContain(message =>
+                message.Contains(QuotaUnavailableException.ErrorCode) &&
+                !message.Contains("raw-secret-ip-sentinel", StringComparison.Ordinal) &&
+                !message.Contains("raw-device-sentinel", StringComparison.Ordinal));
+        logger.Entries.Should().OnlyContain(entry => entry.Exception == null);
     }
 }

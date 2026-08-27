@@ -23,5 +23,7 @@ public record WhatIfResponse(
     DateOnly? InflationDataAsOf,
     // Haftasonu/tatil: kullanıcının seçtiği tarih yerine işlem gören en yakın gün
     DateOnly? ActualBuyDate,
-    DateOnly? ActualSellDate
+    DateOnly? ActualSellDate,
+    // Additive PRV contract; old clients keep every existing field unchanged.
+    CalculationDataResponse? Data = null
 );

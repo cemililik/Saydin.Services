@@ -11,6 +11,7 @@ public sealed class Asset
     public bool IsActive { get; init; }
     public string Source { get; init; } = default!;
     public string? SourceId { get; init; }
+    public DateTimeOffset CreatedAt { get; private set; }
 
     /// <summary>
     /// JSONB metadata: <c>decimal_places</c>, <c>display_unit</c>, <c>lot_size</c>,

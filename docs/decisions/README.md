@@ -35,14 +35,19 @@ flowchart TD
 |---|---|---|
 | [ADR-001](ADR-001-migration-strategy.md) | Migration & schema evolution (numaralı SQL + tracking, hybrid) | Kabul edildi (revize) |
 | [ADR-002](ADR-002-compare-quota.md) | Compare endpoint kota semantiği (compare = 1 hesap) | Kabul edildi (MVP) |
-| [ADR-003](ADR-003-rate-limiting.md) | Rate limiting / throttling (iki katman; IP throttle config-gated) | Kabul edildi |
+| [ADR-003](ADR-003-rate-limiting.md) | Dağıtık rate limiting ve nonce-bağlı günlük kota | Kabul edildi (revize) |
 | [ADR-004](ADR-004-geoip-distribution.md) | GeoIP (MaxMind GeoLite2) dağıtımı (commit yok, best-effort) | Kabul edildi |
 | [ADR-005](ADR-005-secrets-management.md) | Secrets management (katmanlı; rotation insan onayı) | Kabul edildi |
 | [ADR-006](ADR-006-activity-log-financial-policy.md) | Activity-log finansal tutar politikası (bucketing, KVKK) | Önerilen (legal onayı) |
+| [ADR-007](ADR-007-hosting-deployment.md) | Production hosting & deployment (Oracle Cloud A1 lift-and-shift, kalıcı $0) | Kabul edildi (MVP) |
+| [ADR-008](ADR-008-scenario-payload-pagination.md) | Scenario payload pagination and size boundary | Kabul edildi |
+| [ADR-009](ADR-009-provider-observation-authority.md) | Provider observation authority and immutable fetch attribution | Önerilen / expand uygulandı |
+| [ADR-010](ADR-010-installation-principal.md) | Sunucu üretimli installation principal, credential rotation, legacy karantina ve audit-preserving retention | Kabul edildi / 021–022 uygulandı |
+| [ADR-011](ADR-011-prometheus-exporter-prerelease.md) | OpenTelemetry Prometheus exporter için bounded prerelease istisnası ve OTLP çıkış koşulları | Kabul edildi (geçici istisna) |
 
 ## Yeni ADR ekleme
 
-1. Sıradaki numarayı al (`ADR-007`).
+1. Sıradaki numarayı al (`ADR-011`).
 2. ADR-001'in formatını izle: **Durum / Tarih / Karar verenler / İlgili bulgular** başlığı,
    ardından **Bağlam → Değerlendirilen Seçenekler → Karar → Sonuçlar/Risk → İlgili
    Dökümanlar** bölümleri. Diyagram gerekiyorsa Mermaid kullan (ASCII art YASAK — CLAUDE.md).

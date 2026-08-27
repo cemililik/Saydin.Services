@@ -4,7 +4,7 @@ namespace Saydin.Shared.Constants;
 
 /// <summary>
 /// `activity_logs.action` için kanonik değerler. DB CHECK constraint
-/// (`chk_activity_action`) bu listeyle birebir aynıdır; yeni bir endpoint action'ı
+/// (`enforce_activity_action_allowlist`) bu listeyle birebir aynıdır; yeni bir endpoint action'ı
 /// eklenirken hem migration hem bu liste güncellenmelidir.
 /// </summary>
 public static class ActivityActions
@@ -20,6 +20,10 @@ public static class ActivityActions
     public const string AssetPrice      = "asset_price";
     public const string AssetPriceRange = "asset_price_range";
     public const string ConfigFetch     = "config_fetch";
+    public const string InstallationRegister = "installation_register";
+    public const string InstallationRotationBegin = "installation_rotation_begin";
+    public const string InstallationRotationCommit = "installation_rotation_commit";
+    public const string InstallationRevoke = "installation_revoke";
 
     /// <summary>
     /// F12 follow-up: gerçek immutable koleksiyon. Sıra alfabetik; caller `(string[])All`
@@ -31,6 +35,10 @@ public static class ActivityActions
         AssetPriceRange,
         AssetsList,
         ConfigFetch,
+        InstallationRegister,
+        InstallationRevoke,
+        InstallationRotationBegin,
+        InstallationRotationCommit,
         ScenarioDelete,
         ScenarioList,
         ScenarioSave,

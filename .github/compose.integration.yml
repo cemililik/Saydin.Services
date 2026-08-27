@@ -1,0 +1,585 @@
+# Required CI integration stack. All services stay on the project-scoped Compose
+# network: no host ports and no fixed container_name values are permitted.
+services:
+  postgres:
+    # tag: timescale/timescaledb:2.16.1-pg16 (multi-arch manifest digest)
+    image: timescale/timescaledb@sha256:3adf01543c37b5b88d3c4998338e0f7f21cb3cdd02bbddea08b09bf60e2289b7
+    environment:
+      POSTGRES_DB: ${SAYDIN_CI_DATABASE:?SAYDIN_CI_DATABASE must be set}
+      POSTGRES_USER: saydin_ci
+      POSTGRES_PASSWORD_FILE: /run/postgres-secrets/password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ${SAYDIN_CI_POSTGRES_SECRET_DIR:?SAYDIN_CI_POSTGRES_SECRET_DIR must be set}:/run/postgres-secrets:ro
+    healthcheck:
+      # Connectivity only. Schema readiness is the successful one-shot
+      # database-migrator completion below.
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U saydin_ci -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # A second project-scoped TimescaleDB cluster is mandatory for the migrator's
+  # wrong-target/global-role isolation acceptance tests. No host port is exposed.
+  postgres-migrator-secondary:
+    # tag: timescale/timescaledb:2.16.1-pg16 (multi-arch manifest digest)
+    image: timescale/timescaledb@sha256:3adf01543c37b5b88d3c4998338e0f7f21cb3cdd02bbddea08b09bf60e2289b7
+    environment:
+      POSTGRES_DB: ${SAYDIN_CI_SECONDARY_DATABASE:?SAYDIN_CI_SECONDARY_DATABASE must be set}
+      POSTGRES_USER: saydin_ci
+      POSTGRES_PASSWORD_FILE: /run/postgres-secrets/password
+    volumes:
+      - postgres_migrator_secondary_data:/var/lib/postgresql/data
+      - ${SAYDIN_CI_POSTGRES_SECRET_DIR:?SAYDIN_CI_POSTGRES_SECRET_DIR must be set}:/run/postgres-secrets:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U saydin_ci -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # The executable and immutable raw migration bytes are built together. A
+  # non-zero exit keeps every database consumer below from starting.
+  database-role-bootstrap:
+    build:
+      context: ..
+      dockerfile: infrastructure/postgres/Dockerfile.migrator
+    entrypoint: ["dotnet", "Saydin.DatabaseRoleBootstrap.dll"]
+    command:
+      - ensure
+      - --admin-connection-file
+      - /run/saydin-secrets/admin
+      - --deployment-id
+      - ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      - --target-database
+      - ${SAYDIN_CI_DATABASE:?SAYDIN_CI_DATABASE must be set}
+      - --system-identifier-sha256
+      - ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      - --role-prefix
+      - ${SAYDIN_CI_DATABASE_ROLE_PREFIX:?SAYDIN_CI_DATABASE_ROLE_PREFIX must be set}
+      - --timescaledb-version
+      - 2.16.1
+      - --uuid-ossp-version
+      - "1.1"
+      - --backup-v1-valid-until
+      - ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+      - --migrator-password-file
+      - /run/saydin-secrets/migrator-v1
+      - --api-password-file
+      - /run/saydin-secrets/api-v1
+      - --ingestion-password-file
+      - /run/saydin-secrets/ingestion-v1
+      - --calendar-importer-password-file
+      - /run/saydin-secrets/calendar_importer-v1
+      - --exporter-password-file
+      - /run/saydin-secrets/exporter-v1
+      - --audit-password-file
+      - /run/saydin-secrets/audit-v1
+      - --backup-password-file
+      - /run/saydin-secrets/backup-v1
+    volumes:
+      - ${SAYDIN_CI_DATABASE_SECRET_DIR:?SAYDIN_CI_DATABASE_SECRET_DIR must be set}:/run/saydin-secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  database-migrator:
+    build:
+      context: ..
+      dockerfile: infrastructure/postgres/Dockerfile.migrator
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_CI_DATABASE:?SAYDIN_CI_DATABASE must be set}
+      PGUSER: ${SAYDIN_CI_DATABASE_MIGRATOR_LOGIN:?SAYDIN_CI_DATABASE_MIGRATOR_LOGIN must be set}
+      PGSSLMODE: Disable
+      SAYDIN_MIGRATOR_PASSWORD_FILE: /run/saydin-secrets/migrator-v1
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_DATABASE_ROLE_PREFIX:?SAYDIN_CI_DATABASE_ROLE_PREFIX must be set}
+      SAYDIN_TIMESCALEDB_VERSION: 2.16.1
+      SAYDIN_UUID_OSSP_VERSION: "1.1"
+      SAYDIN_MIGRATOR_LOGIN_VERSION: "1"
+      SAYDIN_MIGRATOR_LOCK_TIMEOUT_SECONDS: "20"
+      SAYDIN_MIGRATOR_COMMAND_TIMEOUT_SECONDS: "300"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+    volumes:
+      - ${SAYDIN_CI_DATABASE_MIGRATOR_SECRET_DIR:?SAYDIN_CI_DATABASE_MIGRATOR_SECRET_DIR must be set}:/run/saydin-secrets:ro
+    depends_on:
+      database-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # The ledger suite uses a different, UUID-bound database name so its
+  # destructive test cleanup can never target the API integration database.
+  ingestion-database-role-bootstrap:
+    extends:
+      service: database-role-bootstrap
+    command:
+      - ensure
+      - --admin-connection-file
+      - /run/saydin-secrets/admin
+      - --deployment-id
+      - ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      - --target-database
+      - ${SAYDIN_CI_INGESTION_DATABASE:?SAYDIN_CI_INGESTION_DATABASE must be set}
+      - --system-identifier-sha256
+      - ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      - --role-prefix
+      - ${SAYDIN_CI_INGESTION_ROLE_PREFIX:?SAYDIN_CI_INGESTION_ROLE_PREFIX must be set}
+      - --timescaledb-version
+      - 2.16.1
+      - --uuid-ossp-version
+      - "1.1"
+      - --backup-v1-valid-until
+      - ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+      - --migrator-password-file
+      - /run/saydin-secrets/migrator-v1
+      - --api-password-file
+      - /run/saydin-secrets/api-v1
+      - --ingestion-password-file
+      - /run/saydin-secrets/ingestion-v1
+      - --calendar-importer-password-file
+      - /run/saydin-secrets/calendar_importer-v1
+      - --exporter-password-file
+      - /run/saydin-secrets/exporter-v1
+      - --audit-password-file
+      - /run/saydin-secrets/audit-v1
+      - --backup-password-file
+      - /run/saydin-secrets/backup-v1
+    volumes:
+      - ${SAYDIN_CI_INGESTION_SECRET_DIR:?SAYDIN_CI_INGESTION_SECRET_DIR must be set}:/run/saydin-secrets:ro
+
+  ingestion-database-migrator:
+    build:
+      context: ..
+      dockerfile: infrastructure/postgres/Dockerfile.migrator
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_CI_INGESTION_DATABASE:?SAYDIN_CI_INGESTION_DATABASE must be set}
+      PGUSER: ${SAYDIN_CI_INGESTION_MIGRATOR_LOGIN:?SAYDIN_CI_INGESTION_MIGRATOR_LOGIN must be set}
+      PGSSLMODE: Disable
+      SAYDIN_MIGRATOR_PASSWORD_FILE: /run/saydin-secrets/migrator-v1
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_INGESTION_ROLE_PREFIX:?SAYDIN_CI_INGESTION_ROLE_PREFIX must be set}
+      SAYDIN_TIMESCALEDB_VERSION: 2.16.1
+      SAYDIN_UUID_OSSP_VERSION: "1.1"
+      SAYDIN_MIGRATOR_LOGIN_VERSION: "1"
+      SAYDIN_MIGRATOR_LOCK_TIMEOUT_SECONDS: "20"
+      SAYDIN_MIGRATOR_COMMAND_TIMEOUT_SECONDS: "300"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+    volumes:
+      - ${SAYDIN_CI_INGESTION_MIGRATOR_SECRET_DIR:?SAYDIN_CI_INGESTION_MIGRATOR_SECRET_DIR must be set}:/run/saydin-secrets:ro
+    depends_on:
+      ingestion-database-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # DQA acceptance owns an independent UUID-bound database. The audit fixture
+  # may create/drop its least-privilege role and anomaly rows only in this DB.
+  data-quality-audit-database-role-bootstrap:
+    extends:
+      service: database-role-bootstrap
+    command:
+      - ensure
+      - --admin-connection-file
+      - /run/saydin-secrets/admin
+      - --deployment-id
+      - ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      - --target-database
+      - ${SAYDIN_CI_AUDIT_DATABASE:?SAYDIN_CI_AUDIT_DATABASE must be set}
+      - --system-identifier-sha256
+      - ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      - --role-prefix
+      - ${SAYDIN_CI_AUDIT_ROLE_PREFIX:?SAYDIN_CI_AUDIT_ROLE_PREFIX must be set}
+      - --timescaledb-version
+      - 2.16.1
+      - --uuid-ossp-version
+      - "1.1"
+      - --backup-v1-valid-until
+      - ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+      - --migrator-password-file
+      - /run/saydin-secrets/migrator-v1
+      - --api-password-file
+      - /run/saydin-secrets/api-v1
+      - --ingestion-password-file
+      - /run/saydin-secrets/ingestion-v1
+      - --calendar-importer-password-file
+      - /run/saydin-secrets/calendar_importer-v1
+      - --exporter-password-file
+      - /run/saydin-secrets/exporter-v1
+      - --audit-password-file
+      - /run/saydin-secrets/audit-v1
+      - --backup-password-file
+      - /run/saydin-secrets/backup-v1
+    volumes:
+      - ${SAYDIN_CI_AUDIT_SECRET_DIR:?SAYDIN_CI_AUDIT_SECRET_DIR must be set}:/run/saydin-secrets:ro
+
+  data-quality-audit-database-migrator:
+    build:
+      context: ..
+      dockerfile: infrastructure/postgres/Dockerfile.migrator
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_CI_AUDIT_DATABASE:?SAYDIN_CI_AUDIT_DATABASE must be set}
+      PGUSER: ${SAYDIN_CI_AUDIT_MIGRATOR_LOGIN:?SAYDIN_CI_AUDIT_MIGRATOR_LOGIN must be set}
+      PGSSLMODE: Disable
+      SAYDIN_MIGRATOR_PASSWORD_FILE: /run/saydin-secrets/migrator-v1
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_AUDIT_ROLE_PREFIX:?SAYDIN_CI_AUDIT_ROLE_PREFIX must be set}
+      SAYDIN_TIMESCALEDB_VERSION: 2.16.1
+      SAYDIN_UUID_OSSP_VERSION: "1.1"
+      SAYDIN_MIGRATOR_LOGIN_VERSION: "1"
+      SAYDIN_MIGRATOR_LOCK_TIMEOUT_SECONDS: "20"
+      SAYDIN_MIGRATOR_COMMAND_TIMEOUT_SECONDS: "300"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+    volumes:
+      - ${SAYDIN_CI_AUDIT_MIGRATOR_SECRET_DIR:?SAYDIN_CI_AUDIT_MIGRATOR_SECRET_DIR must be set}:/run/saydin-secrets:ro
+    depends_on:
+      data-quality-audit-database-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # DataRepair acceptance owns a fourth UUID-bound database. It must exercise
+  # the production migration/role contract without sharing mutable fixture data
+  # with API, ingestion-ledger, or DQA suites.
+  data-repair-database-role-bootstrap:
+    extends:
+      service: database-role-bootstrap
+    command:
+      - ensure
+      - --admin-connection-file
+      - /run/saydin-secrets/admin
+      - --deployment-id
+      - ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      - --target-database
+      - ${SAYDIN_CI_REPAIR_DATABASE:?SAYDIN_CI_REPAIR_DATABASE must be set}
+      - --system-identifier-sha256
+      - ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      - --role-prefix
+      - ${SAYDIN_CI_REPAIR_ROLE_PREFIX:?SAYDIN_CI_REPAIR_ROLE_PREFIX must be set}
+      - --timescaledb-version
+      - 2.16.1
+      - --uuid-ossp-version
+      - "1.1"
+      - --backup-v1-valid-until
+      - ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+      - --migrator-password-file
+      - /run/saydin-secrets/migrator-v1
+      - --api-password-file
+      - /run/saydin-secrets/api-v1
+      - --ingestion-password-file
+      - /run/saydin-secrets/ingestion-v1
+      - --calendar-importer-password-file
+      - /run/saydin-secrets/calendar_importer-v1
+      - --exporter-password-file
+      - /run/saydin-secrets/exporter-v1
+      - --audit-password-file
+      - /run/saydin-secrets/audit-v1
+      - --backup-password-file
+      - /run/saydin-secrets/backup-v1
+    volumes:
+      - ${SAYDIN_CI_REPAIR_SECRET_DIR:?SAYDIN_CI_REPAIR_SECRET_DIR must be set}:/run/saydin-secrets:ro
+
+  data-repair-database-migrator:
+    build:
+      context: ..
+      dockerfile: infrastructure/postgres/Dockerfile.migrator
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_CI_REPAIR_DATABASE:?SAYDIN_CI_REPAIR_DATABASE must be set}
+      PGUSER: ${SAYDIN_CI_REPAIR_MIGRATOR_LOGIN:?SAYDIN_CI_REPAIR_MIGRATOR_LOGIN must be set}
+      PGSSLMODE: Disable
+      SAYDIN_MIGRATOR_PASSWORD_FILE: /run/saydin-secrets/migrator-v1
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_REPAIR_ROLE_PREFIX:?SAYDIN_CI_REPAIR_ROLE_PREFIX must be set}
+      SAYDIN_TIMESCALEDB_VERSION: 2.16.1
+      SAYDIN_UUID_OSSP_VERSION: "1.1"
+      SAYDIN_MIGRATOR_LOGIN_VERSION: "1"
+      SAYDIN_MIGRATOR_LOCK_TIMEOUT_SECONDS: "20"
+      SAYDIN_MIGRATOR_COMMAND_TIMEOUT_SECONDS: "300"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+    volumes:
+      - ${SAYDIN_CI_REPAIR_MIGRATOR_SECRET_DIR:?SAYDIN_CI_REPAIR_MIGRATOR_SECRET_DIR must be set}:/run/saydin-secrets:ro
+    depends_on:
+      data-repair-database-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  redis:
+    # tag: redis:7.4.1-alpine (multi-arch manifest digest)
+    image: redis@sha256:c1e88455c85225310bbea54816e9c3f4b5295815e6dbf80c34d40afc6df28275
+    command: ["redis-server", "/run/redis-secrets/redis.conf"]
+    volumes:
+      - redis_data:/data
+      - ${SAYDIN_CI_REDIS_SECRET_DIR:?SAYDIN_CI_REDIS_SECRET_DIR must be set}:/run/redis-secrets:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - password="$$(sed -n 's/^requirepass //p' /run/redis-secrets/redis.conf)"; redis-cli -a "$$password" --no-auth-warning ping | grep -q PONG
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  integration-tests:
+    # tag: mcr.microsoft.com/dotnet/sdk:10.0.400 (multi-arch manifest digest)
+    image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
+    environment:
+      SAYDIN_INTEGRATION_REQUIRED: "true"
+      SAYDIN_INTEGRATION_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_CI_DATABASE:?SAYDIN_CI_DATABASE must be set}
+      PGUSER: ${SAYDIN_CI_DATABASE_API_LOGIN:?SAYDIN_CI_DATABASE_API_LOGIN must be set}
+      PGSSLMODE: Disable
+      SAYDIN_API_DATABASE_PASSWORD_FILE: /run/test-secrets/api-v1
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_DATABASE_ROLE_PREFIX:?SAYDIN_CI_DATABASE_ROLE_PREFIX must be set}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_TEST_ADMIN_CONNECTION_FILE: /run/test-secrets/admin
+      SAYDIN_HTTP_TEST_KEYRING_FILE: /run/test-secrets/keyring.json
+      SAYDIN_REDIS_CONFIG_FILE: /run/redis-secrets/redis.conf
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_RESULTS_DIR:?SAYDIN_CI_RESULTS_DIR must be set}:/results
+      - ${SAYDIN_CI_DATABASE_TEST_SECRET_DIR:?SAYDIN_CI_DATABASE_TEST_SECRET_DIR must be set}:/run/test-secrets:ro
+      - ${SAYDIN_CI_REDIS_SECRET_DIR:?SAYDIN_CI_REDIS_SECRET_DIR must be set}:/run/redis-secrets:ro
+      - nuget_cache:/root/.nuget/packages
+    depends_on:
+      database-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-integration-tests.sh
+
+  ingestion-ledger-tests:
+    # tag: mcr.microsoft.com/dotnet/sdk:10.0.400 (multi-arch manifest digest)
+    image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
+    environment:
+      SAYDIN_INGESTION_TEST_REQUIRED: "true"
+      SAYDIN_INGESTION_TEST_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+      SAYDIN_INGESTION_TEST_EXPECTED_HOST: postgres
+      SAYDIN_INGESTION_TEST_DATABASE_FILE: /run/test-secrets/admin
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_CI_INGESTION_DATABASE:?SAYDIN_CI_INGESTION_DATABASE must be set}
+      PGUSER: ${SAYDIN_CI_INGESTION_INGESTION_LOGIN:?SAYDIN_CI_INGESTION_INGESTION_LOGIN must be set}
+      PGSSLMODE: Disable
+      SAYDIN_INGESTION_DATABASE_PASSWORD_FILE: /run/test-secrets/ingestion-v1
+      SAYDIN_CALENDAR_IMPORTER_DATABASE_PASSWORD_FILE: /run/test-secrets/calendar_importer-v1
+      SAYDIN_CALENDAR_IMPORTER_TEST_LOGIN: ${SAYDIN_CI_INGESTION_CALENDAR_IMPORTER_LOGIN:?SAYDIN_CI_INGESTION_CALENDAR_IMPORTER_LOGIN must be set}
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_INGESTION_ROLE_PREFIX:?SAYDIN_CI_INGESTION_ROLE_PREFIX must be set}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_RESULTS_DIR:?SAYDIN_CI_RESULTS_DIR must be set}:/results
+      - ${SAYDIN_CI_INGESTION_TEST_SECRET_DIR:?SAYDIN_CI_INGESTION_TEST_SECRET_DIR must be set}:/run/test-secrets:ro
+      - nuget_cache:/root/.nuget/packages
+    depends_on:
+      ingestion-database-migrator:
+        condition: service_completed_successfully
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-ingestion-ledger-tests.sh
+
+  data-quality-audit-tests:
+    # tag: mcr.microsoft.com/dotnet/sdk:10.0.400 (multi-arch manifest digest)
+    image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
+    environment:
+      # Admin file exists only for disposable fixture setup/cleanup. The audited
+      # process opens a distinct exact managed audit datasource and cannot use
+      # the setup connection as its SUT identity.
+      SAYDIN_AUDIT_TEST_REQUIRED: "true"
+      SAYDIN_AUDIT_TEST_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+      SAYDIN_AUDIT_TEST_EXPECTED_HOST: postgres
+      SAYDIN_AUDIT_TEST_ADMIN_CONNECTION_FILE: /run/test-secrets/admin
+      SAYDIN_AUDIT_TEST_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_AUDIT_TEST_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_AUDIT_TEST_ROLE_PREFIX: ${SAYDIN_CI_AUDIT_ROLE_PREFIX:?SAYDIN_CI_AUDIT_ROLE_PREFIX must be set}
+      SAYDIN_AUDIT_TEST_LOGIN: ${SAYDIN_CI_AUDIT_AUDIT_LOGIN:?SAYDIN_CI_AUDIT_AUDIT_LOGIN must be set}
+      SAYDIN_AUDIT_TEST_PASSWORD_FILE: /run/test-secrets/audit-v1
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_CI_BACKUP_V1_VALID_UNTIL:?SAYDIN_CI_BACKUP_V1_VALID_UNTIL must be set}
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_RESULTS_DIR:?SAYDIN_CI_RESULTS_DIR must be set}:/results
+      - ${SAYDIN_CI_AUDIT_TEST_SECRET_DIR:?SAYDIN_CI_AUDIT_TEST_SECRET_DIR must be set}:/run/test-secrets:ro
+      - nuget_cache:/root/.nuget/packages
+    depends_on:
+      data-quality-audit-database-migrator:
+        condition: service_completed_successfully
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-data-quality-audit-tests.sh
+
+  data-repair-tests:
+    # tag: mcr.microsoft.com/dotnet/sdk:10.0.400 (multi-arch manifest digest)
+    image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
+    environment:
+      SAYDIN_REPAIR_TEST_REQUIRED: "true"
+      SAYDIN_REPAIR_TEST_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+      SAYDIN_REPAIR_TEST_EXPECTED_HOST: postgres
+      SAYDIN_REPAIR_TEST_ADMIN_CONNECTION_FILE: /run/test-secrets/admin
+      SAYDIN_REPAIR_TEST_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_REPAIR_TEST_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_REPAIR_TEST_ROLE_PREFIX: ${SAYDIN_CI_REPAIR_ROLE_PREFIX:?SAYDIN_CI_REPAIR_ROLE_PREFIX must be set}
+      SAYDIN_REPAIR_TEST_INGESTION_LOGIN: ${SAYDIN_CI_REPAIR_INGESTION_LOGIN:?SAYDIN_CI_REPAIR_INGESTION_LOGIN must be set}
+      SAYDIN_REPAIR_TEST_INGESTION_PASSWORD_FILE: /run/test-secrets/ingestion-v1
+      SAYDIN_REPAIR_TEST_AUDIT_LOGIN: ${SAYDIN_CI_REPAIR_AUDIT_LOGIN:?SAYDIN_CI_REPAIR_AUDIT_LOGIN must be set}
+      SAYDIN_REPAIR_TEST_AUDIT_PASSWORD_FILE: /run/test-secrets/audit-v1
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_RESULTS_DIR:?SAYDIN_CI_RESULTS_DIR must be set}:/results
+      - ${SAYDIN_CI_REPAIR_TEST_SECRET_DIR:?SAYDIN_CI_REPAIR_TEST_SECRET_DIR must be set}:/run/test-secrets:ro
+      - nuget_cache:/root/.nuget/packages
+    depends_on:
+      data-repair-database-migrator:
+        condition: service_completed_successfully
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-data-repair-tests.sh
+
+  role-bootstrap-tests:
+    # tag: mcr.microsoft.com/dotnet/sdk:10.0.400 (multi-arch manifest digest)
+    image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
+    environment:
+      # This OID-10 credential exists only inside the disposable test fixture.
+      # Production bootstrap consumes an admin connection file instead.
+      SAYDIN_ROLE_BOOTSTRAP_TEST_REQUIRED: "true"
+      SAYDIN_INTEGRATION_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+      SAYDIN_ROLE_BOOTSTRAP_TEST_ADMIN_CONNECTION_FILE: /run/test-secrets/admin
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_RESULTS_DIR:?SAYDIN_CI_RESULTS_DIR must be set}:/results
+      - ${SAYDIN_CI_ROLE_BOOTSTRAP_TEST_SECRET_DIR:?SAYDIN_CI_ROLE_BOOTSTRAP_TEST_SECRET_DIR must be set}:/run/test-secrets:ro
+      - nuget_cache:/root/.nuget/packages
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-role-bootstrap-tests.sh
+
+  calendar-data-tests:
+    # tag: mcr.microsoft.com/dotnet/sdk:10.0.400 (multi-arch manifest digest)
+    image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
+    environment:
+      SAYDIN_CALENDAR_TEST_REQUIRED: "true"
+      SAYDIN_INTEGRATION_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_RESULTS_DIR:?SAYDIN_CI_RESULTS_DIR must be set}:/results
+      - nuget_cache:/root/.nuget/packages
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-calendar-data-tests.sh
+
+  calendar-release:
+    build:
+      context: ..
+      dockerfile: tools/calendar-data/Dockerfile
+    image: saydin-calendar-data-ci:${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_CI_INGESTION_DATABASE:?SAYDIN_CI_INGESTION_DATABASE must be set}
+      PGUSER: ${SAYDIN_CI_INGESTION_CALENDAR_IMPORTER_LOGIN:?SAYDIN_CI_INGESTION_CALENDAR_IMPORTER_LOGIN must be set}
+      PGSSLMODE: Disable
+      SAYDIN_CALENDAR_IMPORTER_DATABASE_PASSWORD_FILE: /run/saydin-secrets/calendar_importer-v1
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_CI_DEPLOYMENT_ID:?SAYDIN_CI_DEPLOYMENT_ID must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_INGESTION_ROLE_PREFIX:?SAYDIN_CI_INGESTION_ROLE_PREFIX must be set}
+      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+    volumes:
+      - ${SAYDIN_CI_INGESTION_CALENDAR_SECRET_DIR:?SAYDIN_CI_INGESTION_CALENDAR_SECRET_DIR must be set}:/run/saydin-secrets:ro
+    depends_on:
+      ingestion-database-migrator:
+        condition: service_completed_successfully
+
+  # Required/fail-closed migrator suite. Its SkippableFact tests receive two
+  # real, distinct clusters; the CI TRX gate rejects skips and zero discovery.
+  migrator-tests:
+    # tag: mcr.microsoft.com/dotnet/sdk:10.0.400 (multi-arch manifest digest)
+    image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
+    environment:
+      SAYDIN_MIGRATOR_TEST_REQUIRED: "true"
+      SAYDIN_INTEGRATION_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+      SAYDIN_MIGRATOR_TEST_DATABASE_FILE: /run/test-secrets/admin
+      SAYDIN_MIGRATOR_SECONDARY_DATABASE_FILE: /run/test-secrets/secondary-admin
+      SAYDIN_MIGRATOR_BACKUP_ROTATION_DATABASE: ${SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DATABASE:?SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DATABASE must be set}
+      SAYDIN_MIGRATOR_BACKUP_ROTATION_DEPLOYMENT_ID: ${SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DEPLOYMENT_ID:?SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DEPLOYMENT_ID must be set}
+      SAYDIN_MIGRATOR_BACKUP_ROTATION_ROLE_PREFIX: ${SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_ROLE_PREFIX:?SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_ROLE_PREFIX must be set}
+      SAYDIN_MIGRATOR_LEGACY_ACK_DATABASE: ${SAYDIN_CI_MIGRATOR_LEGACY_ACK_DATABASE:?SAYDIN_CI_MIGRATOR_LEGACY_ACK_DATABASE must be set}
+      SAYDIN_MIGRATOR_LEGACY_ACK_DEPLOYMENT_ID: ${SAYDIN_CI_MIGRATOR_LEGACY_ACK_DEPLOYMENT_ID:?SAYDIN_CI_MIGRATOR_LEGACY_ACK_DEPLOYMENT_ID must be set}
+      SAYDIN_MIGRATOR_LEGACY_ACK_ROLE_PREFIX: ${SAYDIN_CI_MIGRATOR_LEGACY_ACK_ROLE_PREFIX:?SAYDIN_CI_MIGRATOR_LEGACY_ACK_ROLE_PREFIX must be set}
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_RESULTS_DIR:?SAYDIN_CI_RESULTS_DIR must be set}:/results
+      - ${SAYDIN_CI_MIGRATOR_TEST_SECRET_DIR:?SAYDIN_CI_MIGRATOR_TEST_SECRET_DIR must be set}:/run/test-secrets:ro
+      - nuget_cache:/root/.nuget/packages
+    depends_on:
+      database-migrator:
+        condition: service_completed_successfully
+      postgres-migrator-secondary:
+        condition: service_healthy
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-migrator-tests.sh
+
+  backup-auth-tests:
+    # Exact pinned PostgreSQL 16 client; this fixture receives only the physical
+    # backup credential and never a bootstrap/admin or application password.
+    image: timescale/timescaledb@sha256:3adf01543c37b5b88d3c4998338e0f7f21cb3cdd02bbddea08b09bf60e2289b7
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${SAYDIN_CI_DATABASE_BACKUP_LOGIN:?SAYDIN_CI_DATABASE_BACKUP_LOGIN must be set}
+      PGSSLMODE: disable
+      PGPASSFILE: /run/backup-auth/.pgpass
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_CI_DATABASE_ROLE_PREFIX:?SAYDIN_CI_DATABASE_ROLE_PREFIX must be set}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_CI_DATABASE_SYSTEM_HASH:?SAYDIN_CI_DATABASE_SYSTEM_HASH must be set}
+      SAYDIN_TARGET_DATABASE: ${SAYDIN_CI_DATABASE:?SAYDIN_CI_DATABASE must be set}
+      SAYDIN_CI_RUN_ID: ${SAYDIN_CI_RUN_ID:?SAYDIN_CI_RUN_ID must be set}
+    volumes:
+      - ..:/repo:ro
+      - ${SAYDIN_CI_BACKUP_AUTH_SECRET_DIR:?SAYDIN_CI_BACKUP_AUTH_SECRET_DIR must be set}:/run/backup-auth:ro
+    tmpfs:
+      - /work:mode=0700,uid=0,gid=0
+      - /tmp:mode=1777
+    entrypoint:
+      - /bin/bash
+      - /repo/.github/scripts/run-backup-auth-tests.sh
+
+volumes:
+  postgres_data:
+  postgres_migrator_secondary_data:
+  redis_data:
+  nuget_cache:

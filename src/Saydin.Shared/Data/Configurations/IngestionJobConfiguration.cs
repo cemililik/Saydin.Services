@@ -27,6 +27,7 @@ public sealed class IngestionJobConfiguration : IEntityTypeConfiguration<Ingesti
         builder.Property(j => j.ErrorMessage).HasColumnType("text");
         // INGR-002 (migration 012): provenance kolonu (nullable).
         builder.Property(j => j.Source).HasMaxLength(30);
+        builder.Property(j => j.OutcomeCode).HasMaxLength(80);
 
         // SHRD-019: started_at DB-side DEFAULT NOW() — EF Configuration ile sync (drift yok).
         builder.Property(j => j.StartedAt).HasDefaultValueSql("NOW()");
@@ -36,10 +37,22 @@ public sealed class IngestionJobConfiguration : IEntityTypeConfiguration<Ingesti
         builder.HasOne(j => j.Asset)
                .WithMany()
                .HasForeignKey(j => j.AssetId)
+               .OnDelete(DeleteBehavior.Restrict)
                .HasConstraintName("fk_ingestion_jobs_asset");
 
         builder.HasIndex(j => new { j.AssetId, j.Status, j.StartedAt })
                .HasDatabaseName("idx_ingestion_jobs_asset_status")
                .IsDescending(false, false, true);
+
+        builder.HasOne(j => j.Window)
+               .WithMany()
+               .HasForeignKey(j => j.WindowId)
+               .OnDelete(DeleteBehavior.Restrict)
+               .HasConstraintName("fk_ingestion_jobs_window");
+
+        builder.HasIndex(j => new { j.WindowId, j.StartedAt })
+               .HasDatabaseName("idx_ingestion_jobs_window_started")
+               .HasFilter("window_id IS NOT NULL")
+               .IsDescending(false, true);
     }
 }

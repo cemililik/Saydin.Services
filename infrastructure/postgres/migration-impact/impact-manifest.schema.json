@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saydin.invalid/schemas/migration-impact-v1.json",
+  "title": "Saydin migration impact manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "budgets",
+    "classifications",
+    "executionMode",
+    "migrationSha256",
+    "migrationVersion",
+    "onlinePlan",
+    "postconditions",
+    "relations",
+    "schemaVersion",
+    "target"
+  ],
+  "properties": {
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "declaredTablespaceCapacityBytes",
+        "estimatedAdditionalBytes",
+        "lockTimeoutMilliseconds",
+        "maxBlockingTransactionAgeSeconds",
+        "maxCompressedBytes",
+        "maxProjectedWalBytes",
+        "maxRelationBytes",
+        "maxReplicaLagBytes",
+        "maxSlotRetentionBytes",
+        "maxWaitingLocks",
+        "minFreeBytesAfter",
+        "minHeadroomRatioBasisPoints",
+        "minimumStreamingReplicas",
+        "requireAllSlotsActive",
+        "statementTimeoutMilliseconds",
+        "totalTimeoutSeconds"
+      ],
+      "properties": {
+        "declaredTablespaceCapacityBytes": { "type": "integer", "minimum": 1 },
+        "estimatedAdditionalBytes": { "type": "integer", "minimum": 0 },
+        "lockTimeoutMilliseconds": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "maxBlockingTransactionAgeSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "maxCompressedBytes": { "type": "integer", "minimum": 0 },
+        "maxProjectedWalBytes": { "type": "integer", "minimum": 0 },
+        "maxRelationBytes": { "type": "integer", "minimum": 1 },
+        "maxReplicaLagBytes": { "type": "integer", "minimum": 0 },
+        "maxSlotRetentionBytes": { "type": "integer", "minimum": 0 },
+        "maxWaitingLocks": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "minFreeBytesAfter": { "type": "integer", "minimum": 0 },
+        "minHeadroomRatioBasisPoints": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "minimumStreamingReplicas": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "requireAllSlotsActive": { "type": "boolean" },
+        "statementTimeoutMilliseconds": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "totalTimeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 7200 }
+      }
+    },
+    "classifications": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "create-index-concurrent",
+          "create-index-nonconcurrent",
+          "large-dml",
+          "resumable-online",
+          "table-rewrite",
+          "timescale-chunk-operation",
+          "timescale-compression",
+          "transactional-ddl",
+          "validate-constraint"
+        ]
+      }
+    },
+    "executionMode": { "enum": ["transactional", "resumable-online"] },
+    "migrationSha256": { "$ref": "#/$defs/sha256" },
+    "migrationVersion": { "$ref": "#/$defs/version" },
+    "onlinePlan": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "batchSize",
+            "keyColumn",
+            "maxBatchMilliseconds",
+            "pauseCompressionPolicy",
+            "planKind",
+            "relation",
+            "targetColumn",
+            "targetType",
+            "targetValue"
+          ],
+          "properties": {
+            "batchSize": { "type": "integer", "minimum": 1, "maximum": 10000 },
+            "keyColumn": { "$ref": "#/$defs/identifier" },
+            "maxBatchMilliseconds": { "type": "integer", "minimum": 10, "maximum": 300000 },
+            "pauseCompressionPolicy": { "type": "boolean" },
+            "planKind": { "const": "uuid-keyset-set-constant-where-null" },
+            "relation": { "$ref": "#/$defs/relation" },
+            "targetColumn": { "$ref": "#/$defs/identifier" },
+            "targetType": { "enum": ["boolean", "smallint", "integer", "bigint", "text", "uuid"] },
+            "targetValue": { "type": ["boolean", "integer", "string"] }
+          }
+        }
+      ]
+    },
+    "postconditions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["column", "index", "kind", "relation"],
+        "properties": {
+          "column": { "type": ["string", "null"] },
+          "index": { "type": ["string", "null"] },
+          "kind": { "enum": ["column-no-null", "index-valid", "relation-exists"] },
+          "relation": { "$ref": "#/$defs/relation" }
+        }
+      }
+    },
+    "relations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["includeChunks", "includeCompressed", "name", "tablespace"],
+        "properties": {
+          "includeChunks": { "type": "boolean" },
+          "includeCompressed": { "type": "boolean" },
+          "name": { "$ref": "#/$defs/relation" },
+          "tablespace": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    },
+    "schemaVersion": { "const": 1 },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "database",
+        "requiredPredecessorSha256",
+        "requiredPredecessorVersion",
+        "requiredSchemaManifestSha256",
+        "systemIdentifierSha256"
+      ],
+      "properties": {
+        "database": { "type": "string", "minLength": 1 },
+        "requiredPredecessorSha256": { "$ref": "#/$defs/sha256" },
+        "requiredPredecessorVersion": { "$ref": "#/$defs/version" },
+        "requiredSchemaManifestSha256": { "$ref": "#/$defs/sha256" },
+        "systemIdentifierSha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,62}$" },
+    "relation": { "type": "string", "pattern": "^public\\.[a-z][a-z0-9_]{0,62}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "version": { "type": "string", "pattern": "^[0-9]{3}[a-z]?_[a-z0-9_]+$" }
+  }
+}

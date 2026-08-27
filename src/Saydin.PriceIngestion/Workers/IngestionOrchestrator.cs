@@ -1,99 +1,205 @@
+using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.Configuration;
 
 namespace Saydin.PriceIngestion.Workers;
 
 /// <summary>
-/// Tüm veri çekme worker'larını başlatan ana orchestrator.
-/// Hangi worker'ların çalışacağı <c>IngestionWorkers:{Worker}:Enabled</c> ile belirlenir.
-/// F4-11: Varsayılan <b>kapalı</b> (disabled-by-default) — config'te anahtar yoksa worker
-/// çalışmaz (<c>?? false</c>). Aktivasyon env (<c>WORKER_*_ENABLED</c> → compose/.env) ya da
-/// appsettings ile açıkça yapılır; böylece bare-binary çalıştırma kazara dış API/rate-limit
-/// tüketmez (fail-closed). Eksik/typo'lu config sessizce worker'ı açmak yerine kapalı bırakır.
-/// <b>HİÇBİR</b> worker etkin değilse orchestrator fail-fast yapar (host başlatılmaz) — boş
-/// bir worker servisinin "running" görünmesi yapılandırma hatasını maskelemesin.
+/// Enabled ingestion workers share one infrastructure-fatal failure domain. Provider-
+/// permanent windows are isolated inside each worker; the first infrastructure fault,
+/// self-cancellation or unexpected normal return cancels every sibling,
+/// performs a bounded drain, marks the process unsuccessful and is rethrown to the
+/// generic host. Normal host cancellation remains a quiet, zero-exit path.
 /// </summary>
-public sealed class IngestionOrchestrator(
-    TcmbWorker tcmbWorker,
-    CoinGeckoWorker coinGeckoWorker,
-    OpenExchangeRatesWorker openExchangeRatesWorker,
-    TwelveDataWorker twelveDataWorker,
-    EvdsInflationWorker evdsInflationWorker,
-    IConfiguration configuration,
-    ILogger<IngestionOrchestrator> logger) : BackgroundService
+public sealed class IngestionOrchestrator : BackgroundService
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    private const int DefaultDrainTimeoutMs = 5_000;
+    private const int MaximumDrainTimeoutMs = 30_000;
+
+    private readonly IReadOnlyList<IngestionWorkerRegistration> _workers;
+    private readonly IConfiguration _configuration;
+    private readonly IProcessExitCodeSink _exitCode;
+    private readonly TimeProvider _timeProvider;
+    private readonly ILogger<IngestionOrchestrator> _logger;
+    private readonly TimeSpan _drainTimeout;
+
+    public IngestionOrchestrator(
+        TcmbWorker tcmbWorker,
+        CoinGeckoWorker coinGeckoWorker,
+        OpenExchangeRatesWorker openExchangeRatesWorker,
+        TwelveDataWorker twelveDataWorker,
+        EvdsInflationWorker evdsInflationWorker,
+        IConfiguration configuration,
+        IProcessExitCodeSink exitCode,
+        TimeProvider timeProvider,
+        ILogger<IngestionOrchestrator> logger)
+        : this(
+            [
+                new("Tcmb", token => tcmbWorker.RunAsync(token)),
+                new("CoinGecko", token => coinGeckoWorker.RunAsync(token)),
+                new("OpenExchangeRates", token => openExchangeRatesWorker.RunAsync(token)),
+                new("TwelveData", token => twelveDataWorker.RunAsync(token)),
+                new("EvdsInflation", token => evdsInflationWorker.RunAsync(token)),
+            ],
+            configuration,
+            exitCode,
+            timeProvider,
+            logger)
     {
-        var tasks = new List<Task>();
-
-        void AddIfEnabled(string key, Func<Task> runAsync)
-        {
-            // F4-11: anahtar yoksa fail-closed (?? false) — worker kapalı kalır, loglanır.
-            var enabled = configuration.GetValue<bool?>($"IngestionWorkers:{key}:Enabled") ?? false;
-            if (enabled)
-                tasks.Add(RunSafelyAsync(key, runAsync, stoppingToken));
-            else
-                logger.LogInformation("Worker devre dışı (config): {Worker}", key);
-        }
-
-        AddIfEnabled("Tcmb",              () => tcmbWorker.RunAsync(stoppingToken));
-        AddIfEnabled("CoinGecko",         () => coinGeckoWorker.RunAsync(stoppingToken));
-        AddIfEnabled("OpenExchangeRates", () => openExchangeRatesWorker.RunAsync(stoppingToken));
-        AddIfEnabled("TwelveData",        () => twelveDataWorker.RunAsync(stoppingToken));
-        AddIfEnabled("EvdsInflation",     () => evdsInflationWorker.RunAsync(stoppingToken));
-
-        if (tasks.Count == 0)
-        {
-            // F4-11 per-worker default'u fail-closed (?? false). Ancak HİÇBİR worker
-            // etkin değilse bu bir yapılandırma hatasıdır — hosted service'in "running"
-            // görünüp hiç iş yapmaması (aşağıdaki "tümü beklenmedik sonlandı" anti-pattern'i
-            // gibi) sessizce maskelenmemeli. Fail-fast: host başlatılamasın.
-            logger.LogCritical(
-                "Hiçbir ingestion worker etkin değil — orchestrator başlatılamıyor. " +
-                "En az bir worker'ı 'IngestionWorkers:*:Enabled' (örn. WORKER_TCMB_ENABLED) ile etkinleştir.");
-            throw new InvalidOperationException(
-                "No ingestion workers enabled; check IngestionWorkers:*:Enabled configuration.");
-        }
-
-        logger.LogInformation("IngestionOrchestrator başlatıldı ({Count} aktif worker)", tasks.Count);
-        // F1.1-8: Task.WhenAll fail-fast değil — her worker kendi RunSafelyAsync sarmalayıcısı
-        // içinde exception'ı yakalar; bir worker çökerse diğerleri çalışmaya devam eder.
-        await Task.WhenAll(tasks);
-
-        // PR #11 follow-up: Eğer Task.WhenAll shutdown token tetiklenmeden tamamlandıysa,
-        // tüm worker'lar sessizce ölmüş demektir (örn. RunSafelyAsync catch'i fatal hata
-        // yutmuş). Hosted service'i fail ettir — host process restart almalı, "running"
-        // gibi görünmemeli. CLAUDE.md "exception sessizce yutulmaz" prensibinin
-        // orchestrator seviyesindeki uzantısı.
-        if (!stoppingToken.IsCancellationRequested)
-        {
-            logger.LogCritical(
-                "Tüm ingestion worker'ları beklenmedik şekilde sonlandı; orchestrator hosted service fail ettiriyor");
-            throw new InvalidOperationException(
-                "All ingestion workers terminated unexpectedly while shutdown token was not signalled.");
-        }
     }
 
-    private async Task RunSafelyAsync(string workerName, Func<Task> runAsync, CancellationToken stoppingToken)
+    internal IngestionOrchestrator(
+        IReadOnlyList<IngestionWorkerRegistration> workers,
+        IConfiguration configuration,
+        IProcessExitCodeSink exitCode,
+        TimeProvider timeProvider,
+        ILogger<IngestionOrchestrator> logger)
     {
+        _workers = workers;
+        _configuration = configuration;
+        _exitCode = exitCode;
+        _timeProvider = timeProvider;
+        _logger = logger;
+        var configuredTimeout = configuration.GetValue<int?>(
+            "IngestionWorkers:SupervisorDrainTimeoutMs") ?? DefaultDrainTimeoutMs;
+        _drainTimeout = TimeSpan.FromMilliseconds(
+            Math.Clamp(configuredTimeout, 1, MaximumDrainTimeoutMs));
+    }
+
+    public override Task StartAsync(CancellationToken cancellationToken)
+    {
+        // .NET 10 runs BackgroundService.ExecuteAsync fully on a background thread.
+        // Validate synchronously here so a zero-worker deployment fails host startup
+        // instead of briefly reporting "Application started" before stopping.
+        if (!_workers.Any(IsEnabled))
+            throw NoEnabledWorkerException();
+        return base.StartAsync(cancellationToken);
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var enabled = new List<IngestionWorkerRegistration>();
+        foreach (var worker in _workers)
+        {
+            if (IsEnabled(worker))
+                enabled.Add(worker);
+            else
+                _logger.LogInformation("Worker devre dışı (config): {Worker}", worker.Name);
+        }
+
+        if (enabled.Count == 0)
+            throw NoEnabledWorkerException();
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var running = enabled
+            .Select(worker => new RunningWorker(
+                worker.Name, InvokeWorkerAsync(worker, linkedCts.Token)))
+            .ToArray();
+        var shutdownSignal = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var shutdownRegistration = stoppingToken.Register(
+            () => shutdownSignal.TrySetResult());
+
+        _logger.LogInformation(
+            "IngestionOrchestrator başlatıldı ({Count} aktif worker)", running.Length);
+
+        var completedTask = await Task.WhenAny(
+            running.Select(worker => worker.Task).Append(shutdownSignal.Task));
+        if (ReferenceEquals(completedTask, shutdownSignal.Task)
+            || (stoppingToken.IsCancellationRequested && !completedTask.IsFaulted))
+        {
+            await linkedCts.CancelAsync();
+            await DrainAsync(running, fatalWorker: null);
+            // Başka bir hosted service daha önce fatal/non-zero işaretlediyse normal
+            // host cancellation bu kanıtı sessizce başarıya çevirmemelidir.
+            return;
+        }
+
+        var completedWorker = running.Single(worker => ReferenceEquals(worker.Task, completedTask));
+        Exception fatal;
         try
         {
-            await runAsync();
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            // Host shutdown — beklenen, log gürültüsü yapma.
+            await completedWorker.Task;
+            fatal = new InvalidOperationException(
+                $"Ingestion worker terminated unexpectedly: {completedWorker.Name}");
         }
         catch (Exception ex)
         {
-            logger.LogCritical(ex,
-                "Worker fatal hata: {Worker} — orchestrator izolasyonu devreye girdi (diğer worker'lar devam ediyor)",
-                workerName);
+            fatal = ex;
+        }
+
+        _exitCode.ExitCode = 1;
+        _logger.LogCritical(fatal,
+            "Worker fatal hata: {Worker}; sibling worker'lar iptal ediliyor",
+            completedWorker.Name);
+        await linkedCts.CancelAsync();
+        await DrainAsync(running, completedWorker.Name);
+
+        ExceptionDispatchInfo.Capture(fatal).Throw();
+    }
+
+    internal Task RunForTestAsync(CancellationToken stoppingToken) =>
+        ExecuteAsync(stoppingToken);
+
+    private bool IsEnabled(IngestionWorkerRegistration worker) =>
+        _configuration.GetValue<bool?>(
+            $"IngestionWorkers:{worker.Name}:Enabled") ?? false;
+
+    private InvalidOperationException NoEnabledWorkerException()
+    {
+        _exitCode.ExitCode = 1;
+        _logger.LogCritical(
+            "Hiçbir ingestion worker etkin değil — orchestrator başlatılamıyor. " +
+            "En az bir worker'ı 'IngestionWorkers:*:Enabled' ile etkinleştir.");
+        return new InvalidOperationException(
+            "No ingestion workers enabled; check IngestionWorkers:*:Enabled configuration.");
+    }
+
+    private static async Task InvokeWorkerAsync(
+        IngestionWorkerRegistration worker,
+        CancellationToken token) =>
+        await worker.RunAsync(token).ConfigureAwait(false);
+
+    private async Task DrainAsync(
+        IReadOnlyList<RunningWorker> workers,
+        string? fatalWorker)
+    {
+        var observation = Task.WhenAll(workers.Select(ObserveTerminationAsync));
+        var timeout = Task.Delay(_drainTimeout, _timeProvider, CancellationToken.None);
+        if (await Task.WhenAny(observation, timeout) == observation)
+        {
+            await observation;
+            return;
+        }
+
+        var pending = workers.Count(worker => !worker.Task.IsCompleted);
+        _logger.LogWarning(
+            "Worker drain süresi aşıldı: {TimeoutMs}ms, fatal={FatalWorker}, pending={PendingCount}",
+            _drainTimeout.TotalMilliseconds, fatalWorker, pending);
+        _ = observation; // Each worker task remains observed even after bounded return.
+    }
+
+    private static async Task ObserveTerminationAsync(RunningWorker worker)
+    {
+        try
+        {
+            await worker.Task.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Fatal is propagated by ExecuteAsync; sibling cancellation/faults are
+            // observed here so bounded drain cannot create unobserved exceptions.
         }
     }
 
     public override Task StopAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("IngestionOrchestrator durduruluyor");
+        _logger.LogInformation("IngestionOrchestrator durduruluyor");
         return base.StopAsync(stoppingToken);
     }
+
+    private sealed record RunningWorker(string Name, Task Task);
 }
+
+internal sealed record IngestionWorkerRegistration(
+    string Name,
+    Func<CancellationToken, Task> RunAsync);

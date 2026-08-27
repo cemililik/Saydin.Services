@@ -4,144 +4,136 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Saydin.PriceIngestion.Adapters;
-using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Tests.Adapters;
 
-// Review P1R-010 / F1.1-7: EvdsInflationAdapter HTTP davranışı — 5xx, 401/403,
-// 429 ve network hataları artık sessizce return [] yapmıyor, ExternalApiException
-// fırlatıyor. Adapter ayrıca `key` header'ını query string'e koymadan göndermeli.
 public class EvdsInflationAdapterTests
 {
-    private static readonly DateOnly From = new(2024, 1, 1);
-    private static readonly DateOnly To   = new(2024, 3, 1);
+    private static readonly TimeProvider Clock =
+        new FixedTimeProvider(new DateTimeOffset(2024, 4, 10, 0, 0, 0, TimeSpan.Zero));
 
-    private const string ValidPayload = """
+    [Fact]
+    public async Task Key_IsHeaderOnly_AndExactMonthsAreData()
+    {
+        var (adapter, handler) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-          "totalCount": 0,
-          "items": []
-        }
-        """;
+            Content = new StringContent("""
+                {"items":[
+                  {"Tarih":"2024-1","TP_FG_J0":"100.1"},
+                  {"Tarih":"2024-2","TP_FG_J0":"101.2"},
+                  {"Tarih":"2024-3","TP_FG_J0":"102.3"}]}
+                """),
+        });
 
-    private static (EvdsInflationAdapter Adapter, StubHttpMessageHandler Handler) BuildAdapter(
-        Func<HttpRequestMessage, HttpResponseMessage> responder, string? apiKey = "test-key")
+        var result = await adapter.FetchRangeAsync(new(2024, 1, 1), new(2024, 3, 1), default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.Data);
+        result.Records.Should().HaveCount(3);
+        var request = handler.Requests.Single();
+        request.Headers.GetValues("key").Should().Equal("test-key");
+        request.RequestUri!.Query.Should().NotContain("test-key");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError, AdapterOutcomeKind.RetryableFailure)]
+    [InlineData(HttpStatusCode.TooManyRequests, AdapterOutcomeKind.RetryableFailure)]
+    [InlineData(HttpStatusCode.Unauthorized, AdapterOutcomeKind.PermanentFailure)]
+    public async Task HttpFailure_IsTyped(HttpStatusCode status, AdapterOutcomeKind expected)
+    {
+        var (adapter, _) = Build(_ => new HttpResponseMessage(status));
+        (await adapter.FetchRangeAsync(new(2024, 1, 1), new(2024, 1, 1), default)).Kind
+            .Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task LatestUnpublishedMonth_IsRetryable_NotExpectedNoData()
+    {
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"items":[]}"""),
+        });
+
+        var result = await adapter.FetchRangeAsync(new(2024, 3, 1), new(2024, 3, 1), default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        result.Code.Should().Be("not_published_yet");
+    }
+
+    [Fact]
+    public async Task HistoricalMissingMonth_IsPartialRejected()
+    {
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"items":[]}"""),
+        });
+        (await adapter.FetchRangeAsync(new(2020, 1, 1), new(2020, 1, 1), default)).Kind
+            .Should().Be(AdapterOutcomeKind.PartialRejected);
+    }
+
+    [Fact]
+    public async Task MissingKeyAndMalformedJson_ArePermanent()
+    {
+        var (missingKey, handler) = Build(_ => throw new InvalidOperationException(), null);
+        (await missingKey.FetchRangeAsync(new(2020, 1, 1), new(2020, 1, 1), default)).Kind
+            .Should().Be(AdapterOutcomeKind.PermanentFailure);
+        handler.CallCount.Should().Be(0);
+
+        var (malformed, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{ broken"),
+        });
+        (await malformed.FetchRangeAsync(new(2020, 1, 1), new(2020, 1, 1), default)).Kind
+            .Should().Be(AdapterOutcomeKind.PermanentFailure);
+    }
+
+    [Fact]
+    public async Task OversizedTransportPayload_IsTypedRetryable()
+    {
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new string('x', ProviderTransportLimits.MaxResponseBytes + 1)),
+        });
+
+        var result = await adapter.FetchRangeAsync(new(2020, 1, 1), new(2020, 1, 1), default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        result.Code.Should().Be("transport_payload_too_large");
+    }
+
+    [Fact]
+    public async Task MapperContractAndWrongValueKind_AreTypedPermanent()
+    {
+        var (invalidValue, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"items":[{"Tarih":"2020-1","TP_FG_J0":"0"}]}"""),
+        });
+        var contract = await invalidValue.FetchRangeAsync(
+            new(2020, 1, 1), new(2020, 1, 1), default);
+        contract.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        contract.Code.Should().Be("contract_index_value_invalid");
+
+        var (wrongKind, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"items":[{"Tarih":"2020-1","TP_FG_J0":{"bad":true}}]}"""),
+        });
+        var kind = await wrongKind.FetchRangeAsync(
+            new(2020, 1, 1), new(2020, 1, 1), default);
+        kind.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        kind.Code.Should().Be("contract_value_kind_invalid");
+    }
+
+    private static (EvdsInflationAdapter, StubHttpMessageHandler) Build(
+        Func<HttpRequestMessage, HttpResponseMessage> responder, string? key = "test-key")
     {
         var handler = new StubHttpMessageHandler(responder);
-        var http    = new HttpClient(handler)
-        {
-            BaseAddress = new Uri("https://evds3.tcmb.gov.tr/"),
-        };
+        var client = new HttpClient(handler) { BaseAddress = new Uri("https://evds3.tcmb.gov.tr/") };
         var factory = Substitute.For<IHttpClientFactory>();
-        factory.CreateClient("evds").Returns(http);
-
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ExternalApis:Evds:ApiKey"] = apiKey,
-            })
-            .Build();
-
-        var adapter = new EvdsInflationAdapter(factory, config, NullLogger<EvdsInflationAdapter>.Instance);
-        return (adapter, handler);
-    }
-
-    [Fact]
-    public async Task FetchRange_SendsApiKeyAsHeader_NotInQuery()
-    {
-        var (adapter, handler) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(ValidPayload),
-        });
-
-        await adapter.FetchRangeAsync(From, To, default);
-
-        handler.CallCount.Should().Be(1);
-        var request = handler.Requests[0];
-        request.Headers.TryGetValues("key", out var values).Should().BeTrue();
-        values!.Should().ContainSingle().Which.Should().Be("test-key");
-        request.RequestUri!.Query.Should().NotContain("key=", "API key URL'de görünmemeli");
-    }
-
-    [Theory]
-    [InlineData(HttpStatusCode.InternalServerError)]
-    [InlineData(HttpStatusCode.BadGateway)]
-    [InlineData(HttpStatusCode.ServiceUnavailable)]
-    public async Task FetchRange_HttpServerError_ThrowsExternalApiException(HttpStatusCode statusCode)
-    {
-        // F1.1-7: 5xx artık return [] ile yutulmaz — worker ingestion_jobs failed
-        // kaydı atabilsin diye ExternalApiException sızdırılır.
-        var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(statusCode)
-        {
-            Content = new StringContent("server error"),
-        });
-
-        var act = () => adapter.FetchRangeAsync(From, To, default);
-
-        var ex = await act.Should().ThrowAsync<ExternalApiException>();
-        ex.Which.ApiSource.Should().Be("evds");
-    }
-
-    [Theory]
-    [InlineData(HttpStatusCode.Unauthorized)]
-    [InlineData(HttpStatusCode.Forbidden)]
-    public async Task FetchRange_AuthError_ThrowsExternalApiException(HttpStatusCode statusCode)
-    {
-        var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(statusCode));
-
-        var act = () => adapter.FetchRangeAsync(From, To, default);
-
-        var ex = await act.Should().ThrowAsync<ExternalApiException>();
-        ex.Which.ApiSource.Should().Be("evds");
-    }
-
-    [Fact]
-    public async Task FetchRange_429_ThrowsExternalApiException()
-    {
-        var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.TooManyRequests));
-
-        var act = () => adapter.FetchRangeAsync(From, To, default);
-
-        var ex = await act.Should().ThrowAsync<ExternalApiException>();
-        ex.Which.ApiSource.Should().Be("evds");
-    }
-
-    [Fact]
-    public async Task FetchRange_HttpRequestException_ThrowsExternalApiException()
-    {
-        var (adapter, _) = BuildAdapter(_ => throw new HttpRequestException("network down"));
-
-        var act = () => adapter.FetchRangeAsync(From, To, default);
-
-        var ex = await act.Should().ThrowAsync<ExternalApiException>();
-        ex.Which.ApiSource.Should().Be("evds");
-    }
-
-    [Fact]
-    public async Task FetchRange_MalformedJson_ThrowsExternalApiException()
-    {
-        // EVDS için bozuk JSON da silent değil — ExternalApiException ile yukarı fırlar
-        // (CoinGecko'dan farklı: EVDS sözleşmesi tam olmalı).
-        var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("{ not json"),
-        });
-
-        var act = () => adapter.FetchRangeAsync(From, To, default);
-
-        var ex = await act.Should().ThrowAsync<ExternalApiException>();
-        ex.Which.ApiSource.Should().Be("evds");
-    }
-
-    [Fact]
-    public async Task FetchRange_NoApiKey_SkipsAndReturnsEmpty()
-    {
-        var (adapter, handler) = BuildAdapter(
-            _ => new HttpResponseMessage(HttpStatusCode.OK),
-            apiKey: null);
-
-        var result = await adapter.FetchRangeAsync(From, To, default);
-
-        result.Should().BeEmpty();
-        handler.CallCount.Should().Be(0);
+        factory.CreateClient("evds").Returns(client);
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["ExternalApis:Evds:ApiKey"] = key }).Build();
+        return (new EvdsInflationAdapter(factory, config, Clock,
+            NullLogger<EvdsInflationAdapter>.Instance), handler);
     }
 }

@@ -1,88 +1,285 @@
 using System.Diagnostics;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Localization;
+using Microsoft.Extensions.Options;
 using Saydin.Api.Exceptions;
+using Saydin.Api.Middleware;
 using Saydin.Api.Services;
+using Saydin.Api.Repositories;
+using Saydin.Api.Security;
+using System.Security.Cryptography;
+using System.Net;
 
 namespace Saydin.Api.Endpoints;
 
-internal static partial class EndpointExtensions
+internal static class EndpointExtensions
 {
-    internal const string DeviceIdItemKey = "DeviceId";
+    internal const string PrincipalActivityIdItemKey = "InstallationPrincipalActivityId";
+    internal const string RegistrationCommittedItemKey = "InstallationRegistrationCommitted";
 
-    private const string DeviceIdHeader   = "X-Device-ID";
-    private const int    MaxDeviceIdLength = 128;
+    internal static RouteHandlerBuilder RequireInstallationCredential(
+        this RouteHandlerBuilder builder,
+        bool requireCalculationNetworkAdmission = false)
+    {
+        // Every secured route can terminate in these three filter-level outcomes;
+        // keep generated clients aligned with the runtime contract at the filter boundary.
+        builder.ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-    /// <summary>
-    /// F2.1-3 ([C-A-8]): ASCII-only sınıf — <see cref="char.IsLetterOrDigit"/>
-    /// Unicode harf ve rakamları da kabul eder (örn. <c>İ</c>, <c>ǅ</c>).
-    /// DeviceId Flutter SecureStorage UUID'leri için ASCII alphanumeric + ayraç
-    /// karakterleri (<c>-_.</c>) ile sınırlı.
-    /// </summary>
-    [GeneratedRegex(@"^[A-Za-z0-9._-]+$")]
-    private static partial Regex DeviceIdPattern();
-
-    /// <summary>
-    /// <c>RequireDeviceId()</c> filter'ı <see cref="DeviceIdItemKey"/> öğesini set ettiği için
-    /// burada normalde null dönmez. Filter atlanırsa InvalidOperationException → 500;
-    /// bu noktayı görünür kılmak için <see cref="GlobalExceptionHandler"/> tarafından
-    /// loglanır. (Tüm endpoint'lerde tekrarlanan boilerplate'i bu helper'a topladık.)
-    /// </summary>
-    internal static string GetRequiredDeviceId(this HttpContext context) =>
-        context.Items[DeviceIdItemKey] as string
-            ?? throw new InvalidOperationException(
-                "DeviceId, RequireDeviceId filter'ı atlanarak ulaşıldı.");
-
-    internal static RouteHandlerBuilder RequireDeviceId(this RouteHandlerBuilder builder)
-        => builder.AddEndpointFilter(async (ctx, next) =>
+        return builder.AddEndpointFilter(async (ctx, next) =>
         {
-            var localizer = ctx.HttpContext.RequestServices
-                .GetRequiredService<IStringLocalizer<ErrorMessages>>();
+            var http = ctx.HttpContext;
+            var keyring = http.RequestServices.GetRequiredService<IInstallationCredentialKeyring>();
+            var repository = http.RequestServices.GetRequiredService<IInstallationRepository>();
 
-            var headerValues = ctx.HttpContext.Request.Headers[DeviceIdHeader];
+            if (!TryReadInstallationToken(http.Request, keyring, out var secret))
+                return InvalidInstallationCredential(http);
 
-            if (headerValues.Count != 1 || string.IsNullOrWhiteSpace(headerValues[0]))
+            IReadOnlyList<CredentialHashCandidate>? candidates = null;
+            InstallationPrincipal? principal = null;
+            try
             {
-                return Results.Problem(
-                    title: localizer["DeviceIdRequired"],
-                    detail: localizer["DeviceIdRequiredDetail"],
-                    statusCode: StatusCodes.Status400BadRequest,
-                    type: "https://saydin.app/errors/missing-device-id",
-                    // EC-FU: 9 handler deseniyle birebir — her hata yanıtı log korelasyonu için
-                    // traceId taşımalı (api-contract.md "tüm yanıtlar traceId taşır" sözleşmesi).
-                    extensions: new Dictionary<string, object?>
-                    {
-                        ["traceId"] = Activity.Current?.TraceId.ToString() ?? ctx.HttpContext.TraceIdentifier,
-                        ["code"]    = ApiErrorCodes.MissingDeviceId,
-                    });
+                candidates = keyring.HashAccepted(secret);
+                principal = await repository.ResolveAsync(
+                    candidates, keyring.ActiveKeyVersion, http.RequestAborted);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(secret);
+                ZeroCandidateHashes(candidates);
             }
 
-            var deviceId = headerValues[0]!.Trim();
+            // No decoded credential or verifier remains live while application code runs.
+            if (principal is null)
+                return InvalidInstallationCredential(http);
 
-            if (deviceId.Length > MaxDeviceIdLength || !DeviceIdPattern().IsMatch(deviceId))
+            http.RequestServices.GetRequiredService<InstallationPrincipalContext>()
+                .Set(principal);
+            http.Items[PrincipalActivityIdItemKey] = http.RequestServices
+                .GetRequiredService<IActivityPrincipalPseudonymizer>()
+                .Pseudonymize(principal.PrincipalId);
+
+            if (!LimiterEnabled(http))
+                return await next(ctx);
+
+            var limiter = http.RequestServices.GetRequiredService<IDistributedSecurityLimiter>();
+            IPAddress? calculationAddress = null;
+            if (requireCalculationNetworkAdmission)
             {
-                return Results.Problem(
-                    title: localizer["DeviceIdInvalid"],
-                    detail: string.Format(localizer["DeviceIdInvalidDetail"], MaxDeviceIdLength),
-                    statusCode: StatusCodes.Status400BadRequest,
-                    type: "https://saydin.app/errors/invalid-device-id",
-                    extensions: new Dictionary<string, object?>
-                    {
-                        ["traceId"] = Activity.Current?.TraceId.ToString() ?? ctx.HttpContext.TraceIdentifier,
-                        ["code"]    = ApiErrorCodes.InvalidDeviceId,
-                    });
+                if (!DistributedSecurityLimiterMiddleware.TryGetTrustedClientAddress(
+                        http, out calculationAddress))
+                    return UntrustedAddressProblem(http, SecurityAdmissionTelemetry.CalculationNetworkBucket,
+                        "CalculationNetworkAdmission");
             }
 
-            ctx.HttpContext.Items[DeviceIdItemKey] = deviceId;
+            var principalAdmission = await limiter
+                .TryAcquirePrincipalAsync(principal.PrincipalId, http.RequestAborted);
+            var principalProblem = AdmissionProblem(
+                http, principalAdmission, SecurityAdmissionTelemetry.PrincipalBucket,
+                "InstallationPrincipalAdmission");
+            if (principalProblem is not null)
+                return principalProblem;
 
-            // F2.2-3: doğrulanmış device id'yi scoped IDeviceContext'e de yaz — iş
-            // service'leri (WhatIf/Dca/SavedScenario/AppConfig) artık `deviceId` parametresi
-            // yerine bu context'ten okur. Items[] ise GetRequiredDeviceId() (AssetsEndpoints,
-            // ActivityLog) için korunur.
-            ctx.HttpContext.RequestServices
-                .GetRequiredService<DeviceContext>()
-                .SetDeviceId(deviceId);
+            if (calculationAddress is not null)
+            {
+                var calculationAdmission = await limiter.TryAcquireCalculationNetworkAsync(
+                    calculationAddress, http.RequestAborted);
+                var calculationProblem = AdmissionProblem(
+                    http, calculationAdmission, SecurityAdmissionTelemetry.CalculationNetworkBucket,
+                    "CalculationNetworkAdmission");
+                if (calculationProblem is not null)
+                    return calculationProblem;
+            }
 
             return await next(ctx);
         });
+    }
+
+    internal static RouteHandlerBuilder RequireRegistrationAdmission(
+        this RouteHandlerBuilder builder)
+    {
+        builder.ProducesProblem(StatusCodes.Status429TooManyRequests)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+        return builder.AddEndpointFilter(async (ctx, next) =>
+        {
+            var http = ctx.HttpContext;
+            if (!LimiterEnabled(http))
+                return await next(ctx);
+            if (!DistributedSecurityLimiterMiddleware.TryGetTrustedClientAddress(
+                    http, out var clientAddress))
+                return UntrustedAddressProblem(http, SecurityAdmissionTelemetry.RegistrationBucket,
+                    "InstallationRegistrationAdmission");
+
+            var limiter = http.RequestServices.GetRequiredService<IDistributedSecurityLimiter>();
+            var decision = await limiter.TryAcquireRegistrationAsync(
+                clientAddress, http.RequestAborted);
+            var problem = AdmissionProblem(
+                http, decision, SecurityAdmissionTelemetry.RegistrationBucket,
+                "InstallationRegistrationAdmission");
+            if (problem is not null) return problem;
+            try
+            {
+                return await next(ctx);
+            }
+            catch
+            {
+                if (!http.Items.ContainsKey(RegistrationCommittedItemKey))
+                    await limiter.ReleaseRegistrationAsync(clientAddress);
+                throw;
+            }
+        });
+    }
+
+    internal static RouteHandlerBuilder RequirePendingInstallationCredential(
+        this RouteHandlerBuilder builder)
+    {
+        builder.ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+        return builder.AddEndpointFilter(async (ctx, next) =>
+        {
+            var http = ctx.HttpContext;
+            var request = ctx.Arguments.OfType<Models.Requests.InstallationRotationCommitRequest>()
+                .SingleOrDefault();
+            var keyring = http.RequestServices.GetRequiredService<IInstallationCredentialKeyring>();
+            if (request is null || request.RotationId == Guid.Empty
+                || !TryReadInstallationToken(http.Request, keyring, out var secret))
+                return InvalidInstallationCredential(http);
+
+            IReadOnlyList<CredentialHashCandidate>? candidates = null;
+            InstallationPrincipal? principal = null;
+            try
+            {
+                candidates = keyring.HashAccepted(secret);
+                principal = await http.RequestServices.GetRequiredService<IInstallationRepository>()
+                    .ResolvePendingRotationAsync(request.RotationId, candidates, http.RequestAborted);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(secret);
+                ZeroCandidateHashes(candidates);
+            }
+
+            if (principal is null)
+                return InvalidInstallationCredential(http);
+
+            http.RequestServices.GetRequiredService<InstallationPrincipalContext>().Set(principal);
+            http.Items[PrincipalActivityIdItemKey] = http.RequestServices
+                .GetRequiredService<IActivityPrincipalPseudonymizer>()
+                .Pseudonymize(principal.PrincipalId);
+
+            if (!LimiterEnabled(http))
+                return await next(ctx);
+            var decision = await http.RequestServices
+                .GetRequiredService<IDistributedSecurityLimiter>()
+                .TryAcquirePrincipalAsync(principal.PrincipalId, http.RequestAborted);
+            var problem = AdmissionProblem(
+                http, decision, SecurityAdmissionTelemetry.PrincipalBucket,
+                "InstallationPendingCommitAdmission");
+            return problem ?? await next(ctx);
+        });
+    }
+
+    internal static bool TryReadInstallationToken(
+        HttpRequest request,
+        IInstallationCredentialKeyring keyring,
+        out byte[] secret)
+    {
+        secret = [];
+        var values = request.Headers.Authorization;
+        if (values.Count != 1)
+            return false;
+
+        var value = values[0];
+        const string prefix = "Installation ";
+        if (value is null
+            || value.Length != prefix.Length + InstallationCredentialKeyring.CredentialTextLength
+            || !value.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return keyring.TryDecode(value[prefix.Length..], out secret);
+    }
+
+    internal static IResult InvalidInstallationCredential(HttpContext http)
+    {
+        http.Response.Headers.WWWAuthenticate = "Installation";
+        var localizer = http.RequestServices.GetRequiredService<IStringLocalizer<ErrorMessages>>();
+        return Results.Problem(
+            title: localizer["InstallationCredentialInvalid"],
+            detail: localizer["InstallationCredentialInvalidDetail"],
+            statusCode: StatusCodes.Status401Unauthorized,
+            type: "https://saydin.app/errors/invalid-installation-credential",
+            extensions: new Dictionary<string, object?>
+            {
+                ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier,
+                ["code"] = ApiErrorCodes.InvalidInstallationCredential,
+            });
+    }
+
+    internal static void ZeroCandidateHashes(IReadOnlyList<CredentialHashCandidate>? candidates)
+    {
+        if (candidates is null)
+            return;
+
+        foreach (var candidate in candidates)
+            CryptographicOperations.ZeroMemory(candidate.SecretHash);
+    }
+
+    private static bool LimiterEnabled(HttpContext http) =>
+        http.RequestServices.GetService<IOptions<DistributedSecurityLimiterOptions>>()
+            ?.Value.Enabled ?? true;
+
+    private static IResult? AdmissionProblem(
+        HttpContext http,
+        SecurityLimiterDecision decision,
+        string bucket,
+        string loggerName)
+    {
+        SecurityAdmissionTelemetry.Record(bucket, decision);
+        if (decision.Outcome == SecurityLimiterOutcome.Allowed)
+            return null;
+
+        http.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger(loggerName)
+            .LogWarning("Security admission rejected: {Code} {Reason}",
+                decision.Outcome == SecurityLimiterOutcome.Limited
+                    ? "security_rate_limit_exceeded"
+                    : "security_limiter_unavailable",
+                StableReason(decision.Reason));
+        return SecurityAdmissionProblem.Result(
+            http,
+            http.RequestServices.GetRequiredService<IStringLocalizer<ErrorMessages>>(),
+            decision);
+    }
+
+    private static IResult UntrustedAddressProblem(
+        HttpContext http,
+        string bucket,
+        string loggerName)
+    {
+        SecurityAdmissionTelemetry.Record(
+            bucket, "unavailable", SecurityAdmissionTelemetry.ClientAddressUntrustedReason);
+        http.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger(loggerName)
+            .LogWarning("Security admission rejected: {Code}",
+                "security_client_address_untrusted");
+        return SecurityAdmissionProblem.Result(
+            http,
+            http.RequestServices.GetRequiredService<IStringLocalizer<ErrorMessages>>(),
+            SecurityLimiterDecision.UnavailableFor(SecurityLimiterReason.InvalidSubject));
+    }
+
+    private static string StableReason(SecurityLimiterReason reason) => reason switch
+    {
+        SecurityLimiterReason.Allowed => "allowed",
+        SecurityLimiterReason.LimitExceeded => "limit_exceeded",
+        SecurityLimiterReason.InvalidSubject => "invalid_subject",
+        SecurityLimiterReason.RedisFailure => "redis_failure",
+        SecurityLimiterReason.MalformedReply => "malformed_reply",
+        _ => "unexpected",
+    };
 }

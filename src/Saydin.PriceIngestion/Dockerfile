@@ -1,15 +1,17 @@
 # CFGR-003 follow-up + Sonar S6596: SHA digest pin (digest tek başına; tag yok).
 # tag: 10.0 (mcr.microsoft.com/dotnet/sdk)
-FROM mcr.microsoft.com/dotnet/sdk@sha256:69ff714a42f7931475acfcd2792d69cd4a656e4f3653d520e25c0fbe3c6d0cba AS build
+FROM mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c AS build
 WORKDIR /app
 
 # Directory.Packages.props: Central Package Management — csproj'lar Version belirtmiyor,
 # tüm versiyonlar bu dosyadan gelir. COPY zincirinden düşerse `dotnet restore` NU1015 verir.
 COPY Directory.Build.props Directory.Packages.props ./
+COPY src/Saydin.DatabaseSecurity/Saydin.DatabaseSecurity.csproj src/Saydin.DatabaseSecurity/
 COPY src/Saydin.Shared/Saydin.Shared.csproj src/Saydin.Shared/
 COPY src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj src/Saydin.PriceIngestion/
 RUN dotnet restore src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj
 
+COPY src/Saydin.DatabaseSecurity/ src/Saydin.DatabaseSecurity/
 COPY src/Saydin.Shared/ src/Saydin.Shared/
 COPY src/Saydin.PriceIngestion/ src/Saydin.PriceIngestion/
 RUN dotnet publish src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj \
@@ -17,7 +19,7 @@ RUN dotnet publish src/Saydin.PriceIngestion/Saydin.PriceIngestion.csproj \
     -o /app/publish
 
 # tag: 10.0 (mcr.microsoft.com/dotnet/runtime)
-FROM mcr.microsoft.com/dotnet/runtime@sha256:01ce5748bb1d7d3f356524c1c1514b8c3f2a251e2b40e7d2c63f2dd4847bf1c4 AS runtime
+FROM mcr.microsoft.com/dotnet/runtime@sha256:a365ce6a50b09176855d085c69da3fc1204a48432e36087e9a208f6e5860e235 AS runtime
 WORKDIR /app
 
 RUN apt-get update \

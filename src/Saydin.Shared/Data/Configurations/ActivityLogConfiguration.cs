@@ -9,11 +9,14 @@ public sealed class ActivityLogConfiguration : IEntityTypeConfiguration<Activity
 {
     public void Configure(EntityTypeBuilder<ActivityLog> builder)
     {
-        // F2.5-6 / F2.7-10 ([C-E-15], [C-G-008-4]): activity_logs.action CHECK constraint
-        // kod tarafında modellenir. ActivityActions.All ile birebir aynı kalmalı.
-        builder.ToTable("activity_logs", t => t.HasCheckConstraint(
-            "chk_activity_action",
-            $"action IN ({string.Join(", ", ActivityActions.All.Select(v => $"'{v}'"))})"));
+        // The action allowlist is enforced by the scheduler-owned invoker trigger
+        // introduced in migration 023. EF must not resurrect its dropped CHECK.
+        builder.ToTable("activity_logs", table =>
+        {
+            table.HasCheckConstraint(
+                "chk_activity_data_size",
+                "data IS NULL OR pg_column_size(data) <= 10000");
+        });
         builder.HasKey(a => new { a.Id, a.CreatedAt });
 
         // LOGR-007: ActivityLogLimits constants tek source-of-truth. Sabitler değişirse
@@ -36,7 +39,7 @@ public sealed class ActivityLogConfiguration : IEntityTypeConfiguration<Activity
             .WithMany()
             .HasForeignKey(a => a.UserId)
             .IsRequired(false)
-            .OnDelete(DeleteBehavior.SetNull);
+            .OnDelete(DeleteBehavior.Restrict);
 
         builder.HasIndex(a => new { a.UserId, a.CreatedAt })
             .HasDatabaseName("idx_activity_logs_user")

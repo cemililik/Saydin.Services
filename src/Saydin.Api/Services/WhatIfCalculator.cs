@@ -18,7 +18,7 @@ public sealed class WhatIfCalculator(
     ISavedScenarioRepository scenarioRepository,
     IInflationRepository inflationRepository,
     IDailyLimitGuard dailyLimitGuard,
-    IDeviceContext deviceContext,
+    IInstallationPrincipalContext principalContext,
     TimeProvider timeProvider,
     IRedisCacheHelper cache,
     IAssetNameLocalizer assetNameLocalizer,
@@ -34,16 +34,23 @@ public sealed class WhatIfCalculator(
     // adlandırmak gerekirse tek yer güncellenir.
     private const string FeatureDisabledKey = "FeatureDisabled";
 
-    public async Task<WhatIfResponse> CalculateAsync(WhatIfRequest request, CancellationToken ct)
+    public Task<WhatIfResponse> CalculateAsync(WhatIfRequest request, CancellationToken ct) =>
+        CalculationTelemetry.ObserveWhatIfAsync(
+            "calculate", () => CalculateObservedAsync(request, ct));
+
+    private async Task<WhatIfResponse> CalculateObservedAsync(
+        WhatIfRequest request,
+        CancellationToken ct)
     {
         EnsureRequest(request);
-        var deviceId = deviceContext.DeviceId;
+        var usageIdentity = principalContext.PrincipalId.ToString("N");
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsurePositive(request.Amount, nameof(request.Amount));
+        EnsureNotFuture(request.SellDate, nameof(request.SellDate));
 
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        var features = options.Value.GetTierOptions(user?.Tier).Features;
+        var user = await GetAuthenticatedUserAsync(ct);
+        var features = options.Value.GetTierOptions(user.Tier).Features;
 
         // F2.2-21 ([G-B-01]): Free plan kullanıcılarına `PriceHistoryMonths` sınırı
         // dayatılır — BuyDate bu pencerenin gerisindeyse 400 döner. 0 = sınırsız.
@@ -53,7 +60,8 @@ public sealed class WhatIfCalculator(
             throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "inflation");
 
         // Önce atomik reserve — TOCTOU race kapatıldı. Pahalı hesap öncesi limit dayatılır.
-        await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
+        var lease = await dailyLimitGuard.TryAcquireAsync(
+            user, usageIdentity, WhatIfUsageKeyPrefix, ct: ct);
         try
         {
             return await CalculateCoreAsync(request, ct);
@@ -62,15 +70,21 @@ public sealed class WhatIfCalculator(
         {
             // Hesap başarısız → kotayı iade et ("başarısız hesap kotadan düşmesin").
             // Release fırlatırsa orijinal exception'ı maskelemesin: best-effort + log.
-            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
+            await TryReleaseAsync(lease, WhatIfUsageKeyPrefix);
             throw;
         }
     }
 
-    public async Task<CompareResponse> CompareAsync(CompareRequest request, CancellationToken ct)
+    public Task<CompareResponse> CompareAsync(CompareRequest request, CancellationToken ct) =>
+        CalculationTelemetry.ObserveWhatIfAsync(
+            "compare", () => CompareObservedAsync(request, ct));
+
+    private async Task<CompareResponse> CompareObservedAsync(
+        CompareRequest request,
+        CancellationToken ct)
     {
         EnsureRequest(request);
-        var deviceId = deviceContext.DeviceId;
+        var usageIdentity = principalContext.PrincipalId.ToString("N");
 
         if (request.AssetSymbols is null)
             throw new ValidationException(
@@ -78,8 +92,9 @@ public sealed class WhatIfCalculator(
                 field: nameof(request.AssetSymbols));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsurePositive(request.Amount, nameof(request.Amount));
+        EnsureNotFuture(request.SellDate, nameof(request.SellDate));
 
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
+        var user = await GetAuthenticatedUserAsync(ct);
 
         var features = options.Value.GetTierOptions(user?.Tier).Features;
         if (!features.Comparison)
@@ -105,7 +120,8 @@ public sealed class WhatIfCalculator(
         // F2.2-21: Compare için de history sınırı uygulanır.
         EnsureWithinHistoryWindow(request.BuyDate, features.PriceHistoryMonths);
 
-        await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
+        var lease = await dailyLimitGuard.TryAcquireAsync(
+            user, usageIdentity, WhatIfUsageKeyPrefix, ct: ct);
 
         try
         {
@@ -143,22 +159,29 @@ public sealed class WhatIfCalculator(
         }
         catch
         {
-            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
+            await TryReleaseAsync(lease, WhatIfUsageKeyPrefix);
             throw;
         }
     }
 
-    public async Task<ReverseWhatIfResponse> CalculateReverseAsync(
-        ReverseWhatIfRequest request, CancellationToken ct)
+    public Task<ReverseWhatIfResponse> CalculateReverseAsync(
+        ReverseWhatIfRequest request, CancellationToken ct) =>
+        CalculationTelemetry.ObserveWhatIfAsync(
+            "reverse", () => CalculateReverseObservedAsync(request, ct));
+
+    private async Task<ReverseWhatIfResponse> CalculateReverseObservedAsync(
+        ReverseWhatIfRequest request,
+        CancellationToken ct)
     {
         EnsureRequest(request);
-        var deviceId = deviceContext.DeviceId;
+        var usageIdentity = principalContext.PrincipalId.ToString("N");
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.TargetAmountType, nameof(request.TargetAmountType));
         EnsurePositive(request.TargetAmount, nameof(request.TargetAmount));
+        EnsureNotFuture(request.SellDate, nameof(request.SellDate));
 
-        var user = await scenarioRepository.GetUserByDeviceIdAsync(deviceId, ct);
-        var features = options.Value.GetTierOptions(user?.Tier).Features;
+        var user = await GetAuthenticatedUserAsync(ct);
+        var features = options.Value.GetTierOptions(user.Tier).Features;
 
         // F2.2-21: Reverse What-If için de history sınırı uygulanır.
         EnsureWithinHistoryWindow(request.BuyDate, features.PriceHistoryMonths);
@@ -166,23 +189,24 @@ public sealed class WhatIfCalculator(
         if (request.IncludeInflation && !features.InflationAdjustment)
             throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "inflation");
 
-        await dailyLimitGuard.TryAcquireAsync(user, deviceId, WhatIfUsageKeyPrefix, ct: ct);
+        var lease = await dailyLimitGuard.TryAcquireAsync(
+            user, usageIdentity, WhatIfUsageKeyPrefix, ct: ct);
         try
         {
             return await CalculateReverseCoreAsync(request, ct);
         }
         catch
         {
-            await TryReleaseAsync(user, deviceId, WhatIfUsageKeyPrefix);
+            await TryReleaseAsync(lease, WhatIfUsageKeyPrefix);
             throw;
         }
     }
 
-    private async Task TryReleaseAsync(User? user, string deviceId, string usageKeyPrefix)
+    private async Task TryReleaseAsync(QuotaLease lease, string usageKeyPrefix)
     {
         try
         {
-            await dailyLimitGuard.ReleaseAsync(user, deviceId, usageKeyPrefix, ct: CancellationToken.None);
+            await dailyLimitGuard.ReleaseAsync(lease, CancellationToken.None);
         }
         catch (Exception releaseEx)
         {
@@ -191,12 +215,17 @@ public sealed class WhatIfCalculator(
         }
     }
 
+    private async Task<User> GetAuthenticatedUserAsync(CancellationToken ct)
+        => await scenarioRepository.GetUserByIdAsync(principalContext.PrincipalId, ct)
+           ?? throw new InvalidOperationException("Authenticated installation principal is missing.");
+
     private async Task<ReverseWhatIfResponse> CalculateReverseCoreAsync(
         ReverseWhatIfRequest request, CancellationToken ct)
     {
         var symbol           = request.AssetSymbol.ToUpperInvariant();
         var sellDate         = request.SellDate
             ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
+        EnsureNotFuture(sellDate, nameof(request.SellDate));
         var targetAmountType = request.TargetAmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
@@ -205,14 +234,27 @@ public sealed class WhatIfCalculator(
         var inflationSuffix = request.IncludeInflation ? ":inf" : "";
         var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         var amountStr = request.TargetAmount.ToString("G", CultureInfo.InvariantCulture);
-        var cacheKey = $"whatif:reverse:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{targetAmountType}{inflationSuffix}:{lang}";
+        var catalog = await assetService.GetCatalogVersionAsync(ct);
+        var cacheKey = AuthorityCacheNamespace.Key(
+            $"catalog:{catalog.Token}:whatif:reverse:v2:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{targetAmountType}{inflationSuffix}:{lang}");
 
-        var cached = await cache.TryGetAsync<ReverseWhatIfResponse>(cacheKey, ct);
+        var cached = await cache.TryGetAsync<ReverseWhatIfCacheEntry>(cacheKey, ct);
+        if (cached is not null && cached.IsValid(
+                symbol, request.BuyDate, sellDate, request.TargetAmount,
+                targetAmountType, request.IncludeInflation, lang, catalog))
+            return cached.Response!;
         if (cached is not null)
-            return cached;
+            await cache.TryDeleteAsync(cacheKey, ct);
 
         var buyPricePoint  = await assetService.GetNearestPriceAsync(symbol, request.BuyDate, ct);
         var sellPricePoint = await assetService.GetNearestPriceAsync(symbol, sellDate, ct);
+        var priceAuthorities = new List<ObservationAuthorityValue>
+        {
+            FinalObservationAuthority.ToValue(buyPricePoint),
+            FinalObservationAuthority.ToValue(sellPricePoint),
+        };
+        var inflationAuthorities = new List<ObservationAuthorityValue>();
+        var dataWarnings = new List<string>();
 
         var actualBuyDate  = buyPricePoint.PriceDate  != request.BuyDate ? buyPricePoint.PriceDate  : (DateOnly?)null;
         var actualSellDate = sellPricePoint.PriceDate != sellDate         ? sellPricePoint.PriceDate : (DateOnly?)null;
@@ -272,13 +314,15 @@ public sealed class WhatIfCalculator(
         try
         {
             var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, PriceIntervals.Daily, ct);
+            priceAuthorities.AddRange(range.Select(FinalObservationAuthority.ToValue));
             priceHistory = ChartSampler.Downsample(
                 range, p => new PriceHistoryPoint(p.PriceDate, p.Close), MaxPriceHistoryPoints);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (OptionalDataFailure.IsExpected(ex))
         {
             logger.LogWarning(ex, "Fiyat geçmişi alınamadı: {Symbol}", symbol);
             priceHistory = Array.Empty<PriceHistoryPoint>();
+            dataWarnings.Add(AuthorityDataWarnings.PriceHistoryUnavailable);
         }
 
         // ── Enflasyon düzeltmesi ────────────────────────────────────────────
@@ -290,13 +334,17 @@ public sealed class WhatIfCalculator(
         {
             try
             {
-                var (buyIdx, _, sellIdx, sellIdxDate) =
+                var (buyObservation, sellObservation) =
                     await inflationRepository.GetIndexValuesAsync(request.BuyDate, sellDate, ct);
 
-                if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
+                if (buyObservation is not null && sellObservation is not null
+                    && buyObservation.IndexValue != 0)
                 {
+                    inflationAuthorities.Add(buyObservation.Authority);
+                    inflationAuthorities.Add(sellObservation.Authority);
                     cumulativeInflationPercent = Math.Round(
-                        (sellIdx.Value / buyIdx.Value - 1m) * 100, 2, MidpointRounding.AwayFromZero);
+                        (sellObservation.IndexValue / buyObservation.IndexValue - 1m) * 100,
+                        2, MidpointRounding.AwayFromZero);
 
                     var nominalFactor   = 1m + profitLossPercent / 100m;
                     var inflationFactor = 1m + cumulativeInflationPercent.Value / 100m;
@@ -304,18 +352,20 @@ public sealed class WhatIfCalculator(
                         (nominalFactor / inflationFactor - 1m) * 100, 2, MidpointRounding.AwayFromZero);
 
                     var expectedSellMonth = new DateOnly(sellDate.Year, sellDate.Month, 1);
-                    if (sellIdxDate.HasValue && sellIdxDate.Value < expectedSellMonth)
-                        inflationDataAsOf = sellIdxDate;
+                    if (sellObservation.PeriodDate < expectedSellMonth)
+                        inflationDataAsOf = sellObservation.PeriodDate;
                 }
                 else
                 {
                     logger.LogWarning(
                         "Enflasyon endeksi bulunamadı: {BuyDate} / {SellDate}", request.BuyDate, sellDate);
+                    dataWarnings.Add(AuthorityDataWarnings.InflationIncomplete);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (OptionalDataFailure.IsExpected(ex))
             {
                 logger.LogWarning(ex, "Enflasyon hesabı başarısız, nominal getiri kullanılıyor");
+                dataWarnings.Add(AuthorityDataWarnings.InflationUnavailable);
             }
         }
 
@@ -337,15 +387,23 @@ public sealed class WhatIfCalculator(
             RealProfitLossPercent:      realProfitLossPercent,
             InflationDataAsOf:          inflationDataAsOf,
             ActualBuyDate:              actualBuyDate,
-            ActualSellDate:             actualSellDate
+            ActualSellDate:             actualSellDate,
+            Data: AuthorityDataResponseFactory.Calculation(
+                priceAuthorities, inflationAuthorities, request.IncludeInflation, dataWarnings)
         );
 
-        await cache.TrySetAsync(cacheKey, response, TimeSpan.FromHours(1), ct);
+        if (dataWarnings.Count == 0)
+            await cache.TrySetAsync(
+                cacheKey,
+                ReverseWhatIfCacheEntry.Create(
+                    symbol, request.BuyDate, sellDate, request.TargetAmount,
+                    targetAmountType, request.IncludeInflation, lang, response, catalog),
+                TimeSpan.FromHours(1), ct);
 
         logger.LogInformation(
-            "Reverse WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} hedef:{TargetAmountType}:{TargetAmount} → gereken: ₺{RequiredInvestment} %{ProfitLossPercent}",
-            symbol, request.BuyDate, sellDate, targetAmountType, request.TargetAmount,
-            requiredInvestmentTry, profitLossPercent);
+            "Reverse WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} hedef:{TargetAmountType}:{TargetAmountBucket} → {Outcome}",
+            symbol, request.BuyDate, sellDate, targetAmountType,
+            AmountBucket.Coarse(request.TargetAmount), TelemetryOutcome.From(profitLossTry));
 
         return response;
     }
@@ -355,6 +413,7 @@ public sealed class WhatIfCalculator(
         var symbol     = request.AssetSymbol.ToUpperInvariant();
         var sellDate   = request.SellDate
             ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
+        EnsureNotFuture(sellDate, nameof(request.SellDate));
         var amountType = request.AmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
@@ -364,16 +423,29 @@ public sealed class WhatIfCalculator(
         var lang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         // Decimal formatlamasını kültür-bağımsız tutuyoruz (tr-TR'de virgül üretmesin → cache key fragmentation).
         var amountStr = request.Amount.ToString("G", CultureInfo.InvariantCulture);
-        var cacheKey = $"whatif:v3:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{amountType}{inflationSuffix}:{lang}";
+        var catalog = await assetService.GetCatalogVersionAsync(ct);
+        var cacheKey = AuthorityCacheNamespace.Key(
+            $"catalog:{catalog.Token}:whatif:v4:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{amountType}{inflationSuffix}:{lang}");
 
-        var cached = await cache.TryGetAsync<WhatIfResponse>(cacheKey, ct);
+        var cached = await cache.TryGetAsync<WhatIfCacheEntry>(cacheKey, ct);
+        if (cached is not null && cached.IsValid(
+                symbol, request.BuyDate, sellDate, request.Amount,
+                amountType, request.IncludeInflation, lang, catalog))
+            return cached.Response!;
         if (cached is not null)
-            return cached;
+            await cache.TryDeleteAsync(cacheKey, ct);
 
         // Fiyatlar AssetService üzerinden gelir — Redis cache'li
         // Haftasonu/tatil durumunda en yakın işlem günü kullanılır (±7 gün)
         var buyPricePoint  = await assetService.GetNearestPriceAsync(symbol, request.BuyDate, ct);
         var sellPricePoint = await assetService.GetNearestPriceAsync(symbol, sellDate, ct);
+        var priceAuthorities = new List<ObservationAuthorityValue>
+        {
+            FinalObservationAuthority.ToValue(buyPricePoint),
+            FinalObservationAuthority.ToValue(sellPricePoint),
+        };
+        var inflationAuthorities = new List<ObservationAuthorityValue>();
+        var dataWarnings = new List<string>();
 
         // Kullanıcının seçtiği tarih ile fiilen kullanılan tarih farklıysa bildir
         var actualBuyDate  = buyPricePoint.PriceDate  != request.BuyDate ? buyPricePoint.PriceDate  : (DateOnly?)null;
@@ -394,16 +466,19 @@ public sealed class WhatIfCalculator(
 
         decimal initialValueTry;
         decimal unitsAcquired;
+        decimal calculationUnits;
 
         switch (amountType)
         {
             case QuantityUnits.Try:
-                initialValueTry = request.Amount;
-                unitsAcquired   = Math.Round(request.Amount / buyPrice, 6, MidpointRounding.AwayFromZero);
+                calculationUnits = request.Amount / buyPrice;
+                unitsAcquired   = Math.Round(calculationUnits, 6, MidpointRounding.AwayFromZero);
+                initialValueTry = Math.Round(request.Amount, 2, MidpointRounding.AwayFromZero);
                 break;
             case QuantityUnits.Units:
             case QuantityUnits.Grams:
-                unitsAcquired   = request.Amount;
+                calculationUnits = request.Amount;
+                unitsAcquired   = calculationUnits;
                 initialValueTry = Math.Round(request.Amount * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
             default:
@@ -412,7 +487,7 @@ public sealed class WhatIfCalculator(
                     field: nameof(request.AmountType));
         }
 
-        var finalValueTry     = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
+        var finalValueTry     = Math.Round(calculationUnits * sellPrice, 2, MidpointRounding.AwayFromZero);
         var profitLossTry     = finalValueTry - initialValueTry;
         var profitLossPercent = initialValueTry == 0
             ? 0m
@@ -422,13 +497,15 @@ public sealed class WhatIfCalculator(
         try
         {
             var range = await assetService.GetPriceRangeAsync(symbol, request.BuyDate, sellDate, PriceIntervals.Daily, ct);
+            priceAuthorities.AddRange(range.Select(FinalObservationAuthority.ToValue));
             priceHistory = ChartSampler.Downsample(
                 range, p => new PriceHistoryPoint(p.PriceDate, p.Close), MaxPriceHistoryPoints);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (OptionalDataFailure.IsExpected(ex))
         {
             logger.LogWarning(ex, "Fiyat geçmişi alınamadı: {Symbol}", symbol);
             priceHistory = Array.Empty<PriceHistoryPoint>();
+            dataWarnings.Add(AuthorityDataWarnings.PriceHistoryUnavailable);
         }
 
         // ── Enflasyon düzeltmesi ────────────────────────────────────────────
@@ -440,14 +517,18 @@ public sealed class WhatIfCalculator(
         {
             try
             {
-                var (buyIdx, _, sellIdx, sellIdxDate) =
+                var (buyObservation, sellObservation) =
                     await inflationRepository.GetIndexValuesAsync(request.BuyDate, sellDate, ct);
 
-                if (buyIdx is not null && sellIdx is not null && buyIdx != 0)
+                if (buyObservation is not null && sellObservation is not null
+                    && buyObservation.IndexValue != 0)
                 {
+                    inflationAuthorities.Add(buyObservation.Authority);
+                    inflationAuthorities.Add(sellObservation.Authority);
                     // Birikimli enflasyon: (satış_endeksi / alış_endeksi) - 1
                     cumulativeInflationPercent = Math.Round(
-                        (sellIdx.Value / buyIdx.Value - 1m) * 100, 2, MidpointRounding.AwayFromZero);
+                        (sellObservation.IndexValue / buyObservation.IndexValue - 1m) * 100,
+                        2, MidpointRounding.AwayFromZero);
 
                     // Fisher denklemi: reel_getiri = (1 + nominal) / (1 + enflasyon) - 1
                     var nominalFactor   = 1m + profitLossPercent / 100m;
@@ -457,18 +538,20 @@ public sealed class WhatIfCalculator(
 
                     // Satış ayının tam verisi yoksa (TÜİK gecikmesi) gerçek tarih bildirilir
                     var expectedSellMonth = new DateOnly(sellDate.Year, sellDate.Month, 1);
-                    if (sellIdxDate.HasValue && sellIdxDate.Value < expectedSellMonth)
-                        inflationDataAsOf = sellIdxDate;
+                    if (sellObservation.PeriodDate < expectedSellMonth)
+                        inflationDataAsOf = sellObservation.PeriodDate;
                 }
                 else
                 {
                     logger.LogWarning(
                         "Enflasyon endeksi bulunamadı: {BuyDate} / {SellDate}", request.BuyDate, sellDate);
+                    dataWarnings.Add(AuthorityDataWarnings.InflationIncomplete);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (OptionalDataFailure.IsExpected(ex))
             {
                 logger.LogWarning(ex, "Enflasyon hesabı başarısız, nominal getiri kullanılıyor");
+                dataWarnings.Add(AuthorityDataWarnings.InflationUnavailable);
             }
         }
 
@@ -490,16 +573,24 @@ public sealed class WhatIfCalculator(
             RealProfitLossPercent:      realProfitLossPercent,
             InflationDataAsOf:          inflationDataAsOf,
             ActualBuyDate:              actualBuyDate,
-            ActualSellDate:             actualSellDate
+            ActualSellDate:             actualSellDate,
+            Data: AuthorityDataResponseFactory.Calculation(
+                priceAuthorities, inflationAuthorities, request.IncludeInflation, dataWarnings)
         );
 
-        await cache.TrySetAsync(cacheKey, response, TimeSpan.FromHours(1), ct);
+        if (dataWarnings.Count == 0)
+            await cache.TrySetAsync(
+                cacheKey,
+                WhatIfCacheEntry.Create(
+                    symbol, request.BuyDate, sellDate, request.Amount,
+                    amountType, request.IncludeInflation, lang, response, catalog),
+                TimeSpan.FromHours(1), ct);
 
         // Nullable decimal'i doğrudan structured field olarak geç — null tutarlı yansır.
         logger.LogInformation(
-            "WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} {AmountType}:{Amount} → %{ProfitLossPercent} (reel: %{RealProfitLossPercent})",
-            symbol, request.BuyDate, sellDate, amountType, request.Amount,
-            profitLossPercent, realProfitLossPercent);
+            "WhatIf hesaplandı: {Symbol} {BuyDate}→{SellDate} {AmountType}:{AmountBucket} → {Outcome} (reel: {RealOutcome})",
+            symbol, request.BuyDate, sellDate, amountType, AmountBucket.Coarse(request.Amount),
+            TelemetryOutcome.From(profitLossTry), TelemetryOutcome.From(realProfitLossPercent));
 
         return response;
     }
@@ -513,7 +604,7 @@ public sealed class WhatIfCalculator(
 
     // P1R-003: ArgumentException base type framework / altyapı tarafından da fırlatılır
     // (Redis bağlantı yapılandırma, EF Core, Npgsql vs.). Endpoint katmanından gelen
-    // request/deviceId guard'larını domain ValidationException'a çevirerek
+    // request guard'larını domain ValidationException'a çevirerek
     // ValidationExceptionHandler'ın ArgumentException case'ini kaldırabilir hale getirdik.
     private void EnsureRequest(object? request)
     {
@@ -531,6 +622,16 @@ public sealed class WhatIfCalculator(
             throw new ValidationException(localizer["AmountMustBePositive"], field: field);
     }
 
+    private void EnsureNotFuture(DateOnly? date, string field)
+    {
+        if (date is not { } value
+            || value <= BusinessClock.TodayInIstanbul(timeProvider))
+            return;
+
+        throw new ValidationException(
+            localizer["CalculationEndDateCannotBeInFuture"], field: field);
+    }
+
     /// <summary>
     /// F2.2-21 ([G-B-01]): Tier'ın <c>PriceHistoryMonths</c> sınırı (0 = sınırsız)
     /// alış tarihine dayatılır. BuyDate "bugünden <c>months</c> ay önceki tarihten önce"
@@ -539,8 +640,9 @@ public sealed class WhatIfCalculator(
     private void EnsureWithinHistoryWindow(DateOnly buyDate, int months)
     {
         if (months <= 0) return;
-        var earliestAllowed = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime).AddMonths(-months);
+        var earliestAllowed = BusinessClock.TodayInIstanbul(timeProvider).AddMonths(-months);
         if (buyDate < earliestAllowed)
             throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "extended_history");
     }
+
 }

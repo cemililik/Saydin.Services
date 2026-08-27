@@ -12,6 +12,7 @@ public interface IRedisCacheHelper
 {
     Task<T?> TryGetAsync<T>(string key, CancellationToken ct = default) where T : class;
     Task TrySetAsync<T>(string key, T value, TimeSpan ttl, CancellationToken ct = default);
+    Task TryDeleteAsync(string key, CancellationToken ct = default);
 }
 
 public sealed class RedisCacheHelper(
@@ -59,6 +60,23 @@ public sealed class RedisCacheHelper(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Redis yazma hatası: {Key}", key);
+        }
+    }
+
+    public async Task TryDeleteAsync(string key, CancellationToken ct = default)
+    {
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            await redis.GetDatabase().KeyDeleteAsync(key);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Redis bozuk cache anahtarı silinemedi: {Key}", key);
         }
     }
 }

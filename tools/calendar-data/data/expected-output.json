@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "snapshotSetId": "cal-001-2026-08-17",
+  "outputs": [
+    {
+      "calendarCode": "bist_pay_xist",
+      "outputPath": "normalized/bist_pay_xist.csv",
+      "rowCount": 1096,
+      "normalizedSha256": "6e67ff85fd9a2c54e9c4bf733640c744b6792a39cfa51c621473f7dde39986b1",
+      "sourceBundleSha256": "a93a6905c5213cdd30ad5a4ab4b9bcdb0698cf943c890aa44f462a1f3323c9b3"
+    },
+    {
+      "calendarCode": "tcmb_indicative_fx",
+      "outputPath": "normalized/tcmb_indicative_fx.csv",
+      "rowCount": 7534,
+      "normalizedSha256": "de8f0ff7654ae4972d081f1d2a225de6997986cd8297736715b3e71bfda1b1da",
+      "sourceBundleSha256": "e95b9889c8857ca4e5ae5804704795265655deb30cd15f3224882a9f419feec9"
+    }
+  ]
+}

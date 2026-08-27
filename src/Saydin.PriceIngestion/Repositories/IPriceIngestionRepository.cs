@@ -7,18 +7,7 @@ public interface IPriceIngestionRepository
     /// <summary>Belirtilen kaynağa ait aktif asset'leri döner.</summary>
     Task<IReadOnlyList<Asset>> GetActiveAssetsBySourceAsync(string source, CancellationToken ct);
 
-    /// <summary>
-    /// Fiyat noktalarını UPSERT yapar.
-    /// Aynı (asset_id, price_date) için veri zaten varsa günceller.
-    /// </summary>
-    Task UpsertPricePointsAsync(IReadOnlyList<PricePoint> pricePoints, CancellationToken ct);
-
-    /// <summary>Asset için veritabanındaki en son fiyat tarihini döner. Veri yoksa null.</summary>
-    Task<DateOnly?> GetLatestPriceDateAsync(Guid assetId, CancellationToken ct);
-
-    /// <summary>
-    /// F2.4-9: Belirtilen aralıkta asset için DB'de var olan price_date kümesini döner.
-    /// Worker bu seti tamamlayıcı tarihlere doğru gap-aware backfill yapar.
-    /// </summary>
-    Task<IReadOnlySet<DateOnly>> GetExistingDatesAsync(Guid assetId, DateOnly from, DateOnly to, CancellationToken ct);
+    /// <summary>Provider completeness contractı için bilinen piyasa tatilleri.</summary>
+    Task<IReadOnlySet<DateOnly>> GetMarketHolidaysAsync(
+        Guid assetId, DateOnly from, DateOnly to, CancellationToken ct);
 }

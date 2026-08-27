@@ -1,0 +1,26 @@
+groups:
+  - name: saydin-redis
+    rules:
+      - alert: SaydinRedisExporterUnavailable
+        expr: up{job="redis"} != 1
+        for: 2m
+        labels: {severity: critical, service: redis}
+        annotations:
+          summary: Redis exporter scrape is unavailable
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/redis-unavailable.md
+
+      - alert: SaydinRedisUnavailable
+        expr: redis_up{job="redis"} != 1
+        for: 2m
+        labels: {severity: critical, service: redis}
+        annotations:
+          summary: Redis exporter cannot reach Redis
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/redis-unavailable.md
+
+      - alert: SaydinRedisMemoryHigh
+        expr: redis_memory_used_bytes / clamp_min(redis_memory_max_bytes, 1) > 0.85
+        for: 10m
+        labels: {severity: warning, service: redis}
+        annotations:
+          summary: Redis memory usage is above 85 percent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/redis-unavailable.md

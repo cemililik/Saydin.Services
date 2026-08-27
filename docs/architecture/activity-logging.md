@@ -2,7 +2,7 @@
 
 > **Kaynak doğruluğu (source of truth):** Bu doküman backend'in **gerçek kodunu ve
 > migration'larını** yansıtır. Şema için tek doğru kaynak `infrastructure/postgres/migrations/`
-> altındaki numaralandırılmış `.sql` dosyaları (008/008b/009/010/011/013) ve EF
+> altındaki numaralandırılmış `.sql` dosyaları (008/008b/009/010/011/013/022) ve EF
 > konfigürasyonu (`Saydin.Shared/Data/Configurations/ActivityLogConfiguration.cs`);
 > davranış için `Saydin.Api/{Middleware,Helpers,Services,BackgroundServices}` altındaki
 > sınıflardır. Doküman bunlarla çeliştiğinde **kod/migration geçerlidir**. Client tarafı
@@ -28,13 +28,13 @@ uygulanmış mimariyi açıklar.
 
 ### 2.1 Backend'in Okuduğu İstek Header'ları
 
-Backend, her istekte aşağıdaki header'ları **okur** ve `activity_logs` satırına yazar.
+Backend, aşağıdaki düşük hassasiyetli istemci metadata header'larını **okur** ve
+`activity_logs` satırına yazar.
 Bu header'ları **göndermek client'ın (Flutter) sorumluluğudur**; client tarafı
 implementasyonu bu dokümanın kapsamı dışındadır.
 
 | Header | Örnek Değer | `activity_logs` kolonu | Backend'in okuduğu yer |
 |--------|-------------|------------------------|------------------------|
-| `X-Device-ID` | `a1b2c3d4-...` | `device_id` | `RequireDeviceId` filter → `HttpContext.Items[DeviceIdItemKey]`; yoksa `X-Device-ID` header'ı; o da yoksa `"unknown"` |
 | `X-Device-OS` | `android` / `ios` | `device_os` | `Request.Headers["X-Device-OS"]` |
 | `X-Device-OS-Version` | `18.6` / `34` | `os_version` | `Request.Headers["X-Device-OS-Version"]` |
 | `X-App-Version` | `0.1.1+43` | `app_version` | `Request.Headers["X-App-Version"]` |
@@ -42,6 +42,10 @@ implementasyonu bu dokümanın kapsamı dışındadır.
 > **Not:** Header değerleri DB kolon kapasitelerine göre (`ActivityLogLimits`) UTF-16
 > surrogate-safe biçimde kırpılır (`ActivityLogBuilder.TruncateSurrogateSafe`) — emoji
 > içeren bir header bile malformed UTF-16 olarak kaydedilmez. Boş/whitespace değer `null` olur.
+> `Authorization: Installation …` kimlik doğrulama için okunur ancak credential veya onun ham
+> hash'i activity kaydına yazılmaz. `device_id` eski kolon adı, yalnız doğrulanmış installation
+> principal için sunucunun ürettiği sabit boyutlu pseudonym'i taşır; `X-Device-ID` artık kimlik,
+> sahiplik veya activity kaynağı değildir.
 
 ### 2.2 Server Tarafında Üretilen Veriler
 
@@ -52,7 +56,7 @@ implementasyonu bu dokümanın kapsamı dışındadır.
 | HTTP durum kodu | Pipeline sonu `Response.StatusCode` | `status_code` | Exception handler zincirinin set ettiği 4xx/5xx dahil |
 | İstek süresi | `ActivityLogBuilder` içindeki `Stopwatch` | `duration_ms` (`bigint`) | Builder yaratıldığında başlar, `Build()` ile durur |
 | Hata kodu | Endpoint `WithError(...)` veya yok | `error_code` | Varsa |
-| Kullanıcı | `ActivityLogBuilder.WithUserId(Guid?)` | `user_id` | **Nullable**; mevcut endpoint'ler `WithUserId` çağırmaz → pratikte `NULL` (cihaz-temelli model, ADR-004 meta) |
+| Principal | `IInstallationPrincipalContext` | `user_id` | **Nullable**; doğrulanmış installation principal kimliği, anonim endpoint'lerde `NULL` |
 
 ### 2.3 İşlem Türüne Göre Veriler — `data` JSONB (KVKK uygulanmış)
 
@@ -64,11 +68,13 @@ Her action farklı veri taşır; hepsi **tek bir `data` JSONB kolonunda** saklan
 >   yerine `AmountBucket.Coarse(decimal)` kaba aralık etiketi yazılır:
 >   `"0" · "0-1k" · "1k-10k" · "10k-100k" · "100k-1M" · "1M+"`
 >   (sınırlar `Saydin.Shared/Constants/AmountBucket.cs`'de tek source-of-truth).
-> - **Mutlak sonuç TL tutarları loglanmaz:** `profitLossTry`, `currentValueTry`,
->   `requiredInvestmentTry`, `totalInvestedTry`, `averageCostPerUnit` `data`'ya **hiç**
->   yazılmaz. Yalnız **yüzde** alanları (`profitLossPercent`, `realProfitLossPercent`,
->   `isProfit`) ve sayım alanları (`totalPurchases`) tutulur.
+> - **Exact finansal sonuç loglanmaz:** `profitLossTry`, `currentValueTry`,
+>   `requiredInvestmentTry`, `totalInvestedTry`, `averageCostPerUnit`,
+>   `profitLossPercent` ve `realProfitLossPercent` `data`'ya **hiç** yazılmaz.
+>   Yalnız `profit/loss/flat/unavailable` outcome ve sayım alanları tutulur.
 > - **Hash kullanılmaz** (düşük entropili tutar hash'i brute-force ile geri çevrilebilir).
+> - **Serbest metin senaryo label'ı yazılmaz.** `scenario_save` yalnız düşük kardinaliteli
+>   `hasLabel` boolean'ını tutar; label içeriği activity/analytics hattına girmez.
 > - Detay: `docs/decisions/ADR-006-activity-log-financial-policy.md`.
 
 Aşağıdaki örnekler **kodun ürettiği gerçek payload'lardır**
@@ -86,9 +92,8 @@ Aşağıdaki örnekler **kodun ürettiği gerçek payload'lardır**
   "amountType": "try",
   "includeInflation": true,
   "result": {
-    "profitLossPercent": 370.10,
-    "isProfit": true,
-    "realProfitLossPercent": 13.98,
+    "outcome": "profit",
+    "realOutcome": "profit",
     "actualBuyDate": null,
     "actualSellDate": "2024-01-12"
   }
@@ -108,9 +113,9 @@ Aşağıdaki örnekler **kodun ürettiği gerçek payload'lardır**
   "result": {
     "winner": "BTC",
     "rankings": [
-      { "rank": 1, "symbol": "BTC", "profitLossPercent": 1250.50 },
-      { "rank": 2, "symbol": "USDTRY", "profitLossPercent": 370.10 },
-      { "rank": 3, "symbol": "XAU_TRY_GRAM", "profitLossPercent": 280.30 }
+      { "rank": 1, "symbol": "BTC", "outcome": "profit" },
+      { "rank": 2, "symbol": "USDTRY", "outcome": "profit" },
+      { "rank": 3, "symbol": "XAU_TRY_GRAM", "outcome": "profit" }
     ]
   }
 }
@@ -128,9 +133,9 @@ Aşağıdaki örnekler **kodun ürettiği gerçek payload'lardır**
   "amountType": "try",
   "includeInflation": true,
   "result": {
-    "profitLossPercent": 196.56,
     "totalPurchases": 48,
-    "realProfitLossPercent": 45.20
+    "outcome": "profit",
+    "realOutcome": "profit"
   }
 }
 ```
@@ -146,9 +151,8 @@ Aşağıdaki örnekler **kodun ürettiği gerçek payload'lardır**
   "targetAmountType": "try",
   "includeInflation": false,
   "result": {
-    "profitLossPercent": 2252.80,
-    "isProfit": true,
-    "realProfitLossPercent": 1120.40,
+    "outcome": "profit",
+    "realOutcome": "unavailable",
     "actualBuyDate": "2020-03-02",
     "actualSellDate": "2024-01-15"
   }
@@ -168,7 +172,7 @@ Aşağıdaki örnekler **kodun ürettiği gerçek payload'lardır**
   "scenarioId": "0190b2c3-...",
   "type": "what_if",
   "assetSymbol": "USDTRY",
-  "label": "2020 dolar yatırımı"
+  "hasLabel": true
 }
 ```
 
@@ -228,6 +232,7 @@ Aşağıdaki örnekler **kodun ürettiği gerçek payload'lardır**
 > - **010** — `country`/`city` + `idx_activity_logs_country` (idempotent, geo geç eklendi)
 > - **011** — `chk_activity_data_size`, `duration_ms INT → BIGINT`, GIN index'i `idx_activity_logs_data_gin`'e rename, `chk_activity_action` resync
 > - **013** — compression'ı **geri açar** (008'deki ayarla birebir aynı)
+> - **022** — silme öncesi activity redaction trigger'ı + fail-closed `ON DELETE NO ACTION` FK
 
 ### 3.1 Tablo: `activity_logs` (008 + 009 + 010 + 011 + 013 sonrası efektif şema)
 
@@ -236,7 +241,7 @@ CREATE TABLE activity_logs (
     id              UUID            NOT NULL DEFAULT gen_random_uuid(),
 
     -- Kim?
-    user_id         UUID            REFERENCES users(id) ON DELETE SET NULL,  -- NULLABLE
+    user_id         UUID            REFERENCES users(id) ON DELETE NO ACTION, -- NULLABLE
     device_id       VARCHAR(200)    NOT NULL,
 
     -- Ne?
@@ -282,8 +287,10 @@ ALTER TABLE activity_logs ADD CONSTRAINT chk_activity_data_size
 ```
 
 > **`user_id` NULLABLE notu:** Stale tasarım dokümanı `user_id UUID NOT NULL REFERENCES`
-> diyordu. Gerçek migration 008'de kolon **nullable** ve FK `ON DELETE SET NULL`'dur
-> (kullanıcı silinince logları korunur, anonimleşir). Entity de `Guid? UserId` taşır.
+> diyordu. Kolon **nullable** kalır; migration 022'den itibaren FK `ON DELETE NO ACTION`'dır.
+> Scheduler-owned, locked-search-path `BEFORE DELETE` trigger önce ilgili satırların `user_id`
+> alanını `NULL`, eski `device_id` bağını `server-redacted` yapar. Trigger/redaction çalışmazsa
+> FK principal silmeyi reddeder. Entity de `Guid? UserId` taşır.
 
 ### 3.2 `action` CHECK whitelist (11 değer — kod + migration senkron)
 
@@ -457,7 +464,7 @@ sequenceDiagram
     M->>M: finally: builder.WithStatusCode(Response.StatusCode)
     M->>L: builder.Send(logger) → Build() + Log()
     L--)C: TryWrite(entry) (fire-and-forget)
-    Note over L,C: kuyruk doluysa TryWrite=false →<br/>warn log + drop metric
+    Note over L,C: kuyruk doluysa itemDropped callback →<br/>drop metric; TryWrite yine true
     C--)W: ReadAllAsync (batch ≤ 50)
     W->>DB: AddRangeAsync + SaveChangesAsync
     W->>W: hata → retry (3x) / bisection / toxic-row drop
@@ -477,7 +484,8 @@ Saydin.Shared/
 Saydin.Api/
   ├── Services/
   │     ├── IActivityLogger.cs              ← void Log(ActivityLog) — fire-and-forget
-  │     ├── ChannelActivityLogger.cs        ← Channel producer (DropWrite + drop metric)
+  │     ├── ChannelActivityLogger.cs        ← Channel producer (completed/rejected write)
+  │     ├── ActivityLogChannelTelemetry.cs  ← drop callback + rejected metric + bounded warning
   │     ├── IGeoIpResolver.cs               ← IP → (country, city)
   │     └── MaxMindGeoIpResolver.cs         ← MaxMind GeoLite2 (singleton)
   ├── BackgroundServices/
@@ -504,10 +512,13 @@ Saydin.Api/
 - `Data` `JsonElement?`.
 
 **`ChannelActivityLogger` (producer):**
-- `channel.Writer.TryWrite(entry)`. Kanal `DropWrite` modunda olduğu için doluysa `false`
-  döner → `LogWarning` + `SaydinMetrics.ActivityLogQueueDrops` (action tag whitelist'li).
-  (`DropOldest` modu `TryWrite`'ı hep `true` döndürüp drop telemetrisini imkansız kıldığı
-  için bilinçli olarak `DropWrite` seçildi — review C-3.)
+- `channel.Writer.TryWrite(entry)`. `DropWrite` capacity drop'unda bu çağrı **true** döner;
+  gerçek kayıp `Channel.CreateBounded(..., itemDropped)` callback'inde ölçülür.
+- `TryWrite=false` yalnız completed writer/rejected write olarak sınıflandırılır ve
+  `saydin.activity_log.queue.rejected_writes.total` sayacını artırır; drop sayılmaz.
+- `ActivityLogChannelTelemetry` her gerçek olayda metriği artırır, fakat drop ve rejected
+  warning'lerini ayrı birer dakikalık pencereyle rate-limit eder. Metric/log action değeri
+  `ActivityActions.Lookup` allowlist'i dışındaysa `unknown` olur.
 
 **`ActivityLogMiddleware` (IMiddleware):**
 - `next(context)` sonrası `finally` bloğunda `HttpContext.Items[BuilderItemKey]`'deki
@@ -521,22 +532,43 @@ Saydin.Api/
 
 **`ActivityLogBuilder.Build()`:**
 - `WithAction` çağrılmadıysa `InvalidOperationException` (sessiz `"unknown"` yerine bug görünür).
-- `deviceId`: `Items[DeviceIdItemKey]` → `X-Device-ID` header → `"unknown"`; max 200 char truncate.
+- `deviceId`: `Items[PrincipalActivityIdItemKey]` içindeki server-generated installation
+  pseudonym'i; yoksa `"unknown"`. Ham installation credential veya client-chosen kimlik okunmaz.
 - Önce `IGeoIpResolver.Resolve(rawIp)` (maskelemeden önce), sonra `IpMasker.Mask(rawIp)`.
 - `data` > `DataMaxBytes` (10.000) ise `{"_truncated": true, ...}` placeholder + truncation metric.
 - Header değerleri DB kapasitelerine surrogate-safe truncate edilir.
 
 **`ActivityLogWriter` (BackgroundService consumer):**
 - `BatchSize = 50`. `ReadAllAsync` ile bir kayıt gelince kuyruktaki ek kayıtları
-  `TryRead` ile 50'ye kadar toplar, `SaveChangesAsync` ile tek batch yazar.
+  `TryRead` ile 50'ye kadar toplar; `EfActivityLogBatchStore` bunları tek transaction
+  içindeki bir `NpgsqlBatch` ile yazar.
+- **Idempotency (KRİTİK — ayrıca bir yetki sözleşmesi):** her satır
+  `INSERT … ON CONFLICT DO NOTHING` ile yazılır, böylece transient bir hatadan sonra
+  yeniden gönderilen batch mükerrer satır üretmez. `ON CONFLICT` **bilinçli olarak
+  hedefsizdir** (`(id,created_at)` ya da `ON CONSTRAINT …` yazılmaz): bir arbiter
+  belirtmek PostgreSQL'i index inference'a zorlar ve TimescaleDB hypertable'ında bu
+  çıkarım `public.activity_logs` üzerinde **SELECT** yetkisi ister. Migration 019 API
+  capability rolüne yalnız `INSERT` verir — audit izi API için kasıtla yazılır-okunmaz —
+  bu yüzden hedefli arbiter `42501 permission denied` ile fail-closed olur ve
+  `ActivityLogWriter` fatal yola girerek host'u durdurur. Hedefsiz biçim tek başına
+  `INSERT` ile çalışır ve burada birebir eşdeğerdir: `pk(id,created_at)` tablodaki tek
+  unique/exclusion kısıtıdır. CHECK ihlalleri (`chk_activity_action`) `ON CONFLICT`
+  kapsamında değildir; hata vermeye ve writer'ın toxic-row bisection yoluna düşmeye
+  devam eder. **`activity_logs`'a yeni bir unique index eklenirse bu eşdeğerlik bozulur
+  — o durumda hedefsiz `ON CONFLICT` istenmeyen susturma yapar ve bu yol yeniden
+  değerlendirilmelidir.**
 - **Retry:** transient hatada toplam 3 deneme, exponential backoff (200ms, 400ms).
 - **Toksik satır:** `DbUpdateException`'da batch **bisection** ile bölünür; tek satıra
   inince o satır drop edilir (`outcome=toxic_row` metric) — bir bozuk satır tüm batch'i
   düşürmez.
-- **Shutdown:** `StopAsync` `channel.Writer.TryComplete()` çağırır; kalan kayıtlar
-  `DrainRemainingAsync` ile 30s timeout altında batch'ler hâlinde yazılır (drain path'inde
-  retry yapılmaz). Başarısızlıklar `SaydinMetrics.ActivityLogWriteFailures` (`outcome` tag:
-  `cancelled` / `retry_exhausted` / `toxic_row`) ile sayılır.
+- **Shutdown:** hosted service'ler ters kayıt sırasıyla durduğu için ayrı
+  `ActivityLogChannelLifetime`, Kestrel kabul edilmiş istekleri drain ettikten sonra channel
+  ingress'ini kapatır; `ActivityLogWriter` daha sonra kalan kayıtları 20 sn içinde yazar.
+  Host shutdown bütçesi 45 sn, Compose stop grace 60 sn'dir. İptal edilen normal flush kayıp
+  sayılmaz; drain'e geri verilir. Bütçe biterse kalan satırlar `shutdown_abandoned`, writer
+  fatal kapanırsa kabul edilemeyen kuyruk `writer_dead` olarak sayılır. Başarısızlıklar
+  `retry_exhausted`, `toxic_row`, `fatal_contract`, `shutdown_abandoned` veya `writer_dead`
+  sonucuyla görünürdür.
 
 ### 4.4 DI Kaydı (`Program.cs` — gerçek)
 
@@ -544,24 +576,29 @@ Saydin.Api/
 // GeoIP (singleton — DatabaseReader thread-safe)
 builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();
 
-// Channel: bounded 10.000 entry, DropWrite (drop telemetri için kritik)
-var activityChannel = Channel.CreateBounded<ActivityLog>(
+// DropWrite doluyken TryWrite=true; gerçek drop itemDropped callback'indedir.
+builder.Services.AddSingleton<ActivityLogChannelTelemetry>();
+builder.Services.AddSingleton(sp => Channel.CreateBounded<ActivityLog>(
     new BoundedChannelOptions(10_000)
     {
-        FullMode = BoundedChannelFullMode.DropWrite,  // doluysa TryWrite=false → warn + metric
+        FullMode = BoundedChannelFullMode.DropWrite,
         SingleReader = true,
-    });
+    },
+    sp.GetRequiredService<ActivityLogChannelTelemetry>().RecordDropped));
 
-builder.Services.AddSingleton(activityChannel);
 builder.Services.AddSingleton<IActivityLogger, ChannelActivityLogger>();
 builder.Services.AddHostedService<ActivityLogWriter>();
+builder.Services.AddHostedService<ActivityLogChannelLifetime>();
 builder.Services.AddTransient<ActivityLogMiddleware>();  // IMiddleware → transient zorunlu
 
-// Pipeline: ForwardedHeaders → Localization → ExceptionHandler → ActivityLogMiddleware
+// Pipeline: ForwardedHeaders → port boundary → localization → ActivityLog →
+// distributed admission → ExceptionHandler → endpoint
 app.UseForwardedHeaders();
 // ...
-app.UseExceptionHandler();
 app.UseMiddleware<ActivityLogMiddleware>();
+app.UseWhen(context => !ApiPortBoundary.IsAdmissionExempt(context), branch =>
+    branch.UseMiddleware<DistributedSecurityLimiterMiddleware>());
+app.UseExceptionHandler();
 ```
 
 ### 4.5 Endpoint'lerde Kullanım (gerçek desen)
@@ -580,7 +617,7 @@ private static async Task<IResult> CalculateAsync(
 
     var result = await calculator.CalculateAsync(request, ct);
 
-    // F4-6 (KVKK): ham tutar yerine kaba aralık; ProfitLossTry loglanmaz.
+    // Ham tutar bucket'lanır; exact TL/yüzde sonuç yalnız coarse outcome'a iner.
     log.WithData(new
     {
         request.AssetSymbol,
@@ -591,9 +628,8 @@ private static async Task<IResult> CalculateAsync(
         request.IncludeInflation,
         result = new
         {
-            result.ProfitLossPercent,
-            result.IsProfit,
-            result.RealProfitLossPercent,
+            outcome = TelemetryOutcome.From(result.ProfitLossTry),
+            realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
             actualBuyDate = result.ActualBuyDate?.ToString("yyyy-MM-dd"),
             actualSellDate = result.ActualSellDate?.ToString("yyyy-MM-dd"),
         }
@@ -626,7 +662,8 @@ app.UseForwardedHeaders();  // sonrasında RemoteIpAddress gerçek istemci IP'si
 
 `ForwardedHeaders:KnownProxies`, `ForwardedHeaders:KnownNetworks`, `ForwardedHeaders:ForwardLimit`
 anahtarları config'ten okunur; reverse proxy IP/subnet'leri burada whitelist'lenir.
-Aynı gerçek IP, IP-bazlı rate limiting (`RateLimiting:Enabled`) tarafından da kullanılır.
+Aynı doğrulanmış istemci IP'si, Redis tabanlı dağıtık security limiter'ın exact-IP ve
+IPv4 `/24` veya IPv6 `/64` bucket'larında HMAC-pseudonymized anahtar olarak kullanılır.
 
 ---
 
@@ -657,11 +694,11 @@ public static IPAddress? Mask(IPAddress? ip)
 
 ### 6.2 Finansal Veri Minimizasyonu (ADR-006)
 
-`data` JSONB içine **ham tutar yazılmaz**; `AmountBucket.Coarse` etiketi kullanılır. Mutlak
-TL sonuç tutarları loglanmaz; yalnız yüzde ve sayım alanları tutulur. Gerekçe ve seçenekler:
+`data` JSONB içine **ham tutar yazılmaz**; `AmountBucket.Coarse` etiketi kullanılır. Exact
+TL ve yüzde sonuçlar loglanmaz; yalnız coarse outcome ve sayım alanları tutulur. Gerekçe:
 `docs/decisions/ADR-006-activity-log-financial-policy.md`. "Cihaz + maskeli IP + tam tutar"
-profillemesi böylece engellenir; analytics değeri (popülerlik, büyüklük dağılımı, kar/zarar
-yüzdesi) korunur.
+profillemesi böylece engellenir; analytics değeri (popülerlik, büyüklük dağılımı ve sonuç
+yönü) korunur.
 
 ### 6.3 Genel Gizlilik Tablosu
 
@@ -669,11 +706,11 @@ yüzdesi) korunur.
 |------|-------------|-------|---------|
 | IP adresi | Kişisel veri | **Maskelenir** (/24, /48) | `IpMasker` |
 | Ülke / Şehir | Konum verisi | Saklanır | Maskelemeden önce GeoIP'den çözülür |
-| Device-ID | Anonim tanımlayıcı | Saklanır | Gerçek kimliğe bağlanmaz |
+| Installation principal pseudonym'i | Pseudonymous tanımlayıcı | Saklanır | Bearer credential değil; bounded HMAC türevidir |
 | OS / versiyon / app sürümü | Teknik metadata | Saklanır | Gizlilik riski yok |
 | Tutar | Finansal girdi | **Bucket'lanır** (ADR-006) | Ham tutar yazılmaz |
-| Mutlak TL sonuç | Finansal sonuç | **Loglanmaz** (ADR-006) | Yalnız yüzde tutulur |
-| Kar/zarar yüzdesi | Davranış sinyali | Saklanır | Mutlak para figürü yok |
+| Mutlak TL sonuç | Finansal sonuç | **Loglanmaz** (ADR-006) | Yalnız coarse outcome tutulur |
+| Kar/zarar yüzdesi | Finansal sonuç | **Loglanmaz** (ADR-006) | `profit/loss/flat/unavailable` outcome'a indirgenir |
 
 > **Client header güvenilirliği:** `X-Device-OS` / `X-App-Version` gibi header'lar
 > spoofing'e açıktır; **analitik amaçlı** kullanılır, güvenlik kararı verilmez. Manipüle
@@ -686,19 +723,23 @@ yüzdesi) korunur.
 
 | HTTP Endpoint | Action | Loglanan `data` (bucket'lı) |
 |---|---|---|
-| `POST /v1/what-if/calculate` | `what_if_calculate` | symbol, tarihler, `amountBucket`, amountType, includeInflation, yüzde sonuçlar |
-| `POST /v1/what-if/compare` | `what_if_compare` | symbol listesi, tarihler, `amountBucket`, winner + rankings (yüzde) |
-| `POST /v1/what-if/dca` | `what_if_dca` | symbol, startDate/endDate, `amountBucket`, period, yüzde + totalPurchases |
-| `POST /v1/what-if/reverse` | `what_if_reverse` | symbol, tarihler, `targetAmountBucket`, yüzde sonuçlar |
-| `POST /v1/scenarios` | `scenario_save` | scenarioId, type, assetSymbol, label |
+| `POST /v1/what-if/calculate` | `what_if_calculate` | symbol, tarihler, `amountBucket`, amountType, includeInflation, outcome |
+| `POST /v1/what-if/compare` | `what_if_compare` | symbol listesi, tarihler, `amountBucket`, winner + rankings (outcome) |
+| `POST /v1/what-if/dca` | `what_if_dca` | symbol, startDate/endDate, `amountBucket`, period, outcome + totalPurchases |
+| `POST /v1/what-if/reverse` | `what_if_reverse` | symbol, tarihler, `targetAmountBucket`, outcome |
+| `POST /v1/scenarios` | `scenario_save` | scenarioId, type, assetSymbol, hasLabel |
 | `DELETE /v1/scenarios/{id}` | `scenario_delete` | scenarioId |
 | `GET /v1/scenarios` | `scenario_list` | scenarioCount |
 | `GET /v1/assets` | `assets_list` | assetCount |
 | `GET /v1/assets/{symbol}/price/{date}` | `asset_price` | assetSymbol, date |
 | `GET /v1/assets/{symbol}/price-range` | `asset_price_range` | assetSymbol, from, to, interval, pointCount |
 | `GET /v1/config` | `config_fetch` | tier |
+| `POST /v1/installations` | `installation_register` | generation, credentialState |
+| `POST /v1/installations/rotation` | `installation_rotation_begin` | generation, credentialState |
+| `POST /v1/installations/rotation/commit` | `installation_rotation_commit` | generation, credentialState |
+| `DELETE /v1/installations/current` | `installation_revoke` | generation, credentialState |
 
-> Tüm 11 action **uygulanmıştır** (endpoint handler'larda `GetOrCreateActivityLog` çağrısı
+> Tüm 15 action **uygulanmıştır** (endpoint handler'larda `GetOrCreateActivityLog` çağrısı
 > mevcut). `asset_price` / `asset_price_range` ayrıca günlük cihaz kotasına (`IDailyLimitGuard`)
 > tabidir; kota aşımında 429 + `error_code` ile satır yine loglanır.
 
@@ -770,8 +811,10 @@ flowchart LR
 | Teknik & Kalite | hata oranı, P50/P95/P99, platform/app-versiyon dağılımı | Günlük/Haftalık |
 | Coğrafi & Cihaz | ülke/şehir dağılımı, iOS vs Android | Aylık |
 
-> **DAU tanımı notu:** `user_id` pratikte `NULL` (cihaz-temelli model) olduğundan aktif
-> kullanıcı sayımları **`device_id`** üzerinden yapılır.
+> **DAU tanımı notu:** Korumalı isteklerde `user_id` doğrulanmış installation principal'dır;
+> anonim yüzeylerde `NULL` kalabilir. Fiziksel `device_id` kolonundaki değer client header'ı değil,
+> server-generated bounded principal pseudonym'idir. Analytics sorguları deletion/redaction sonrası
+> `server-redacted` değerini ayrı anonim bucket olarak ele almalıdır.
 
 ### 9.2 SQL Şablonları (doğrulanmış)
 
@@ -884,12 +927,14 @@ flowchart LR
 
 ## 10. Metrikler (uygulanmış)
 
-`Saydin.Shared/Diagnostics/SaydinMetrics.cs`'de tanımlı, `GET /metrics` ile kazınır:
+`Saydin.Shared/Diagnostics/SaydinMetrics.cs`'de tanımlı, private management listener'daki
+`GET :9090/metrics` ile kazınır:
 
 | Metrik | Tip | Tag | Anlam |
 |--------|-----|-----|-------|
-| `saydin.activity_log.queue.drops.total` | Counter | `action` (whitelist'li) | Kuyruk dolu → `ChannelActivityLogger.TryWrite` false |
-| `saydin.activity_log.write.failures.total` | Counter | `outcome` (`cancelled`/`retry_exhausted`/`toxic_row`) | `ActivityLogWriter` batch yazımı kaybı |
+| `saydin.activity_log.queue.drops.total` | Counter | `action` (allowlist) | Kuyruk dolu → `itemDropped` callback; gerçek capacity drop |
+| `saydin.activity_log.queue.rejected_writes.total` | Counter | `action` (allowlist), `reason=writer_completed` | Completed writer `TryWrite=false`; capacity drop değildir |
+| `saydin.activity_log.write.failures.total` | Counter | `outcome` (bounded writer outcome allowlist) | Retry tükenmesi, toksik/fatal satır veya shutdown'da gerçekten terk edilen kayıt |
 | `saydin.activity_log.data.truncations.total` | Counter | `action` (whitelist'li) | `data` > 10.000 byte → placeholder ile değiştirildi |
 
 > Action ve outcome tag'leri sabit, küçük kümelerle sınırlıdır (kardinalite patlaması yok);
@@ -904,10 +949,11 @@ flowchart LR
     (şema EF Core ile değil `.sql` dosyalarıyla yönetilir; compression/hypertable EF'le modellenemez).
   - `docs/decisions/ADR-006-activity-log-financial-policy.md` — `data` finansal tutar
     bucket'lama + mutlak TL sonuç loglamama politikası.
-- **Meta repo ADR (backend repo'sunda dosya yoktur — Saydın meta repo `docs/decisions/`'da):**
-  - ADR-002 (TimescaleDB), ADR-003 (günlük granülerlik / rate limiting), ADR-004
-    (device-id auth — `user_id`'nin neden pratikte `NULL` olduğunun gerekçesi). Bu ADR'lara
-    backend repo'sundan göreli `../decisions/` link verilmez (404 olur); meta repo'ya bakılır.
+- **Principal ve retention ADR'leri:**
+  - [`../decisions/ADR-010-installation-principal.md`](../decisions/ADR-010-installation-principal.md)
+    — server-issued installation credential, quarantine ve scheduler-owned redaction.
+  - [`../decisions/ADR-003-rate-limiting.md`](../decisions/ADR-003-rate-limiting.md)
+    — dağıtık IP/network/principal limiter ve finite quota fail-closed sözleşmesi.
 
 ---
 
@@ -918,14 +964,14 @@ flowchart LR
 | 1 | `ActivityLog` entity (`Saydin.Shared/Entities/`) | ✅ |
 | 2 | `ActivityLogConfiguration` EF config + CHECK + index | ✅ |
 | 3 | `SaydinDbContext`'e `DbSet<ActivityLog>` | ✅ |
-| 4 | Migration **008** (+ 008b/009/010/011/013) | ✅ |
-| 5 | `IActivityLogger` + `ChannelActivityLogger` (DropWrite + drop metric) | ✅ |
+| 4 | Migration **008** (+ 008b/009/010/011/013/022 retention) | ✅ |
+| 5 | Callback'li DropWrite + ayrı rejected-write metriği + bounded warning | ✅ |
 | 6 | `ActivityLogWriter` BackgroundService (batch + retry + bisection + drain) | ✅ |
 | 7 | `Program.cs` Channel + DI kaydı | ✅ |
 | 8 | `ForwardedHeaders` middleware (KnownProxies/Networks config'li) | ✅ |
 | 9 | `IpMasker` (/24, /48; IPv4-mapped indirgeme) | ✅ |
 | 10 | `MaxMindGeoIpResolver` (singleton, graceful degradation, CGNAT/ULA private) | ✅ |
-| 11 | `ActivityLogMiddleware` + `ActivityLogBuilder` ile 11 action otomatik log | ✅ |
+| 11 | `ActivityLogMiddleware` + `ActivityLogBuilder` ile 15 action otomatik log | ✅ |
 | 12 | Cihaz header'larını oku (`X-Device-OS/-Version`, `X-App-Version`) | ✅ |
 | 13 | `data` payload KVKK bucket'lama (ADR-006) | ✅ |
 | 14 | `GeoLite2-City.mmdb` mount (`infrastructure/geoip/`, compose `:ro`) | ✅ (dosya `.gitignore`, MaxMind'dan indirilir) |

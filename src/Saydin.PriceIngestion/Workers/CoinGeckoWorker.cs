@@ -7,14 +7,13 @@ namespace Saydin.PriceIngestion.Workers;
 public sealed class CoinGeckoWorker(
     CoinGeckoAdapter adapter,
     IPriceIngestionRepository repository,
-    IIngestionJobRepository jobs,
+    IIngestionWindowRepository windows,
     IConfiguration configuration,
+    TimeProvider timeProvider,
     ILogger<CoinGeckoWorker> logger)
-    : BaseAssetWorker(adapter, repository, jobs, configuration, logger)
+    : BaseAssetWorker(adapter, repository, windows, configuration, timeProvider, logger)
 {
-    // MVP: son 2 yıl. Demo key yalnızca ~365 güne erişim sağlıyor.
-    protected override DateOnly BackfillStartDate =>
-        DateOnly.FromDateTime(DateTime.UtcNow.AddYears(-2));
+    protected override DateOnly BackfillStartDate => new(2024, 1, 1);
     protected override int ChunkDays => 365;
     protected override string WorkerConfigKey => "CoinGecko";
     protected override TimeOnly DefaultDailyRunUtcTime => new(2, 0, 0);
@@ -25,8 +24,4 @@ public sealed class CoinGeckoWorker(
     protected override DateOnly TargetDate(DateTime utcNow) =>
         DateOnly.FromDateTime(utcNow.Date.AddDays(-1));
 
-    // F2.4-9: Kripto piyasaları 7/24 açık — her gün için fiyat noktası bulunur,
-    // dolayısıyla hafta sonu/tatil "legit hole" yoktur. Gap-aware backfill ile
-    // ingestion bir kez başarısız olmuş tarih bloklarını otomatik geri alır.
-    protected override bool EnableGapAwareBackfill => true;
 }

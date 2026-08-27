@@ -5,16 +5,15 @@ namespace Saydin.PriceIngestion.Tests.Adapters;
 
 public class CoinGeckoMapperTests
 {
-    private static readonly Guid    AssetId  = Guid.Parse("22222222-2222-2222-2222-222222222222");
-    private static readonly DateOnly From    = new(2021, 1, 1);
-    private static readonly DateOnly To      = new(2021, 1, 3);
+    private static readonly Guid AssetId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly DateOnly From = new(2021, 1, 1);
+    private static readonly DateOnly To = new(2021, 1, 3);
 
     // Timestamp'ler: 2021-01-01 UTC = 1609459200000 ms (midnight)
     //               2021-01-02 UTC = 1609545600000 ms (midnight)
     //               2021-01-03 UTC = 1609632000000 ms (midnight)
     //               1609459260000 ms = 2021-01-01 00:01 (midnight'tan 60_000 ms uzakta)
-    // F2.4-6 ([C-D-25]): Aynı gün için birden fazla gözlem varsa midnight'a en yakın olan
-    // kazanır — intra-day noise ile yanlış close yazımı engellenir.
+    // Yalnız exact midnight kabul edilir; intra-day satır nearest seçimi yapılmadan atlanır.
     private const string ValidJson = """
         {
           "prices": [
@@ -48,20 +47,18 @@ public class CoinGeckoMapperTests
     }
 
     [Fact]
-    public void Map_SameDayMultipleEntries_KeepsMidnightClosestValue()
+    public void Map_SameDayIntradayNoise_KeepsOnlyExactMidnight()
     {
-        // F2.4-6: 2021-01-01'de iki kayıt — 29000.50 (midnight) ve 29100.00 (midnight + 60s).
-        // Midnight'a en yakın olan kazanır → 29000.50.
+        // 2021-01-01'de exact midnight kabul edilir; midnight + 60s nearest değildir.
         var result = CoinGeckoMapper.Map(ValidJson, AssetId, From, To);
 
         result[0].Close.Should().Be(29000.50m);
     }
 
     [Fact]
-    public void Map_PreNoonAndPostNoon_KeepsClosestToMidnight()
+    public void Map_IntradaySamples_AreRejected_NotRoundedToNearestDailyPoint()
     {
-        // F2.4-6: Aynı tarih için 23:55 ve 00:05 girdileri. 00:05 (5 dakika) midnight'a daha
-        // yakın olduğu için kazanır; 23:55 (~1435 dakika) elenir.
+        // Aynı tarih için 23:55 ve 00:05 girdileri günlük gözlem değildir.
         const string json = """
             {
               "prices": [
@@ -78,10 +75,26 @@ public class CoinGeckoMapperTests
         var result = CoinGeckoMapper.Map(json, AssetId,
             new DateOnly(2021, 1, 1), new DateOnly(2021, 1, 2));
 
-        result.Should().HaveCount(2);
-        // 2021-01-01: 00:05 close (100), not 23:55 close (200) — midnight'a 5dk vs 1435dk.
-        result.First(p => p.PriceDate == new DateOnly(2021, 1, 1)).Close.Should().Be(100.00m);
-        result.First(p => p.PriceDate == new DateOnly(2021, 1, 2)).Close.Should().Be(300.00m);
+        result.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Map_MalformedPair_IsPermanentContractFailure()
+    {
+        var act = () => CoinGeckoMapper.Map(
+            """{"prices":[[1609459200000]]}""", AssetId, From, To, "bitcoin");
+        act.Should().Throw<Saydin.PriceIngestion.Adapters.ProviderContractException>()
+            .Which.Code.Should().Be("contract_invalid_price_pair");
+    }
+
+    [Fact]
+    public void Map_DuplicateExactDailyObservation_IsPermanentContractFailure()
+    {
+        var act = () => CoinGeckoMapper.Map(
+            """{"prices":[[1609459200000,1],[1609459200000,1]]}""",
+            AssetId, From, To, "bitcoin");
+        act.Should().Throw<Saydin.PriceIngestion.Adapters.ProviderContractException>()
+            .Which.Code.Should().Be("contract_duplicate_daily_observation");
     }
 
     [Fact]
@@ -146,6 +159,25 @@ public class CoinGeckoMapperTests
             p.Open.Should().BeNull();
             p.High.Should().BeNull();
             p.Low.Should().BeNull();
+        });
+    }
+
+    [Fact]
+    public void Map_ExactMidnight_ProducesCompleteDailyUtcAuthority()
+    {
+        var result = CoinGeckoMapper.Map(ValidJson, AssetId, From, To, "bitcoin");
+
+        result.Should().AllSatisfy(point =>
+        {
+            point.ProviderSource.Should().Be("coingecko");
+            point.PriceKind.Should().Be("daily_utc_reference");
+            point.IsFinal.Should().BeTrue();
+            point.AsOfAt!.Value.TimeOfDay.Should().Be(TimeSpan.Zero);
+            point.PayloadSha256.Should().HaveCount(32);
+            point.ObservationSha256.Should().BeNull(
+                "the database computes canonical observation authority");
+            point.SourceObservationId.Should().StartWith("coingecko:bitcoin:try:");
+            point.SourceRaw.Should().NotBeNullOrWhiteSpace();
         });
     }
 }

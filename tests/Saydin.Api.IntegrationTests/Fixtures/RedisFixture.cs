@@ -4,7 +4,8 @@ namespace Saydin.Api.IntegrationTests.Fixtures;
 
 /// <summary>
 /// F1.9-7 / F2.6-21: docker-compose ağındaki gerçek Redis'e bağlanır
-/// (<c>ConnectionStrings__Redis</c> env). Erişilemezse testler SkippableFact ile atlanır.
+/// (<c>ConnectionStrings__Redis</c> env). Yerel optional modda erişilemezse testler
+/// SkippableFact ile atlanır; required CI modunda aynı durum failure'dır.
 /// </summary>
 public sealed class RedisFixture : IDisposable
 {
@@ -14,12 +15,19 @@ public sealed class RedisFixture : IDisposable
 
     public RedisFixture()
     {
+        var required = IntegrationTestEnvironment.IsRequired;
         var connStr = Environment.GetEnvironmentVariable("ConnectionStrings__Redis");
         if (string.IsNullOrWhiteSpace(connStr))
         {
+            if (required)
+                throw new InvalidOperationException(
+                    "Required integration modunda ConnectionStrings__Redis env zorunludur.");
+
             SkipReason = "ConnectionStrings__Redis env yok (entegrasyon Redis'i erişilemez).";
             return;
         }
+
+        IntegrationTestEnvironment.ValidateRequiredRedis(connStr);
 
         try
         {
@@ -29,10 +37,19 @@ public sealed class RedisFixture : IDisposable
             Multiplexer = ConnectionMultiplexer.Connect(opts);
             Available = Multiplexer.IsConnected;
             if (!Available)
+            {
+                if (required)
+                    Multiplexer.Dispose();
+                IntegrationTestEnvironment.EnsureRequiredRedisConnected(required, Available);
                 SkipReason = "Redis bağlantısı kurulamadı (IsConnected=false).";
+            }
         }
         catch (Exception ex)
         {
+            if (required)
+                throw new InvalidOperationException(
+                    "Required integration Redis hazırlığı başarısız oldu; testler skip edilemez.", ex);
+
             SkipReason = $"Redis erişilemez: {ex.GetType().Name}: {ex.Message}";
         }
     }

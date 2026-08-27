@@ -10,6 +10,12 @@
 # (c) Sonar PL/SQL analizöründen hariç ve (d) .coderabbit.yaml path filtresi ile denetleniyor.
 #
 # NOT: Yalnız *.sql hariç tutulur; 012b_create_exporter_role.sh HARİÇ DEĞİL → ShellCheck devam eder.
+#
+# tools/calendar-data/data/** ayrıca hariç tutulur: SHA-256 ile pinlenmiş, birebir
+# yakalanmış üçüncü taraf takvim sayfaları ve JSON manifestleri. Bunlar kanıt
+# artefaktıdır, kaynak kod değildir — bir lint kuralını memnun etmek için düzenlemek
+# offline doğrulama zincirini bozar. Aynı yol `.sonarcloud.properties` içinde de hariçtir.
 exclude_paths:
   - "infrastructure/postgres/migrations/*.sql"
   - "infrastructure/postgres/migrations/**/*.sql"
+  - "tools/calendar-data/data/**"

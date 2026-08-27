@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
 
 using Saydin.Shared.Exceptions;
+using Saydin.Shared.Diagnostics;
 
 namespace Saydin.Api.Exceptions;
 
@@ -25,6 +26,10 @@ public sealed class PriceNotFoundExceptionHandler(
             "Fiyat bulunamadı: {Symbol} / {Date}",
             ex.AssetSymbol,
             ex.Date);
+
+        // Count at the HTTP exception boundary so a single failed request is never
+        // double-counted by nested calculator/service layers.
+        SaydinMetrics.PriceNotFoundCount.Add(1);
 
         context.Response.StatusCode = StatusCodes.Status404NotFound;
 

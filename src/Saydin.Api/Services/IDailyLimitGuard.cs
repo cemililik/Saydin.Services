@@ -6,7 +6,7 @@ public interface IDailyLimitGuard
 {
     /// <summary>
     /// Günlük limit kontrolü yapar. Limit aşıldıysa DailyLimitExceededException fırlatır.
-    /// Redis erişilemezse sessizce geçer (fail-open) — calculation engellenmez.
+    /// Redis erişilemezse <see cref="QuotaUnavailableException"/> ile fail-closed olur.
     /// TOCTOU race riski içerir; tercih edilen: <see cref="TryAcquireAsync"/>.
     /// </summary>
     /// <param name="user">Kayıtlı kullanıcı (anonim → null).</param>
@@ -26,7 +26,7 @@ public interface IDailyLimitGuard
 
     /// <summary>
     /// Atomik olarak günlük sayacı artırır. Limit aşıldıysa DailyLimitExceededException fırlatır.
-    /// Redis erişilemezse sessizce geçer (fail-open).
+    /// Redis erişilemezse <see cref="QuotaUnavailableException"/> ile fail-closed olur.
     /// </summary>
     /// <inheritdoc cref="CheckAsync"/>
     Task IncrementAsync(
@@ -42,7 +42,7 @@ public interface IDailyLimitGuard
     /// fırlatır. TOCTOU race'i kapatır; pahalı hesap işlemi öncesi tek round-trip ile çağrılır.
     /// Hesap başarısız olursa caller <see cref="ReleaseAsync"/> ile kotayı iade edebilir.
     /// </summary>
-    Task TryAcquireAsync(
+    Task<QuotaLease> TryAcquireAsync(
         User? user,
         string deviceId,
         string usageKeyPrefix,
@@ -54,10 +54,5 @@ public interface IDailyLimitGuard
     /// (DECR — atomik, negatife düşmez). Yalnızca hesaplama başarısız olduğunda
     /// "başarısız hesap kotadan düşmesin" garantisi için çağrılır.
     /// </summary>
-    Task ReleaseAsync(
-        User? user,
-        string deviceId,
-        string usageKeyPrefix,
-        int? limitOverride = null,
-        CancellationToken ct = default);
+    Task ReleaseAsync(QuotaLease lease, CancellationToken ct = default);
 }

@@ -4,9 +4,14 @@
 
 Saydın, Türk kullanıcılara yönelik finansal "ya alsaydım?" hesaplama uygulamasının backend'idir.
 
-Bu repo iki .NET 10 servisini ve ortak kütüphaneyi içerir:
+Bu repo iki uzun ömürlü .NET 10 servisini, one-shot database control-plane araçlarını, offline
+calendar aracını ve ortak kütüphaneleri içerir:
 - `Saydin.Api` — Flutter uygulamasına HTTP endpoint'leri sunan Minimal API servisi
 - `Saydin.PriceIngestion` — Dış finansal API'lerden fiyat verisi çeken background worker
+- `Saydin.DatabaseMigrator` — SQL migration control-plane; servislerden önce tek sefer çalışır
+- `Saydin.DatabaseRoleBootstrap` / `Saydin.DatabaseSecurity` — managed rol/secret sınırı
+- `Saydin.DataQualityAudit` / `Saydin.DataRepair` — salt-okunur kanıt ve imzalı operatör onarımı
+- `Saydin.CalendarData` — offline authoritative calendar acquisition/verification aracı
 - `Saydin.Shared` — Her iki servisin kullandığı ortak entity, exception ve extension sınıfları
 
 ---
@@ -18,22 +23,33 @@ Bu repo iki .NET 10 servisini ve ortak kütüphaneyi içerir:
 Tüm build, test ve çalıştırma işlemleri **Docker Compose** üzerinden yapılır:
 
 ```bash
-# Kod değişikliğinden sonra image'ı yeniden oluştur ve servisleri başlat
-docker compose build && docker compose up -d
+# İlk checkout'ta (ve backup login yenilemesi gerektiğinde) private secret'ları
+# ve Compose'un zorunlu runtime metadata dosyasını üret.
+./infrastructure/secrets/bootstrap-dev-database.sh
 
-# Test (Faz 3: `tests` compose profili — SDK imajı + repo mount + compose ağı).
+# Kod değişikliğinden sonra image'ı yeniden oluştur ve servisleri başlat
+docker compose --env-file .env --env-file .env.database-runtime build
+docker compose --env-file .env --env-file .env.database-runtime up -d
+
+# Lokal unit kapısı (`test` compose profili — pinned SDK imajı + repo mount).
 # `api`/`saydin-api` runtime imajı SDK ve test projeleri içermez; `dotnet test` ÇALIŞMAZ.
-docker compose run --rm tests                                   # tüm solution (unit + integration)
-docker compose run --rm tests test tests/Saydin.Api.Tests       # yalnız bir proje
-docker compose run --rm tests test tests/Saydin.Api.IntegrationTests   # gerçek PG/Redis (compose up gerekli)
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.Api.Tests
+docker compose --env-file .env --env-file .env.database-runtime run --rm database-migrator --verify-only
+# Root `tests` servisi purpose-specific DB credential taşımaz ve solution/integration komutlarını
+# fail-closed reddeder. Gerçek PostgreSQL/Redis kabulü: `.github/workflows/ci.yml` integration-test
+# job'ı + `.github/compose.integration.yml` (UUID DB/project/volume, no host ports, zero-skip gate).
 ```
 
 **`docker compose run --rm api dotnet build` KULLANMA** — build ve deploy için her zaman `docker compose build && docker compose up -d` kullan.
 
 Lokal `dotnet` bulunamadı diye debelenme — her zaman Docker Compose kullan.
 
-**NOT (Faz 3):** Migration zinciri yalnız boş volume'da (fresh init) alfabetik + `ON_ERROR_STOP`
-ile çalışır. Bir `.sql` hata verirse zincir DURUR. TimescaleDB hypertable'larında (`activity_logs`)
+**NOT (C-02):** Migration zinciri artık Postgres `initdb.d` tarafından değil, her deploy/startup'ta
+pre-bootstrap → one-shot `database-migrator` → post-migration bootstrap sırasıyla çalıştırılır.
+PostgreSQL health yalnız bağlantıyı ölçer; API, ingestion ve DB monitoring
+`service_completed_successfully` ile doğrulanmış şema ve post-022 backup rol grafiğini bekler.
+Bir migration hata verirse job non-zero döner ve downstream başlamaz. TimescaleDB hypertable'larında (`activity_logs`)
 compression **enabled** iken `ALTER COLUMN ... TYPE` yasaktır (TS 2.16.1). Bu nedenle compression'ı
 etkileyen kolon değişiklikleri için `008b` (009'dan önce disable) / `013` (012'den sonra re-enable)
 sarmalama deseni kullanılır — yeni `ALTER COLUMN TYPE` eklerken bu pencereyi koru.
@@ -53,11 +69,12 @@ durumlarında işlem sonrası bu dokümanı güncelle.
 **Kod değişikliklerini commit etmeden önce mutlaka build ve testleri çalıştır.**
 
 ```bash
-# Build doğrulaması (SDK imajı + repo mount):
-docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
+# Build doğrulaması (global.json ile aynı exact SDK digest'i + repo mount):
+docker run --rm -v "$PWD":/src -w /src \
+  mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c \
   dotnet build Saydin.Services.sln -c Debug
-# Testler (`tests` compose profili):
-docker compose run --rm tests
+# Unit + coverage ratchet (`test` compose profili):
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests
 ```
 
 Build veya test başarısız olursa commit atma, önce hatayı düzelt.
@@ -76,8 +93,11 @@ Build veya test başarısız olursa commit atma, önce hatayı düzelt.
 - **DbContext:** `SaydinDbContext` `Saydin.Shared/Data/` içinde yaşar, her iki servis tarafından paylaşılır
 - **Saydin.Api:** `AddDbContext<SaydinDbContext>()` → scoped lifetime
 - **Saydin.PriceIngestion:** `AddDbContextFactory<SaydinDbContext>()` → singleton-safe factory pattern
-- **Migration:** `dotnet ef migrations add <Ad> --project src/Saydin.Shared --startup-project src/Saydin.Api`
-- **HTTP Client:** `IHttpClientFactory` ile kayıtlı named client'lar — `new HttpClient()` YASAKTIR
+- **Migration:** `infrastructure/postgres/migrations/` altındaki immutable sıralı SQL + `Saydin.DatabaseMigrator`; EF migration kullanılmaz
+- **HTTP Client:** `IHttpClientFactory` ile kayıtlı named client'lar — `new HttpClient()` YASAKTIR.
+  Tek kapsamlı istisna, hosted service olmayan `tools/calendar-data` one-shot control-plane
+  composition root'udur; bounded stdout/stderr ve hardened handler sözleşmesi
+  `infrastructure/calendar/README.md` içinde tanımlanır.
 
 ### Servis Sınırları
 
@@ -94,6 +114,12 @@ Endpoints  →  Services  →  Repositories  →  Database
 - Endpoint handler'lar Service çağırır, Repository'ye doğrudan erişmez
 - Service'ler Repository çağırır, DbContext'e doğrudan erişmez
 - İş mantığı Endpoint handler'larda YOK
+- Dar güvenlik istisnası: installation credential lifecycle (migration 021–024)
+  sabit-zamanlı verifier resolve/rehash ve SQLSTATE→401 sözleşmesi nedeniyle
+  `InstallationEndpoints` → `IInstallationRepository` doğrudan yolunu kullanır;
+  `InstallationRepository` yalnız DI ile paylaşılan `NpgsqlDataSource` ve parametreli
+  SECURITY DEFINER fonksiyon çağrıları kullanabilir. Bu istisna başka endpoint/repository
+  akışlarına genişletilemez.
 
 ### DTO Kuralları
 
@@ -178,14 +204,16 @@ var result = await service.CalculateAsync(ct);
   (gün-dönümü flaky'liği önlenir).
 - PriceIngestion worker'ları şimdilik kapsam dışı (worker zamanlaması test determinizmi gerektirmiyor).
 
-### İstek Bağlamı (IDeviceContext) — Faz 3
+### İstek Bağlamı (IInstallationPrincipalContext)
 
+- Korumalı route'lar server-issued `Authorization: Installation <token>` credential'ını
+  doğrular; aktif principal id scoped `IInstallationPrincipalContext` içine yazılır.
 - İş service'i arayüzleri (`IWhatIfCalculator`, `IDcaCalculator`, `ISavedScenarioService`,
-  `IAppConfigService`) `string deviceId` parametresi **taşımaz** — device id scoped
-  `IDeviceContext`'ten okunur. `RequireDeviceId` filter doğrulanmış değeri doldurur.
-  `IDeviceContext` **scoped** kayıtlıdır; singleton'a enjekte ETME (cihazlar-arası sızıntı).
-- `IDailyLimitGuard` / `IPlanLimitResolver` altyapı bileşenidir; `deviceId`'yi açık parametre
-  olarak taşımaya devam eder (endpoint'ten `null` user ile çağrılabilir).
+  `IAppConfigService`) client-chosen device id taşımaz. `X-Device-ID` authorization veya kota
+  kökü değildir.
+- `IInstallationPrincipalContext` **scoped** kayıtlıdır; singleton'a enjekte ETME
+  (principal'lar arası sızıntı). Dağıtık quota/limiter anahtarları ham principal/IP değil,
+  purpose-separated HMAC pseudonym kullanır.
 
 ### Kod Stili (.editorconfig) — Faz 3
 
@@ -217,13 +245,15 @@ Log seviyesi kuralları:
 ### Exception Handling (IExceptionHandler Zinciri)
 
 ```
-ValidationExceptionHandler → FeatureDisabledExceptionHandler → PriceNotFoundExceptionHandler
+RequestBodyTooLargeExceptionHandler → ValidationExceptionHandler
+  → FeatureDisabledExceptionHandler → PriceNotFoundExceptionHandler
   → AssetNotFoundExceptionHandler → ScenarioNotFoundExceptionHandler
   → ScenarioLimitExceededExceptionHandler → DailyLimitExceededExceptionHandler
-  → ExternalApiExceptionHandler → GlobalExceptionHandler
+  → QuotaUnavailableExceptionHandler → ExternalApiExceptionHandler → GlobalExceptionHandler
 ```
 
-(Kayıt sırası `Program.cs`'tedir; spesifik handler'lar önce, `GlobalExceptionHandler` her zaman en sonda. HTTP kodları: 400 · 403 · 404 · 422 · 429 · 502 · 500.)
+(Kayıt sırası `Program.cs`'tedir; spesifik handler'lar önce, `GlobalExceptionHandler` her zaman
+en sonda. HTTP kodları: 400 · 403 · 404 · 413 · 422 · 429 · 502 · 503 · 500.)
 
 **Her domain exception için ayrı `IExceptionHandler` sınıfı yazılır.**
 
@@ -307,22 +337,18 @@ public interface IExternalPriceAdapter
 {
     string Source { get; }   // "tcmb", "coingecko", "openexchangerates", "twelvedata"
 
-    Task<IReadOnlyList<PricePoint>> FetchRangeAsync(
-        Guid assetId,
-        string assetSymbol,
-        string sourceId,
-        DateOnly from,
-        DateOnly to,
+    Task<AdapterOutcome<PricePoint>> FetchRangeAsync(
+        PriceFetchRequest request,
         CancellationToken ct);
 }
 // EVDS (enflasyon) ayrı `IInflationAdapter`'ı uygular — price adapter sözleşmesini değil.
 ```
 
-- `Microsoft.Extensions.Http.Resilience` (Polly v8) `AddStandardResilienceHandler` ile merkezi pipeline (`HttpResilienceExtensions.AddSaydinResilience`)
+- `Microsoft.Extensions.Http.Resilience` (Polly v8) custom `AddResilienceHandler` ile merkezi pipeline (`HttpResilienceExtensions.AddSaydinResilience`)
 - **retry** (3 deneme, exponential backoff + jitter)
 - **circuit breaker** — `MinimumThroughput=2`, `FailureRatio=1.0`, `SamplingDuration=120s` → düşük-trafik worker'larda (örn. EVDS aylık) pratikte ~2 ardışık hatada devre 120 sn açılır (rationale: `HttpResilienceExtensions` içi yorum)
-- Her istekte 30 saniye AttemptTimeout (+ 3 dk TotalRequestTimeout)
-- 429 (rate limit) alındığında exponential backoff uygulanır
+- Her denemede 30 saniye AttemptTimeout (send/header acquisition); retry zincirinin tamamında 3 dk TotalRequestTimeout. `ResponseHeadersRead` sonrası body bu attempt timer'ının dışında olduğundan worker aynı 3 dk sabitini adapter'ın header + body + parse + lease-renewal akışına mutlak bütçe olarak uygular; aşım durable `provider_deadline` retryable outcome üretir
+- 429'da gecikme `max(exponential+jitter, bounded Retry-After)` olur; dış 3 dk bütçeyi aşamaz
 
 ---
 
@@ -355,15 +381,12 @@ await context.Database.ExecuteSqlInterpolatedAsync(
 ### Migration Komutları
 
 ```bash
-# Yeni migration oluştur
-dotnet ef migrations add <MigrationAdı> \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
+# Yeni production migration: sıradaki numarayla yeni .sql ekle; mevcut 001..024'ü değiştirme.
+# Mevcut hedefe pending migration'ları uygula (Compose secrets env'den gelir):
+docker compose --env-file .env --env-file .env.database-runtime run --rm database-migrator
 
-# Veritabanını güncelle
-dotnet ef database update \
-  --project src/Saydin.Shared \
-  --startup-project src/Saydin.Api
+# Uygulama yapmadan checksum, control state ve core şema fingerprint doğrula:
+docker compose --env-file .env --env-file .env.database-runtime run --rm database-migrator --verify-only
 ```
 
 ---
@@ -375,15 +398,16 @@ dotnet ef database update \
 - Dış adaptörler için en az deserializasyon testi (contract test) gerekir
 - **Test türü → izolasyon stratejisi (mock politikası) — F4-9:**
   - **Service unit testleri:** Collaborator bağımlılıkları (repository, cache,
-    `IDailyLimitGuard`, `IStringLocalizer`, `IDeviceContext`, dış adapter interface'leri)
+    `IDailyLimitGuard`, `IStringLocalizer`, `IInstallationPrincipalContext`, dış adapter interface'leri)
     **NSubstitute ile mock'lanır** — serbesttir. Determinizm için saat `FakeTimeProvider`
     ile dondurulur. Hedef: iş mantığını DB/Redis olmadan hızlı ve izole test etmek.
   - **Dış adapter contract testleri:** Yalnız HTTP katmanı sahtelenir
     (`HttpMessageHandler` / fake handler ile sabit yanıt); deserializasyon, retry/backoff,
     timeout ve hata→exception davranışı doğrulanır.
-  - **Veritabanı / integration testleri:** **mock YASAK** — gerçek PostgreSQL ve Redis
-    kullanılır (`tests` compose profili; compose ağındaki `postgres`/`redis` servisleri).
-    PG/Redis erişilemezse test `SkippableFact` ile Skipped olur, kırmızıya dönmez.
+  - **Veritabanı / integration testleri:** **mock YASAK** — gerçek PostgreSQL ve Redis kullanılır.
+    Root `tests` profili integration çalıştırmaz; kanonik required akış
+    `.github/compose.integration.yml` üzerinde purpose-specific login/secret ve ephemeral DB'lerle
+    fail-fast çalışır. Her TRX'te `total=executed=passed`, failed/skipped/notExecuted sıfırdır.
 
 ---
 
@@ -406,9 +430,11 @@ Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` d
 ## Yasak Listesi
 
 - **Dapper** — YASAK (EF Core kullan)
-- **Raw `Npgsql.NpgsqlConnection`** doğrudan açmak — YASAK (DbContext kullan)
+- **Raw `Npgsql.NpgsqlConnection`** doğrudan açmak — YASAK (DbContext kullan). Yalnız yukarıda
+  tanımlı `InstallationRepository` paylaşılan `NpgsqlDataSource` istisnası geçerlidir.
 - Controller sınıfı (`[ApiController]`, `ControllerBase`) — YASAK
-- `new HttpClient()` — YASAK
+- `new HttpClient()` — YASAK. Yalnız yukarıda belgelenen calendar-data one-shot composition-root
+  istisnası geçerlidir; servis/adapter koduna genişletilemez.
 - `double`, `float` finansal değer için — YASAK
 - SQL string interpolation — YASAK
 - Kafka, Dapr, gRPC (ADR olmadan) — YASAK
@@ -417,7 +443,8 @@ Ek olarak: `Resources/ErrorMessages.resx` ve `Resources/ErrorMessages.en.resx` d
 - `DateTime.Now` finansal tarihler için — YASAK (kullan: `DateTimeOffset.UtcNow` veya `DateOnly`)
 - API key'i appsettings.json'a yazmak — YASAK
 - Log mesajında string interpolation — YASAK (kullan: parametreli mesaj)
-- `Console.WriteLine` veya `Debug.WriteLine` — YASAK (kullan: `ILogger<T>`)
+- `Console.WriteLine` veya `Debug.WriteLine` — YASAK (kullan: `ILogger<T>`). Yalnız calendar-data
+  one-shot CLI'nin bounded machine-readable process contract'ı belgeli istisnadır.
 - Exception handler olmadan endpoint yazmak — YASAK (GlobalExceptionHandler her zaman var)
 - Kullanıcıya dönecek string'lerde hardcoded Türkçe/İngilizce — YASAK (kullan: `IStringLocalizer<ErrorMessages>`)
 

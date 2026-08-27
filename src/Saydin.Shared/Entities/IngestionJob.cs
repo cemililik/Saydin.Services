@@ -49,8 +49,15 @@ public sealed class IngestionJob
     public DateOnly? DateRangeStart { get; init; }
     public DateOnly? DateRangeEnd { get; init; }
 
+    /// <summary>Migration 015: durable logical window correlation; legacy rows remain null.</summary>
+    public Guid? WindowId { get; init; }
+
+    /// <summary>Stable machine-readable terminal outcome; legacy rows remain null.</summary>
+    public string? OutcomeCode { get; set; }
+
     // Navigation
     public Asset? Asset { get; init; }
+    public IngestionWindow? Window { get; init; }
 }
 
 /// <summary>Ingestion job tip sabitleri (DB CHECK constraint ile eşleşir; migration 011/012).</summary>

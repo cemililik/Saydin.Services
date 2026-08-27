@@ -18,5 +18,6 @@ public record ReverseWhatIfResponse(
     decimal?  RealProfitLossPercent,
     DateOnly? InflationDataAsOf,
     DateOnly? ActualBuyDate,
-    DateOnly? ActualSellDate
+    DateOnly? ActualSellDate,
+    CalculationDataResponse? Data = null
 );

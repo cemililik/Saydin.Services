@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
 using Saydin.Api.Options;
 using Saydin.Shared.Entities;
@@ -6,32 +8,74 @@ using StackExchange.Redis;
 
 namespace Saydin.Api.Services;
 
-public sealed class DailyLimitGuard(
-    IConnectionMultiplexer redis,
-    IOptions<PlanOptions> options,
-    TimeProvider timeProvider,
-    ILogger<DailyLimitGuard> logger) : IDailyLimitGuard
+public sealed class DailyLimitGuard : IDailyLimitGuard
 {
     private const string PremiumTier = "premium";
+    private const long RetentionMilliseconds = 48L * 60 * 60 * 1000;
+    private const int MaximumCalendarRaceRetries = 2;
 
-    private (bool HasLimit, int Limit, string Key) GetLimitAndKey(
-        User? user, string deviceId, string usageKeyPrefix, int? limitOverride, DateTime now)
+    private const string CheckScript = """
+        local now = redis.call('TIME')
+        local day = math.floor(tonumber(now[1]) / 86400)
+        if day ~= tonumber(ARGV[1]) then
+          return {-1, day}
+        end
+        local count = tonumber(redis.call('HGET', KEYS[1], 'count') or '0')
+        if count >= tonumber(ARGV[2]) then
+          return {0, day}
+        end
+        return {1, day}
+        """;
+
+    internal const string AcquireScript = """
+        local now = redis.call('TIME')
+        local day = math.floor(tonumber(now[1]) / 86400)
+        if day ~= tonumber(ARGV[1]) then
+          return {-1, day}
+        end
+        local lease_field = 'lease:' .. ARGV[3]
+        if redis.call('HEXISTS', KEYS[1], lease_field) == 1 then
+          return {1, day}
+        end
+        local count = tonumber(redis.call('HGET', KEYS[1], 'count') or '0')
+        if count >= tonumber(ARGV[2]) then
+          return {0, day}
+        end
+        redis.call('HINCRBY', KEYS[1], 'count', 1)
+        redis.call('HSET', KEYS[1], lease_field, '1')
+        redis.call('PEXPIRE', KEYS[1], ARGV[4])
+        return {1, day}
+        """;
+
+    private const string ReleaseScript = """
+        local removed = redis.call('HDEL', KEYS[1], 'lease:' .. ARGV[1])
+        if removed == 0 then
+          return 0
+        end
+        local count = tonumber(redis.call('HGET', KEYS[1], 'count') or '0')
+        if count > 0 then
+          redis.call('HINCRBY', KEYS[1], 'count', -1)
+        end
+        return 1
+        """;
+
+    private readonly IConnectionMultiplexer _redis;
+    private readonly IOptions<PlanOptions> _options;
+    private readonly IQuotaSubjectPseudonymizer _pseudonymizer;
+    private readonly ILogger<DailyLimitGuard> _logger;
+
+    public DailyLimitGuard(
+        IConnectionMultiplexer redis,
+        IOptions<PlanOptions> options,
+        IQuotaSubjectPseudonymizer pseudonymizer,
+        TimeProvider timeProvider,
+        ILogger<DailyLimitGuard> logger)
     {
-        // Premium kullanıcı override almıyorsa (yani caller bilinçli limit dayatmadıysa) sınırsız.
-        // Karşılaştırma case-insensitive — tier "Premium" veya "PREMIUM" de gelebilir
-        // (PlanOptions.GetTierOptions zaten OrdinalIgnoreCase ile çözüyor; aynı semantiği koru).
-        if (limitOverride is null
-            && string.Equals(user?.Tier, PremiumTier, StringComparison.OrdinalIgnoreCase))
-            return (false, 0, string.Empty);
-
-        var limit = limitOverride
-            ?? options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
-
-        if (limit <= 0)
-            return (false, 0, string.Empty);
-
-        var key = BuildUsageKey(user, deviceId, usageKeyPrefix, now);
-        return (true, limit, key);
+        _redis = redis;
+        _options = options;
+        _pseudonymizer = pseudonymizer;
+        _logger = logger;
+        _ = timeProvider; // Kept for source/DI compatibility; Redis TIME is authoritative.
     }
 
     public async Task CheckAsync(
@@ -41,143 +85,217 @@ public sealed class DailyLimitGuard(
         int? limitOverride = null,
         CancellationToken ct = default)
     {
-        // Tek nokta UtcNow okuması — key date'i ile TTL'in farklı dakikalardan
-        // (gece yarısı geçişinde) çıkmasını engeller.
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
+        var (hasLimit, limit) = GetLimit(user, limitOverride);
         if (!hasLimit) return;
 
         try
         {
-            ct.ThrowIfCancellationRequested();
-            var db    = redis.GetDatabase();
-            var value = await db.StringGetAsync(key);
-            var count = value.HasValue ? (long)value : 0;
+            var database = _redis.GetDatabase();
+            var day = await GetRedisUtcDayAsync(database, ct);
+            for (var attempt = 0; attempt < MaximumCalendarRaceRetries; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var key = BuildUsageKey(PseudonymizeSubject(user, deviceId), usageKeyPrefix, day);
+                var result = ParsePair(await database.ScriptEvaluateAsync(
+                    CheckScript, [key], [day, limit]).WaitAsync(ct));
+                if (result.Status == -1)
+                {
+                    day = result.Day;
+                    continue;
+                }
 
-            if (count >= limit)
-                throw new DailyLimitExceededException(limit);
+                if (result.Status == 0) throw new DailyLimitExceededException(limit);
+                if (result.Status != 1) throw new QuotaUnavailableException();
+                return;
+            }
+
+            throw new QuotaUnavailableException();
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
-        {
-            logger.LogWarning(ex, "Daily limit Redis kontrolü başarısız, hesaplama devam ediyor");
-        }
-    }
-
-    public Task IncrementAsync(
-        User? user,
-        string deviceId,
-        string usageKeyPrefix,
-        int? limitOverride = null,
-        CancellationToken ct = default)
-        => TryAcquireAsync(user, deviceId, usageKeyPrefix, limitOverride, ct);
-
-    public async Task TryAcquireAsync(
-        User? user,
-        string deviceId,
-        string usageKeyPrefix,
-        int? limitOverride = null,
-        CancellationToken ct = default)
-    {
-        // Aynı `now` değeri hem key date'i hem TTL hesabı için kullanılır;
-        // BuildUsageKey'in bağımsız UtcNow okuması ile oluşan midnight race kapanır.
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        var (hasLimit, limit, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
-        if (!hasLimit) return;
-
-        var ttlMs = (long)(now.Date.AddDays(1) - now).TotalMilliseconds;
-        try
-        {
-            ct.ThrowIfCancellationRequested();
-            // F1.3-7: Check-then-INCR pattern — önceki INCR-then-DECR sayacı geçici
-            // olarak limit'in üzerine şişiriyordu (cosmetic) ve telemetry / metric
-            // okumalarında yanıltıcı oluyordu. Lua script atomic olduğu için race yok;
-            // bu varyant niyeti daha net açıklıyor (review F1.3-7).
-            // Dönüş: 1 = allow, 0 = reject (limit reached).
-            //
-            // PR #11 follow-up: PEXPIRE yalnızca yeni key'in ilk INCR'ında çağrılır
-            // (`count == 1`). Önceki revizyon her başarılı istekte PEXPIRE atıyordu,
-            // bu hem (a) gereksiz Redis yazma yükü oluşturuyor hem de (b) sliding-window
-            // gibi yanlış bir izlenim veriyordu. Semantik calendar-day: key adı zaten
-            // `usage:{prefix}:{userId}:{yyyy-MM-dd}` formatında tarih içeriyor (gece
-            // yarısı geçince yeni key 0'dan başlar) ve TTL caller tarafından
-            // "gece yarısına kalan ms" olarak hesaplanır. İlk INCR'da TTL set
-            // edildiğinde aynı günün geri kalanı için aynı pencere geçerli olur.
-            const string script = """
-                local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-                if current >= tonumber(ARGV[1]) then
-                  return 0
-                end
-                local count = redis.call('INCR', KEYS[1])
-                if count == 1 then
-                  redis.call('PEXPIRE', KEYS[1], ARGV[2])
-                end
-                return 1
-                """;
-            var result = (long)await redis.GetDatabase()
-                .ScriptEvaluateAsync(script, keys: [key], values: [limit, ttlMs]);
-
-            if (result == 0)
-                throw new DailyLimitExceededException(limit);
-        }
-        catch (OperationCanceledException)
+        catch (DailyLimitExceededException)
         {
             throw;
         }
-        catch (Exception ex) when (ex is not DailyLimitExceededException)
+        catch (QuotaUnavailableException)
         {
-            logger.LogWarning(ex, "Daily limit increment başarısız: {Key}", key);
+            throw;
+        }
+        catch (Exception)
+        {
+            _logger.LogWarning("Daily quota decision unavailable: {Code}", QuotaUnavailableException.ErrorCode);
+            throw new QuotaUnavailableException();
         }
     }
 
-    public async Task ReleaseAsync(
+    public async Task IncrementAsync(
         User? user,
         string deviceId,
         string usageKeyPrefix,
         int? limitOverride = null,
         CancellationToken ct = default)
     {
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        var (hasLimit, _, key) = GetLimitAndKey(user, deviceId, usageKeyPrefix, limitOverride, now);
-        if (!hasLimit) return;
+        _ = await TryAcquireAsync(user, deviceId, usageKeyPrefix, limitOverride, ct);
+    }
+
+    public async Task<QuotaLease> TryAcquireAsync(
+        User? user,
+        string deviceId,
+        string usageKeyPrefix,
+        int? limitOverride = null,
+        CancellationToken ct = default)
+    {
+        var (hasLimit, limit) = GetLimit(user, limitOverride);
+        if (!hasLimit) return QuotaLease.Noop;
 
         try
         {
-            ct.ThrowIfCancellationRequested();
-            // Atomik DECR; sayaç 0'ın altına düşse bile günlük key TTL ile temizlenir.
-            const string script = """
-                local count = redis.call('GET', KEYS[1])
-                if count and tonumber(count) > 0 then
-                  return redis.call('DECR', KEYS[1])
-                end
-                return 0
-                """;
-            await redis.GetDatabase().ScriptEvaluateAsync(script, keys: [key]);
+            var database = _redis.GetDatabase();
+            var day = await GetRedisUtcDayAsync(database, ct);
+            var nonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
+
+            for (var attempt = 0; attempt < MaximumCalendarRaceRetries; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var key = BuildUsageKey(PseudonymizeSubject(user, deviceId), usageKeyPrefix, day);
+                var values = new RedisValue[] { day, limit, nonce, RetentionMilliseconds };
+                RedisResult rawResult;
+                try
+                {
+                    rawResult = await database.ScriptEvaluateAsync(AcquireScript, [key], values)
+                        .WaitAsync(ct);
+                }
+                catch (Exception exception) when (IsAmbiguousRedisFailure(exception))
+                {
+                    // The script may have committed before its response was lost. Replaying
+                    // the same nonce is safe: HEXISTS returns success without incrementing.
+                    ct.ThrowIfCancellationRequested();
+                    rawResult = await database.ScriptEvaluateAsync(AcquireScript, [key], values)
+                        .WaitAsync(ct);
+                }
+
+                ct.ThrowIfCancellationRequested();
+                var result = ParsePair(rawResult);
+                if (result.Status == -1)
+                {
+                    day = result.Day;
+                    continue;
+                }
+
+                if (result.Status == 0) throw new DailyLimitExceededException(limit);
+                if (result.Status != 1) throw new QuotaUnavailableException();
+                return QuotaLease.CreateAcquired(key, nonce);
+            }
+
+            throw new QuotaUnavailableException();
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch (Exception ex)
+        catch (DailyLimitExceededException)
         {
-            // Release best-effort: hata kullanıcının yoluna yansımaz, telemetry için log yeterli.
-            logger.LogWarning(ex, "Daily limit release başarısız: {Key}", key);
+            throw;
+        }
+        catch (QuotaUnavailableException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Do not log Redis keys, device identifiers, users, nonces or exception text.
+            _logger.LogWarning("Daily quota acquisition unavailable: {Code}", QuotaUnavailableException.ErrorCode);
+            throw new QuotaUnavailableException();
         }
     }
 
-    /// <summary>
-    /// Usage key formatı: <c>{prefix}{userId|deviceId}:{yyyy-MM-dd}</c>.
-    /// C-Low-1: <paramref name="now"/> ZORUNLU — caller (production'da TimeProvider'dan,
-    /// testlerde sabit timestamp) tek bir değer yakalayıp TTL hesabıyla buraya geçirir;
-    /// gece yarısı race'i kapanır ve testlerde gerçek-saat (DateTime.UtcNow) flaky'liği olmaz.
-    /// </summary>
-    internal static string BuildUsageKey(User? user, string deviceId, string prefix, DateTime now)
+    public async Task ReleaseAsync(QuotaLease lease, CancellationToken ct = default)
     {
-        var userId  = user?.Id.ToString() ?? deviceId;
-        var dateKey = now.ToString("yyyy-MM-dd");
-        return $"{prefix}{userId}:{dateKey}";
+        ArgumentNullException.ThrowIfNull(lease);
+        if (lease.IsNoop) return;
+        if (!lease.Acquired || string.IsNullOrEmpty(lease.RedisKey) ||
+            lease.Nonce.Length != 32 || !lease.Nonce.All(Uri.IsHexDigit))
+            throw new ArgumentException("Invalid quota lease.", nameof(lease));
+
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            _ = await _redis.GetDatabase().ScriptEvaluateAsync(
+                ReleaseScript, [lease.RedisKey], [lease.Nonce]).WaitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            _logger.LogWarning("Daily quota release unavailable: {Code}", QuotaUnavailableException.ErrorCode);
+            throw new QuotaUnavailableException();
+        }
     }
+
+    internal static string BuildUsageKey(string quotaSubject, string prefix, long utcDay)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(prefix);
+        if (prefix.Length > 128 || prefix.Any(char.IsControl))
+            throw new ArgumentException("Invalid quota key prefix.", nameof(prefix));
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(quotaSubject);
+        if (quotaSubject.Length != 35 || !quotaSubject.StartsWith("q1:", StringComparison.Ordinal) ||
+            quotaSubject[3..].Any(character =>
+                !((character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f'))))
+            throw new ArgumentException("Invalid quota pseudonym.", nameof(quotaSubject));
+
+        var date = DateTimeOffset.FromUnixTimeSeconds(checked(utcDay * 86400))
+            .UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        return $"{prefix}{quotaSubject}:{date}";
+    }
+
+    private string PseudonymizeSubject(User? user, string deviceId)
+    {
+        var subject = user is null
+            ? deviceId
+            : user.Id.ToString("N", CultureInfo.InvariantCulture);
+        return _pseudonymizer.PseudonymizeQuotaSubject(subject);
+    }
+
+    private (bool HasLimit, int Limit) GetLimit(User? user, int? limitOverride)
+    {
+        if (limitOverride is null &&
+            string.Equals(user?.Tier, PremiumTier, StringComparison.OrdinalIgnoreCase))
+            return (false, 0);
+
+        var limit = limitOverride ?? _options.Value.GetTierOptions(user?.Tier).DailyCalculationLimit;
+        return limit <= 0 ? (false, 0) : (true, limit);
+    }
+
+    private static async Task<long> GetRedisUtcDayAsync(IDatabase database, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var result = await database.ExecuteAsync("TIME").WaitAsync(ct);
+        var parts = (RedisResult[]?)result;
+        if (parts is null || parts.Length != 2 || !long.TryParse(parts[0].ToString(),
+                NumberStyles.None, CultureInfo.InvariantCulture, out var seconds) || seconds < 0)
+            throw new QuotaUnavailableException();
+        ct.ThrowIfCancellationRequested();
+        return seconds / 86400;
+    }
+
+    private static (long Status, long Day) ParsePair(RedisResult result)
+    {
+        var parts = (RedisResult[]?)result;
+        if (parts is null || parts.Length != 2 ||
+            !long.TryParse(parts[0].ToString(), NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture, out var status) ||
+            !long.TryParse(parts[1].ToString(), NumberStyles.None,
+                CultureInfo.InvariantCulture, out var day))
+            throw new QuotaUnavailableException();
+        return (status, day);
+    }
+
+    private static bool IsAmbiguousRedisFailure(Exception exception) =>
+        exception is RedisConnectionException or RedisTimeoutException;
 }

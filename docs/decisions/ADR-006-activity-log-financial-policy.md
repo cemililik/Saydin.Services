@@ -9,7 +9,8 @@
 
 ## Bağlam
 
-`activity_logs.data` (JSONB) ürün analitiği için her işlemin parametrelerini saklar.
+`activity_logs.data` (JSONB) ürün analitiği için her işlemin parametrelerini saklar;
+uygulama `Information` logları da console ve OTLP sink'lerine gönderilir.
 Faz 4 öncesi endpoint'ler **ham finansal tutarları** yazıyordu:
 - Girdi: `request.Amount` / `TargetAmount` / `PeriodicAmount` (ham `decimal`).
 - Sonuç: `ProfitLossTry`, `RequiredInvestmentTry`, `TotalInvestedTry`, `CurrentValueTry`,
@@ -41,17 +42,24 @@ bu metinle **çelişiyordu** (bu bir uyumluluk düzeltmesidir, yeni bir kısıt 
    `AmountBucket.Coarse(decimal)` kaba aralık etiketi yazılır:
    `"0" · "0-1k" · "1k-10k" · "10k-100k" · "100k-1M" · "1M+"`. Yanına `amountType`
    loglanır (units/grams için etiket o birim cinsinden yorumlanır).
-2. **Sonuç TL tutarları LOGLANMAZ.** `ProfitLossTry`, `RequiredInvestmentTry`,
+2. **Exact sonuç LOGLANMAZ.** `ProfitLossTry`, `RequiredInvestmentTry`,
    `TotalInvestedTry`, `CurrentValueTry`, `AverageCostPerUnit` activity_logs'tan çıkarıldı.
-   Yalnız **yüzde** alanları (`ProfitLossPercent`, `RealProfitLossPercent`, `IsProfit`)
-   ve `TotalPurchases` tutulur — bunlar mutlak para figürü içermez, analytics için yeterli.
+   `ProfitLossPercent`/`RealProfitLossPercent` de saklanmaz; yalnız düşük kardinaliteli
+   `profit/loss/flat/unavailable` outcome ve `TotalPurchases` tutulur.
 3. **Hash kullanılmaz** (yukarıdaki gerekçe).
 4. **Tek source-of-truth:** Bucket sınırları `Saydin.Shared/Constants/AmountBucket.cs`'de;
    bu ADR ve gizlilik politikası buraya atıfta bulunur. Birim testi sınırları kilitler
    (`AmountBucketTests`).
+5. **Uygulama loglarında daha dar allowlist uygulanır.** WhatIf/Reverse/DCA
+   `Information` logları exact yatırım, hedef, gereken yatırım, sonuç TL tutarı veya
+   sonuç yüzdesi taşımaz. Yalnız `AmountBucket`/`TargetAmountBucket` ve düşük
+   kardinaliteli `profit/loss/flat/unavailable` outcome tutulur. Redaction regex'ine
+   güvenilmez; hassas değer logger çağrısına hiç verilmez.
+6. **Senaryo label'ı analytics'e girmez.** `scenario_save` activity payload'ı serbest
+   metin `label` yerine yalnız `hasLabel` boolean'ı taşır.
 
-Uygulayan kod: `WhatIfEndpoints.cs` (calculate/compare/reverse), `DcaEndpoints.cs`.
-`ScenariosEndpoints` zaten tutar loglamıyor (yalnız id/type/symbol/label) — değişmedi.
+Uygulayan kod: `WhatIfEndpoints.cs` (calculate/compare/reverse), `DcaEndpoints.cs`,
+`WhatIfCalculator.cs`, `DcaCalculator.cs` ve `ScenariosEndpoints.cs`.
 
 ### Gerekçe
 
@@ -59,7 +67,7 @@ Uygulayan kod: `WhatIfEndpoints.cs` (calculate/compare/reverse), `DcaEndpoints.c
   uyduruyor).
 - IP zaten maskeli (`IpMasker` /24-/48); bucket, finansal eksen için aynı minimizasyonu
   uygular.
-- Analytics (popülerlik, kar/zarar yüzdesi dağılımı) korunur; hiçbir materialized view
+- Analytics (popülerlik, büyüklük ve sonuç yönü dağılımı) korunur; hiçbir materialized view
   ham `data->amount` alanına bağlı değil (doğrulandı).
 - CLAUDE.md finansal kuralı: bucket karşılaştırması yalnız `decimal` ile yapılır.
 
@@ -73,6 +81,10 @@ yeterli sinyal korunur; tek source-of-truth + kontrat testi.
 **Risk / açık uçlar (insan):**
 - **Geçmiş satırlar:** 014 öncesi `activity_logs` satırları ham tutar içerebilir.
   Karar gerekli: anonimleştir/purge VEYA 1 yıllık saklama (retention) maddesine güven.
+- **Principal deletion control-plane:** 008'in `ON DELETE SET NULL`/019 scheduler ownership
+  uyumsuzluğu Backend ADR-010 ve migration 022 ile kapatıldı. Scheduler-owned fail-closed BEFORE
+  DELETE redaction, activity olayını korurken `user_id` ve eski device bağını kaldırır; owner/API/audit
+  rollerine geniş `UPDATE` verilmez. Public self-delete yolu yoktur.
 - **Bucket sınırları + sonuç-TL bırakma kararı** legal/ürün onayıyla kesinleşmeli.
 - Onaya kadar **Durum = Önerilen**; onay sonrası "Kabul edildi"ye çekilir.
 

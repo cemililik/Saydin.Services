@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Localization;
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 using Saydin.Shared.Constants;
 using Saydin.Shared.Exceptions;
@@ -18,18 +19,18 @@ public static class AssetsEndpoints
     private const int MaxPriceRangeDays = 3650;
 
     private static async Task TryReleaseAsync(
-        IDailyLimitGuard limitGuard, string deviceId, int limit, HttpContext httpContext)
+        IDailyLimitGuard limitGuard, QuotaLease lease, HttpContext httpContext)
     {
         try
         {
-            await limitGuard.ReleaseAsync(null, deviceId, AssetUsageKeyPrefix, limit, CancellationToken.None);
+            await limitGuard.ReleaseAsync(lease, CancellationToken.None);
         }
         catch (Exception releaseEx)
         {
             // Release hatası orijinal exception'ı maskelemesin (review CodeRabbit feedback).
             var logger = httpContext.RequestServices.GetRequiredService<ILoggerFactory>()
                 .CreateLogger(typeof(AssetsEndpoints));
-            logger.LogWarning(releaseEx, "Asset endpoint quota release başarısız: {DeviceId}", deviceId);
+            logger.LogWarning(releaseEx, "Asset endpoint quota release başarısız");
         }
     }
 
@@ -38,12 +39,13 @@ public static class AssetsEndpoints
         var group = app.MapGroup("/v1/assets")
             .WithTags("Assets");
 
-        // Tüm asset endpoint'leri DeviceId ister: anonim enumeration + DB/Redis DoS
-        // riskini kapatır. CLAUDE.md "Daily limit / device kontrolü" prensibine uyumlu.
+        // All asset endpoints require the server-issued installation credential;
+        // anonymous enumeration and quota bypass are rejected before handler code.
         // F2.1-6: MapGet("") trailing-slash bağımsız.
         // APIR-016: anonim `object` wrapper kalktı — typed AssetListResponse / PriceRangeResponse.
         group.MapGet("", GetAllAsync)
-            .RequireDeviceId()
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential()
             .WithName("GetAssets")
             .WithSummary("Desteklenen tüm asset'leri listeler")
             .Produces<AssetListResponse>(StatusCodes.Status200OK)
@@ -51,7 +53,8 @@ public static class AssetsEndpoints
 
         // F7 follow-up: GetPriceAsync da domain entity yerine PricePointResponse döner.
         group.MapGet("/{symbol}/price/{date}", GetPriceAsync)
-            .RequireDeviceId()
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential()
             .WithName("GetAssetPrice")
             .WithSummary("Belirli tarihte fiyat döner")
             .Produces<PricePointResponse>(StatusCodes.Status200OK)
@@ -59,11 +62,13 @@ public static class AssetsEndpoints
             .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
         group.MapGet("/{symbol}/price-range", GetPriceRangeAsync)
-            .RequireDeviceId()
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential()
             .WithName("GetAssetPriceRange")
             .WithSummary("Tarih aralığında fiyat serisi döner")
             .Produces<PriceRangeResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests);
 
         return app;
@@ -74,13 +79,15 @@ public static class AssetsEndpoints
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
         IPlanLimitResolver planLimits,
+        IInstallationPrincipalContext principalContext,
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("assets_list");
-        var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
+        var usageIdentity = principalContext.PrincipalId.ToString("N");
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(ct);
 
-        await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
+        var lease = await limitGuard.TryAcquireAsync(
+            null, usageIdentity, AssetUsageKeyPrefix, limit, ct);
         try
         {
             var assets = await assetService.GetAllAssetInfoAsync(ct);
@@ -91,7 +98,7 @@ public static class AssetsEndpoints
         {
             // Release best-effort: orijinal exception (PriceNotFound, ValidationException vb.)
             // kullanıcıya yansımalı, release hatası onu maskelemesin.
-            await TryReleaseAsync(limitGuard, deviceId, limit, httpContext);
+            await TryReleaseAsync(limitGuard, lease, httpContext);
             throw;
         }
     }
@@ -103,13 +110,15 @@ public static class AssetsEndpoints
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
         IPlanLimitResolver planLimits,
+        IInstallationPrincipalContext principalContext,
         CancellationToken ct)
     {
         var log = httpContext.GetOrCreateActivityLog("asset_price");
-        var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
+        var usageIdentity = principalContext.PrincipalId.ToString("N");
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(ct);
 
-        await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
+        var lease = await limitGuard.TryAcquireAsync(
+            null, usageIdentity, AssetUsageKeyPrefix, limit, ct);
         try
         {
             var price = await assetService.GetPriceAsync(symbol, date, ct);
@@ -122,14 +131,15 @@ public static class AssetsEndpoints
             // F7 follow-up: domain `PricePoint` sızıntısı kalkar — public DTO map.
             // AssetId / Asset navigation alanları response'a yansımaz.
             var response = new PricePointResponse(price.PriceDate, price.Close,
-                price.Open, price.High, price.Low, price.Volume);
+                price.Open, price.High, price.Low, price.Volume,
+                AuthorityDataResponseFactory.Exact(FinalObservationAuthority.ToValue(price)));
             return Results.Ok(response);
         }
         catch
         {
             // Release best-effort: orijinal exception (PriceNotFound, ValidationException vb.)
             // kullanıcıya yansımalı, release hatası onu maskelemesin.
-            await TryReleaseAsync(limitGuard, deviceId, limit, httpContext);
+            await TryReleaseAsync(limitGuard, lease, httpContext);
             throw;
         }
     }
@@ -142,6 +152,7 @@ public static class AssetsEndpoints
         IAssetService assetService,
         IDailyLimitGuard limitGuard,
         IPlanLimitResolver planLimits,
+        IInstallationPrincipalContext principalContext,
         IStringLocalizer<ErrorMessages> localizer,
         CancellationToken ct,
         string interval = PriceIntervals.Daily)
@@ -157,10 +168,11 @@ public static class AssetsEndpoints
                 field: "dateRange");
 
         var log = httpContext.GetOrCreateActivityLog("asset_price_range");
-        var deviceId = httpContext.GetRequiredDeviceId();
-        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(deviceId, ct);
+        var usageIdentity = principalContext.PrincipalId.ToString("N");
+        var limit = await planLimits.ResolveDailyAssetQueryLimitAsync(ct);
 
-        await limitGuard.TryAcquireAsync(null, deviceId, AssetUsageKeyPrefix, limit, ct);
+        var lease = await limitGuard.TryAcquireAsync(
+            null, usageIdentity, AssetUsageKeyPrefix, limit, ct);
         try
         {
             var points = await assetService.GetPriceRangeAsync(symbol, from, to, interval, ct);
@@ -175,7 +187,9 @@ public static class AssetsEndpoints
             });
             // F7 follow-up: domain `PricePoint` sızıntısı kalkar — public DTO map.
             var pricePoints = points
-                .Select(p => new PricePointResponse(p.PriceDate, p.Close, p.Open, p.High, p.Low, p.Volume))
+                .Select(p => new PricePointResponse(
+                    p.PriceDate, p.Close, p.Open, p.High, p.Low, p.Volume,
+                    AuthorityDataResponseFactory.Exact(FinalObservationAuthority.ToValue(p))))
                 .ToList();
             return Results.Ok(new PriceRangeResponse(symbol, interval, pricePoints));
         }
@@ -183,7 +197,7 @@ public static class AssetsEndpoints
         {
             // Release best-effort: orijinal exception (PriceNotFound, ValidationException vb.)
             // kullanıcıya yansımalı, release hatası onu maskelemesin.
-            await TryReleaseAsync(limitGuard, deviceId, limit, httpContext);
+            await TryReleaseAsync(limitGuard, lease, httpContext);
             throw;
         }
     }
