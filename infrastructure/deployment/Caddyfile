@@ -8,7 +8,7 @@
 {$SAYDIN_PUBLIC_HOST} {
 	encode zstd gzip
 
-	@internal path /metrics /openapi/* /scalar/*
+	@internal path_regexp internal `(?i)^/+(?:(?:metrics|health/+ready)(?:/)*|(?:openapi|scalar)(?:/.*)?)$`
 	respond @internal 404
 
 	reverse_proxy saydin-api:8080

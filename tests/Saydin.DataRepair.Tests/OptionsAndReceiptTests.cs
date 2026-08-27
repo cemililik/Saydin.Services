@@ -6,6 +6,18 @@ namespace Saydin.DataRepair.Tests;
 public sealed class OptionsAndReceiptTests
 {
     [Fact]
+    public void P1363Signature_WithLeadingZeroComponents_NormalizesToCanonicalDer()
+    {
+        var raw = new byte[64];
+        raw[31] = 0x80;
+        raw[63] = 0x80;
+
+        var normalized = RepairCryptography.NormalizeP256Signature(raw);
+
+        normalized.Should().Equal(Convert.FromHexString("30080202008002020080"));
+    }
+
+    [Fact]
     public void OptionOnlyInvocation_DefaultsToDryRunAndRequiresAuditIdentity()
     {
         using var files = new RepairTestFiles();
@@ -37,7 +49,8 @@ public sealed class OptionsAndReceiptTests
         if (!OperatingSystem.IsLinux()) return;
         using var files = new RepairTestFiles();
         await using var signer = new LocalReceiptSigner(files.ReceiptPrivateKeyFile);
-        var store = new ReceiptStore(files.ReceiptRoot);
+        var checkpoints = new List<ReceiptStoreCheckpoint>();
+        var store = new ReceiptStore(files.ReceiptRoot, checkpoints.Add);
         var receipt = new RepairReceipt(
             1, "ECDSA-SHA256-RFC3279-DER", signer.Identity.Provider,
             signer.Identity.KeyIdentity, signer.Identity.KeyId, "apply",
@@ -58,6 +71,10 @@ public sealed class OptionsAndReceiptTests
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         Directory.EnumerateFiles(verified.Directory).Should().OnlyContain(path =>
             IsPrivateFile(path));
+        checkpoints.Should().ContainInOrder(
+            ReceiptStoreCheckpoint.BeforePromoteRename,
+            ReceiptStoreCheckpoint.AfterPromoteRenameBeforeRootSync,
+            ReceiptStoreCheckpoint.RootDirectorySynced);
     }
 
     [Fact]
@@ -86,6 +103,74 @@ public sealed class OptionsAndReceiptTests
     }
 
     [Fact]
+    public async Task PromoteFailureBeforeRename_PreservesCompletePendingReceiptForReconciliation()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var files = new RepairTestFiles();
+        await using var signer = new LocalReceiptSigner(files.ReceiptPrivateKeyFile);
+        var store = new ReceiptStore(files.ReceiptRoot, checkpoint =>
+        {
+            if (checkpoint == ReceiptStoreCheckpoint.BeforePromoteRename)
+                throw new IOException("deterministic promote fault");
+        });
+        var receipt = Receipt(files, signer, "apply");
+        await store.StageAsync(receipt, signer, default);
+
+        var action = () => store.Promote(receipt.NonceSha256, receipt.Mode);
+
+        action.Should().Throw<IOException>();
+        store.PendingExists(receipt.NonceSha256, receipt.Mode).Should().BeTrue();
+        store.FinalExists(receipt.NonceSha256, receipt.Mode).Should().BeFalse();
+        var pending = await store.ReadPendingAsync(
+            receipt.NonceSha256, receipt.Mode,
+            signer.Identity.PublicSubjectPublicKeyInfo, default);
+        pending.ReceiptSha256.Should().NotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public async Task PromoteFailureAfterRename_FinalReadRetriesRootDirectoryDurability()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var files = new RepairTestFiles();
+        await using var signer = new LocalReceiptSigner(files.ReceiptPrivateKeyFile);
+        var store = new ReceiptStore(files.ReceiptRoot, checkpoint =>
+        {
+            if (checkpoint == ReceiptStoreCheckpoint.AfterPromoteRenameBeforeRootSync)
+                throw new IOException("deterministic post-rename fault");
+        });
+        var receipt = Receipt(files, signer, "apply");
+        await store.StageAsync(receipt, signer, default);
+
+        var action = () => store.Promote(receipt.NonceSha256, receipt.Mode);
+
+        action.Should().Throw<IOException>();
+        store.FinalExists(receipt.NonceSha256, receipt.Mode).Should().BeTrue();
+        store.PendingExists(receipt.NonceSha256, receipt.Mode).Should().BeFalse();
+        var recoveredStore = new ReceiptStore(files.ReceiptRoot);
+        var recovered = await recoveredStore.ReadFinalAsync(
+            receipt.NonceSha256, receipt.Mode,
+            signer.Identity.PublicSubjectPublicKeyInfo, default);
+        recovered.ReceiptSha256.Should().NotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public async Task MissingRequiredReceiptString_IsRejectedWithStableReceiptFailureCode()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var files = new RepairTestFiles();
+        await using var signer = new LocalReceiptSigner(files.ReceiptPrivateKeyFile);
+        var store = new ReceiptStore(files.ReceiptRoot);
+        var malformed = Receipt(files, signer, "apply") with { SigningKeyIdentity = null! };
+
+        var action = () => store.StageAsync(malformed, signer, default);
+
+        var rejected = (await action.Should().ThrowAsync<RepairRejectedException>()).Which;
+        rejected.Code.Should().Be("receipt_signing_identity_invalid");
+        rejected.ExitCode.Should().Be(RepairExitCodes.ReceiptFailure);
+        store.PendingExists(malformed.NonceSha256, malformed.Mode).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task ApplicationErrorOutputDoesNotEchoPathsOrSecretMaterial()
     {
         using var files = new RepairTestFiles();
@@ -108,7 +193,7 @@ public sealed class OptionsAndReceiptTests
         var target = files.Plan.Target with { Environment = "production" };
         var local = () => ReceiptSignerFactory.Create(
             new LocalReceiptSignerConfiguration(files.ReceiptPrivateKeyFile),
-            target, files.ReceiptKeyId, _ => null);
+            VerifiedPhysicalRepairTarget.FromLiveTrust(target), files.ReceiptKeyId, _ => null);
         local.Should().Throw<RepairRejectedException>()
             .Which.Code.Should().Be("production_signer_mode_rejected");
 
@@ -122,7 +207,8 @@ public sealed class OptionsAndReceiptTests
             "https://repairtest-crypto.kms.eu-frankfurt-1.oraclecloud.com/",
             "eu-frankfurt-1", publicKey, TimeSpan.FromSeconds(1));
         await using var signer = ReceiptSignerFactory.Create(
-            configuration, target, keyId, _ => null, _ => new RawP256KmsClient(key));
+            configuration, VerifiedPhysicalRepairTarget.FromLiveTrust(target), keyId,
+            _ => null, _ => new RawP256KmsClient(key));
         var payload = "signed-repair-receipt"u8.ToArray();
         var signature = await signer.SignAsync(payload, default);
         signature.Should().NotHaveCount(64);
@@ -130,7 +216,7 @@ public sealed class OptionsAndReceiptTests
             .Should().BeTrue();
 
         var leakedEnvironment = () => ReceiptSignerFactory.Create(
-            configuration, target, keyId,
+            configuration, VerifiedPhysicalRepairTarget.FromLiveTrust(target), keyId,
             name => name == "SAYDIN_REPAIR_RECEIPT_PRIVATE_KEY_FILE" ? "/secret" : null,
             _ => new RawP256KmsClient(key));
         leakedEnvironment.Should().Throw<RepairRejectedException>()
@@ -148,6 +234,19 @@ public sealed class OptionsAndReceiptTests
         return File.GetUnixFileMode(path) ==
                (UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
+
+    private static RepairReceipt Receipt(
+        RepairTestFiles files,
+        IReceiptSigner signer,
+        string mode) =>
+        new(1, "ECDSA-SHA256-RFC3279-DER", signer.Identity.Provider,
+            signer.Identity.KeyIdentity, signer.Identity.KeyId, mode,
+            new string('1', 64), new string('2', 64), new string('3', 64),
+            EmbeddedRepairMigrationTrust.ManifestSha256,
+            files.EvidenceContentSha256, files.Plan.Evidence.SignerKeyId,
+            null, 42, files.Now,
+            [new RepairOperationReceipt(
+                0, "work_order_manual_review", null, null, null, null)]);
 
     private sealed class RawP256KmsClient(ECDsa key) : IKmsSigningClient
     {

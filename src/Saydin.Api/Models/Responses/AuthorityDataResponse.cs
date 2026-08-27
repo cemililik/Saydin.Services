@@ -15,6 +15,7 @@ public static class AuthorityDataStatuses
 public static class AuthorityDataWarnings
 {
     public const string PriceHistoryUnavailable = "price_history_unavailable";
+    public const string PurchasePriceUnavailable = "purchase_price_unavailable";
     public const string InflationUnavailable = "inflation_unavailable";
     public const string InflationIncomplete = "inflation_incomplete";
 }

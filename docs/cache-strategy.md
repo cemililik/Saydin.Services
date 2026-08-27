@@ -21,26 +21,31 @@ Her ikisi de aynı Redis instance'ına yazar; key namespace'leri ile ayrılır.
 
 | Amaç | Key Formatı | TTL | Servis |
 |---|---|---|---|
-| What-if hesaplama | `authority-final-v1:catalog:{revision.sha}:whatif:v3:{...}:{lang}` | 1 saat | `WhatIfCalculator` |
+| What-if hesaplama | `authority-final-v1:catalog:{revision.sha}:whatif:v4:{...}:{lang}` | 1 saat | `WhatIfCalculator` |
 | Reverse what-if | `authority-final-v1:catalog:{revision.sha}:whatif:reverse:v2:{...}:{lang}` | 1 saat | `WhatIfCalculator` |
 | Asset listesi / bilgi | `authority-final-v1:catalog:{revision.sha}:assets:list` / `…:assets:info:{lang}` | 6 saat / 1 saat | `AssetService` |
 | Tek / en yakın fiyat | `authority-final-v1:catalog:{revision.sha}:price:{symbol}:{date}` / `…:nearest-price:{symbol}:{date}` | 24 saat | `AssetService` |
 | Fiyat aralığı | `authority-final-v1:catalog:{revision.sha}:prices:{symbol}:{from}:{to}:{interval}` | 1 saat | `AssetService` |
 | En son fiyat tarihi | `authority-final-v1:catalog:{revision.sha}:latest-date:{symbol}` | 1 saat | `AssetService` |
-| DCA hesaplama | `authority-final-v1:catalog:{revision.sha}:dca:v2:{...}:{lang}` | 1 saat | `DcaCalculator` |
+| DCA hesaplama | `authority-final-v1:catalog:{revision.sha}:dca:v3:{...}:{lang}` | 1 saat | `DcaCalculator` |
 | Günlük kullanım hash'i | `usage:{feature}:{server-subject}:{redis-utc-day}` | 48 saat retention | `DailyLimitGuard` |
+| Genel security admission | `security:rate:v1:{security-rate-v1}:exact|network|principal:{hmac}` | 2 × 60 sn pencere | `DistributedSecurityLimiter` |
+| Installation registration | `security:rate:v1:{security-rate-v1}:registration-v4-{exact|network}-hour:{hmac}` / `registration-v6-{exact|network}-{hour|day}:{hmac}` | 2 × ilgili pencere | `DistributedSecurityLimiter` |
+| IPv6 hesaplama ağ kotası | `security:rate:v1:{security-rate-v1}:calculation-v6-network-day:{hmac}` | 48 saat | `DistributedSecurityLimiter` |
 
 ### Key Versiyonlama
 
 `authority-final-v1` yalnız complete-final provider authority satırlarından üretilen cache
 sözleşmesidir. Önceki namespace bu prefix üzerinden atomik olarak dışlanır. Her data-bearing key
 DB-owned monoton catalog revision ve 32-byte catalog SHA taşır; yalnız count/signature cache'i yoktur.
-Response veya envelope shape'i kırılırsa ilgili `whatif:v3`/`dca:v2` alt sürümü de artırılır.
+Response veya finansal yöntem değişirse ilgili `whatif:v4`/`dca:v3` alt sürümü de artırılır.
 
 Cache değeri güvenilir kabul edilmez. Envelope requested symbol/tarih/amount/dil/inflation kimliği,
 asset ID+source, catalog revision+SHA ve complete-final authority özetini exact doğrular. Null,
-malformed, başka request'e ait veya eski authority entry silinip miss sayılır. Raw provider evidence,
-observation ID ve hash API response/cache envelope'una taşınmaz.
+malformed, başka request'e ait veya eski authority entry silinip miss sayılır. API fiyat sorguları
+`source_raw` JSONB'sini materyalize etmez; yalnız `has_source_raw` varlık biti projekte edilir. Raw
+provider evidence cache değerine veya public API response'una taşınmaz. Bounded observation
+kimliği/hash'i yalnız internal final-authority cache doğrulamasında tutulur; public DTO'ya çıkmaz.
 
 ### Faz 2 — Process-local Caches (Redis dışı)
 
@@ -55,7 +60,7 @@ observation ID ve hash API response/cache envelope'una taşınmaz.
 
 ## Yanıt Cache'i
 
-### What-If Hesaplama (`whatif:v3:...`)
+### What-If Hesaplama (`whatif:v4:...`)
 
 **Neden cache'leniyor:** Hesaplama birden fazla DB sorgusu içeriyor (buy price, sell price, price range).
 Aynı parametrelerle gelen istek (farklı kullanıcıdan bile olsa) aynı matematiksel sonucu verir.
@@ -93,17 +98,20 @@ Elle inceleme gerekirse yalnız prefix sayılır; üretimde toplu `DEL` normal i
 redis-cli --scan --pattern 'authority-final-v1:catalog:*:assets:*'
 ```
 
-### DCA Hesaplama (`dca:v2:...`)
+### DCA Hesaplama (`dca:v3:...`)
 
 **Neden cache'leniyor:** DCA hesaplaması geniş tarih aralığında fiyat verisi çeker (haftalık/aylık).
 Aynı parametrelerle gelen istek aynı sonucu verir.
 
-**Key formatı:** `dca:v2:{SYMBOL}:{START}:{END}:{PERIODIC_AMOUNT}:{PERIOD}:{AMOUNT_TYPE}{:inf?}:{LANG}`
+**Key formatı:** `dca:v3:{SYMBOL}:{START}:{END}:{PERIODIC_AMOUNT}:{PERIOD}:{AMOUNT_TYPE}{:inf?}:{LANG}`
 - `:inf` suffix'i yalnızca `IncludeInflation == true` olduğunda eklenir
 - `PERIOD`: `weekly` veya `monthly`
-- `v2`, eski aggregate Fisher sonucunun yeni cash-flow CPI sonucu olarak okunmasını önler.
-- İstenen exact CPI aylarından biri eksik/geçersizse nullable reel alanlar `null` döner ve
-  incomplete sonuç cache'e yazılmaz; TÜFE yayınlandığı anda sonraki istek yeniden hesaplar.
+- `v3`, terminal LKV deflatörünü ve gerçekleşebilir yuvarlanmış katkı maliyetini eski
+  cash-flow CPI cache'inden ayırır.
+- Ara katkı için istenen exact CPI aylarından biri veya terminal için `<=` son final CPI
+  eksik/geçersizse nullable reel alanlar `null` döner. Fiyatı bulunamayan tekil katkılar
+  `SkippedPurchaseDates` ile şeffaf kısmi sonuç üretir. Her iki degraded sonuç da cache'e
+  yazılmaz; veri tamamlandığında sonraki istek yeniden hesaplar.
 
 **TTL seçimi:** 1 saat — What-If ile aynı mantık.
 
@@ -121,7 +129,7 @@ sonucu döner.
 **Davranış:** İstek edilen tarihe ≤ olan en yakın işlem günü önce denenir (geriye doğru);
 bulunamazsa > olan ilk işlem günü döner (ileriye doğru). Sonuç `PricePoint` olarak cache'lenir.
 
-**TTL seçimi:** 24 saat — Tarihi piyasa tatilleri değişmez. Bugünün fiyatı `whatif:v3:...`
+**TTL seçimi:** 24 saat — Tarihi piyasa tatilleri değişmez. Bugünün fiyatı `whatif:v4:...`
 cache'inden bağımsız olduğundan ayrım yapılmıyor. Kabul edilebilir.
 
 ---
@@ -130,11 +138,13 @@ cache'inden bağımsız olduğundan ayrım yapılmıyor. Kabul edilebilir.
 
 ### Key: `usage:{feature}:{server-subject}:{redis-utc-date}`
 
-**Prefix'ler:** `usage:whatif:` (WhatIfCalculator), `usage:dca:` (DcaCalculator)
+**Prefix'ler:** `usage:whatif:` (WhatIfCalculator), `usage:dca:` (DcaCalculator),
+`usage:assets:` (AssetsEndpoints / `ResolveDailyAssetQueryLimitAsync`)
 
 **Hangi işlem hangi sayaca düşer (ADR-002):** Tek What-If (`/calculate`), Reverse What-If
 (`/reverse`) ve Karşılaştırma (`/compare`) **aynı** `usage:whatif:` sayacını paylaşır;
-DCA (`/dca`) ayrı `usage:dca:` sayacını kullanır. **Compare**, sembol sayısından (2-5)
+DCA (`/dca`) ayrı `usage:dca:` sayacını; asset detail/range sorguları ayrı `usage:assets:`
+sayacını kullanır. **Compare**, sembol sayısından (2-5)
 bağımsız olarak sayaçtan **yalnız 1** düşer (tek atomik acquire). Per-feature alt-kotalar
 (roadmap'teki compare=5 / reverse=3 / dca=3) post-MVP'ye ertelendi — bkz.
 [ADR-002](decisions/ADR-002-compare-quota.md).
@@ -150,8 +160,10 @@ release ve UTC gün dönümü güvenlidir. Key 48 saat sonra tamamen düşer.
 `quota_unavailable` 503 üretilir. Host cancellation aynen propagate edilir. Sınırsız plan için
 `QuotaLease.Noop` döner ve Redis'e yazılmaz.
 
-Raw installation credential Redis key'e girmez. Subject, doğrulanmış server principal kimliği veya
-sunucunun ürettiği bounded pseudonym'dir; loglar key, nonce, subject veya exception payload yazmaz.
+Raw installation credential veya principal/user GUID Redis key'e girmez. Subject,
+`saydin.quota.subject.v1` domain'iyle HMAC-SHA256'den türetilen sabit `q1:` pseudonym'idir;
+activity-log `p1:` alanından purpose-separated'dır. Loglar key, nonce, subject veya exception
+payload yazmaz.
 
 ---
 
@@ -167,6 +179,16 @@ Redis bağlantı hatasında:
 Redis availability, API health ve limiter/quota hata oranı Prometheus tarafından izlenir;
 [`runbooks/redis-unavailable.md`](runbooks/redis-unavailable.md) uygulanır. Ham Redis key veya
 subject log/metric label'ına yazılmaz.
+
+Installation registration, paylaşılan IPv4/CGNAT adreslerini günlük kıt bütçe olarak kullanmaz:
+IPv4 exact-IP ve `/24` pseudonym'leri yalnız yüksek kapasiteli saatlik abuse penceresi tüketir.
+IPv6'da exact adres ve abone sınırı kabul edilen `/64` için saatlik/günlük dört bucket tek Lua
+kararında atomik tüketilir. Hesaplama endpoint'lerinde önce doğrulanmış principal'ın kısa pencere
+kapısı değerlendirilir; yalnız kabul edilen principal IPv6 `/64` başına 500/gün savunmasına gider.
+IPv4 hesaplamaları genel dakika ve principal kapılarıyla sınırlıdır; böylece tek CGNAT komşusu
+paylaşılan günlük bütçeyi tüketemez. Redis TIME sabit pencerelerin tek saat kaynağıdır. Tüm
+identifier'lar HMAC-SHA256 pseudonym'idir; karar metriği yalnız allowlist
+`bucket/outcome/reason` tag'leri taşır.
 
 ---
 

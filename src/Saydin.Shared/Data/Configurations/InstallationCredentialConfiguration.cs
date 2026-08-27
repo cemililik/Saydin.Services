@@ -60,10 +60,12 @@ public sealed class InstallationCredentialConfiguration : IEntityTypeConfigurati
         builder.HasOne(credential => credential.Principal)
             .WithMany(principal => principal.InstallationCredentials)
             .HasForeignKey(credential => credential.PrincipalId)
+            .HasConstraintName("fk_installation_credentials_principal")
             .OnDelete(DeleteBehavior.Cascade);
         builder.HasOne(credential => credential.RotationParent)
             .WithMany()
             .HasForeignKey(credential => credential.RotationParentId)
+            .HasConstraintName("fk_installation_credentials_rotation_parent")
             .OnDelete(DeleteBehavior.Restrict);
     }
 }

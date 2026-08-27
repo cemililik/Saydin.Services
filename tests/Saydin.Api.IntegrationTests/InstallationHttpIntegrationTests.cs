@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Saydin.Api.IntegrationTests.Fixtures;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Shared.Entities;
 
 namespace Saydin.Api.IntegrationTests;
 
@@ -37,7 +38,7 @@ public sealed class InstallationHttpIntegrationTests(
                 .SingleAsync(user => user.Id == registration.PrincipalId);
             principal.DeviceId.Should().BeNull();
             principal.PrincipalStatus.Should().Be("active");
-            var active = await db.InstallationCredentials.AsNoTracking()
+            var active = await db.Set<InstallationCredential>().AsNoTracking()
                 .SingleAsync(credential => credential.PrincipalId == registration.PrincipalId);
             active.State.Should().Be("active");
             active.Generation.Should().Be(1);

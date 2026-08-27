@@ -1,13 +1,13 @@
 # Release supply-chain incident
 
-Every first-party API, ingestion, database control, calendar, DQA, backup, and Caddy
+Every first-party API, ingestion, database control, calendar, DataRepair, DQA, backup, and Caddy
 image is built once for `linux/amd64` and `linux/arm64`. The release workflow publishes
 the multi-architecture digest, SPDX and CycloneDX SBOMs, BuildKit/GitHub provenance,
 Trivy vulnerability/license result, keyless image signature, and a canonical signed
 release manifest. Deployment never resolves a mutable tag.
 
 The signing workflow must execute from `refs/heads/main`, and a new release tag must
-resolve to that exact dispatch commit. Each of the seven image records independently
+resolve to that exact dispatch commit. Each of the eight image records independently
 binds the same source commit. Deployment controllers remain checked out at their
 current trusted main commit; a release tag is resolved read-only and never supplies the
 signature-verification or deployment scripts.

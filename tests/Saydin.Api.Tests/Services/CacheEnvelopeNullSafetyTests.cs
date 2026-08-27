@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FluentAssertions;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Repositories;
@@ -66,5 +67,20 @@ public sealed class CacheEnvelopeNullSafetyTests
         CalculationCacheContract.IsComplete(
             new CalculationDataResponse(AuthorityDataStatuses.Complete, [], basis, null!), false)
             .Should().BeFalse();
+    }
+
+    [Fact]
+    public void PriceCacheEnvelope_RawAuthorityPayload_IsNeverSerialized()
+    {
+        const string rawSentinel = "RAW-AUTHORITY-SENTINEL-8f43e9";
+        var date = new DateOnly(2025, 1, 1);
+        var point = AuthorityTestData.FinalPrice(date, 41m, Identity.Id);
+        point.SourceRaw = rawSentinel;
+        var entry = PriceCacheEntry.Exact(Identity, date, point);
+
+        var json = JsonSerializer.Serialize(entry);
+
+        json.Should().NotContain(rawSentinel);
+        json.Should().NotContain($"\"{nameof(PricePoint.SourceRaw)}\":");
     }
 }

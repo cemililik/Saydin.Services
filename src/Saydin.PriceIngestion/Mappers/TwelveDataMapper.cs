@@ -16,33 +16,19 @@ public static class TwelveDataMapper
         string source = "twelvedata",
         byte[]? payloadSha256 = null,
         int? payloadByteLength = null)
-        => MapCore(json, assetId, sourceId, source, payloadSha256,
-            payloadByteLength, requireIdentity: true);
-
-    internal static IReadOnlyList<PricePoint> MapContractlessFixture(
-        string json,
-        Guid assetId) =>
-        MapCore(json, assetId, "fixture", "twelvedata", null, null, requireIdentity: false);
-
-    private static IReadOnlyList<PricePoint> MapCore(
-        string json,
-        Guid assetId,
-        string sourceId,
-        string source,
-        byte[]? payloadSha256,
-        int? payloadByteLength,
-        bool requireIdentity)
     {
         if (string.IsNullOrWhiteSpace(sourceId))
             throw new ProviderContractException("contract_source_id_missing");
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new ProviderContractException("contract_value_kind_invalid");
 
         // F1.1-6: status="error" yanıtlarında veri yok olarak sessizce dönmek yerine
         // ExternalApiException fırlat — caller ingestion_jobs failed olarak kaydetsin.
         if (root.TryGetProperty("status", out var statusEl))
         {
-            var status = statusEl.GetString();
+            var status = ProviderValueParser.ReadString(statusEl);
             if (string.Equals(status, "error", StringComparison.OrdinalIgnoreCase))
             {
                 throw new ProviderContractException("provider_error");
@@ -55,7 +41,7 @@ public static class TwelveDataMapper
             }
         }
 
-        var instrumentType = requireIdentity ? ValidateIdentity(root, sourceId) : "fixture";
+        var instrumentType = ValidateIdentity(root, sourceId);
 
         if (!root.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
             return [];
@@ -65,18 +51,20 @@ public static class TwelveDataMapper
 
         foreach (var item in values.EnumerateArray())
         {
+            if (item.ValueKind != JsonValueKind.Object)
+                throw new ProviderContractException("contract_value_kind_invalid");
+
             // PR #11 follow-up: TwelveData API her zaman "yyyy-MM-dd" formatı döner.
             // DateOnly.TryParse current culture'a duyarlı (tr-TR locale'de bazı tarih
             // varyantları beklenmedik parse edebilir) — invariant exact format ile
             // tek doğru girdi kabul edilir, diğer her şey atlanır.
             if (!item.TryGetProperty("datetime", out var dateEl) ||
-                !DateOnly.TryParseExact(dateEl.GetString(), "yyyy-MM-dd",
+                !DateOnly.TryParseExact(ProviderValueParser.ReadString(dateEl), "yyyy-MM-dd",
                     CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
                 continue;
 
             if (!item.TryGetProperty("close", out var closeEl) ||
-                !decimal.TryParse(closeEl.GetString(),
-                    NumberStyles.Any, CultureInfo.InvariantCulture, out var close))
+                !ProviderValueParser.TryReadDecimal(closeEl, out var close))
                 continue;
 
             var open = ParseDecimal(item, "open");
@@ -127,8 +115,7 @@ public static class TwelveDataMapper
     private static decimal? ParseDecimal(JsonElement el, string property)
     {
         if (!el.TryGetProperty(property, out var prop)) return null;
-        var s = prop.GetString();
-        return decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : null;
+        return ProviderValueParser.TryReadDecimal(prop, out var value) ? value : null;
     }
 
     private static string ValidateIdentity(JsonElement root, string sourceId)
@@ -138,19 +125,19 @@ public static class TwelveDataMapper
 
         var parts = sourceId.Split(':', 2, StringSplitOptions.TrimEntries);
         var symbol = meta.TryGetProperty("symbol", out var symbolElement)
-            ? symbolElement.GetString() : null;
+            ? ProviderValueParser.ReadString(symbolElement) : null;
         var interval = meta.TryGetProperty("interval", out var intervalElement)
-            ? intervalElement.GetString() : null;
+            ? ProviderValueParser.ReadString(intervalElement) : null;
         var exchange = meta.TryGetProperty("exchange", out var exchangeElement)
-            ? exchangeElement.GetString() : null;
+            ? ProviderValueParser.ReadString(exchangeElement) : null;
         var timezone = meta.TryGetProperty("exchange_timezone", out var timezoneElement)
-            ? timezoneElement.GetString() : null;
+            ? ProviderValueParser.ReadString(timezoneElement) : null;
         var micCode = meta.TryGetProperty("mic_code", out var micElement)
-            ? micElement.GetString() : null;
+            ? ProviderValueParser.ReadString(micElement) : null;
         var currency = meta.TryGetProperty("currency", out var currencyElement)
-            ? currencyElement.GetString() : null;
+            ? ProviderValueParser.ReadString(currencyElement) : null;
         var instrumentType = meta.TryGetProperty("type", out var typeElement)
-            ? typeElement.GetString() : null;
+            ? ProviderValueParser.ReadString(typeElement) : null;
         if (!string.Equals(symbol, parts[0], StringComparison.Ordinal)
             || interval != "1day"
             || exchange != "BIST" || micCode != "XIST"

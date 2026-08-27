@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
@@ -112,7 +113,12 @@ public class ActivityLogBuilderTests
     [InlineData(400, "request_invalid")]
     [InlineData(401, "authentication_failed")]
     [InlineData(403, "request_forbidden")]
+    [InlineData(404, "not_found")]
+    [InlineData(413, "payload_too_large")]
+    [InlineData(415, "unsupported_media_type")]
+    [InlineData(422, "unprocessable_entity")]
     [InlineData(429, "rate_limited")]
+    [InlineData(502, "bad_gateway")]
     [InlineData(503, "service_unavailable")]
     [InlineData(500, "internal_error")]
     public void Build_ResponseFailuresReceiveStableBoundedErrorCode(
@@ -138,6 +144,88 @@ public class ActivityLogBuilderTests
             .Build();
 
         log.DeviceId.Should().Be("unknown");
+    }
+
+    [Fact]
+    public void Build_WideNumericObject_UsesJsonbBinaryUpperBoundAndTruncates()
+    {
+        var payload = Enumerable.Range(0, 700)
+            .ToDictionary(index => $"k{index}", _ => 0);
+        var jsonTextBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(payload));
+        jsonTextBytes.Should().BeLessThan(10_000,
+            "the old JSON-text estimator must consider this payload safe");
+
+        var log = new ActivityLogBuilder(CreateHttpContext())
+            .WithAction("assets_list")
+            .WithData(payload)
+            .Build();
+
+        log.Data.Should().NotBeNull();
+        log.Data!.Value.GetProperty("_truncated").GetBoolean().Should().BeTrue();
+        log.Data.Value.GetProperty("estimatedJsonbBytes").GetInt64()
+            .Should().BeGreaterThan(10_000);
+    }
+
+    [Fact]
+    public void JsonbUpperBound_PreservesSmallPayloadAndCoversRootScalar()
+    {
+        using var document = JsonDocument.Parse("""{"symbol":"USDTRY","amount":10000}""");
+        var estimate = JsonbStorageSize.UpperBound(document.RootElement);
+        var scalarEstimate = JsonbStorageSize.UpperBound(
+            JsonSerializer.SerializeToElement(42));
+
+        estimate.Should().BeGreaterThan(0).And.BeLessThan(10_000);
+        scalarEstimate.Should().BeGreaterThan(0);
+        new ActivityLogBuilder(CreateHttpContext())
+            .WithAction("assets_list")
+            .WithData(document.RootElement)
+            .Build().Data!.Value.GetProperty("symbol").GetString().Should().Be("USDTRY");
+    }
+
+    [Theory]
+    [InlineData("1e100000")]
+    [InlineData("1e+100000")]
+    [InlineData("9.99e100000")]
+    [InlineData("-9.99e+100000")]
+    [InlineData("1e-100000")]
+    [InlineData("9.99e-100000")]
+    public void JsonbUpperBound_LargeExponent_IsSaturatingAndTruncated(string number)
+    {
+        using var document = JsonDocument.Parse(number);
+
+        var estimate = JsonbStorageSize.UpperBound(document.RootElement);
+        var log = new ActivityLogBuilder(CreateHttpContext())
+            .WithAction("assets_list")
+            .WithData(document.RootElement)
+            .Build();
+
+        estimate.Should().BeGreaterThan(10_000);
+        log.Data!.Value.GetProperty("_truncated").GetBoolean().Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("1e999999999999999999999999999999999999999")]
+    [InlineData("1e-999999999999999999999999999999999999999")]
+    public void JsonbUpperBound_OverflowingExponent_Saturates(string number)
+    {
+        using var document = JsonDocument.Parse(number);
+
+        JsonbStorageSize.UpperBound(document.RootElement).Should().Be(long.MaxValue);
+    }
+
+    [Theory]
+    [InlineData("0", 31)]
+    [InlineData("0e999999999999999999999", 31)]
+    [InlineData("123.45", 40)]
+    [InlineData("-123.45", 40)]
+    [InlineData("12345.6", 40)]
+    [InlineData("1.23e2", 40)]
+    [InlineData("1.23e-2", 40)]
+    public void JsonbUpperBound_NormalNumber_RemainsSmall(string number, long maximum)
+    {
+        using var document = JsonDocument.Parse(number);
+
+        JsonbStorageSize.UpperBound(document.RootElement).Should().BeLessThan(maximum);
     }
 
     [Fact]

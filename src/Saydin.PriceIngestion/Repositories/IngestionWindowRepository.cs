@@ -131,6 +131,45 @@ public sealed class IngestionWindowRepository(
         return await ResolveCalendarReadinessAsync(context, scope, from, to, null, ct);
     }
 
+    public async Task<MarketCalendarTargetResolution> ResolveLatestExpectedObservationAsync(
+        string calendarCode,
+        DateOnly notAfter,
+        CancellationToken ct)
+    {
+        if (calendarCode is not ("tcmb_indicative_fx" or "bist_pay_xist"))
+            return new(false, null, null, calendarCode, "calendar_code_unsupported");
+
+        await using var context = await contextFactory.CreateDbContextAsync(ct);
+        var release = await (from active in context.MarketCalendarActiveReleases.AsNoTracking()
+                             join item in context.MarketCalendarReleases.AsNoTracking()
+                                 on active.ReleaseId equals item.Id
+                             where active.CalendarCode == calendarCode
+                                 && item.CalendarCode == calendarCode
+                                 && item.SealedAt != null
+                             select new { item.Id, item.CoverageFrom, item.CoverageThrough })
+            .SingleOrDefaultAsync(ct);
+        if (release is null)
+            return new(false, null, null, calendarCode, "calendar_active_release_missing");
+
+        var upperBound = release.CoverageThrough < notAfter
+            ? release.CoverageThrough
+            : notAfter;
+        if (upperBound < release.CoverageFrom)
+            return new(false, null, release.Id, calendarCode, "calendar_eligible_day_missing");
+
+        var target = await context.MarketCalendarDays.AsNoTracking()
+            .Where(day => day.ReleaseId == release.Id
+                && day.CalendarDate >= release.CoverageFrom
+                && day.CalendarDate <= upperBound
+                && day.ObservationExpected)
+            .OrderByDescending(day => day.CalendarDate)
+            .Select(day => (DateOnly?)day.CalendarDate)
+            .FirstOrDefaultAsync(ct);
+        return target is null
+            ? new(false, null, release.Id, calendarCode, "calendar_eligible_day_missing")
+            : new(true, target, release.Id, calendarCode, "calendar_target_ready");
+    }
+
     public async Task<IReadOnlySet<DateOnly>> GetExpectedNoDataDatesAsync(
         Guid releaseId,
         DateOnly from,
@@ -372,6 +411,7 @@ public sealed class IngestionWindowRepository(
             WindowId = window.Id,
         };
         context.IngestionJobs.Add(job);
+        await faultInjector.BeforeClaimCommitAsync(window.Id, ct);
         await context.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         freshnessTelemetry.RecordStarted(claimSource: scope.Source,

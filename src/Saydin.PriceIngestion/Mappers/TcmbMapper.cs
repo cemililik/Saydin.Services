@@ -163,7 +163,8 @@ public static class TcmbMapper
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
 
-        return decimal.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var result)
+        return decimal.TryParse(value, ProviderValueParser.FinancialNumberStyles,
+                CultureInfo.InvariantCulture, out var result)
             ? result
             : null;
     }

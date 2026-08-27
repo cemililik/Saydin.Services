@@ -1,8 +1,10 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Saydin.DatabaseSecurity;
 
 namespace Saydin.DatabaseRoleBootstrap.Tests;
 
+[SupportedOSPlatform("linux")]
 public sealed class SecretFileTests : IDisposable
 {
     private readonly string directory = Path.Combine(
@@ -18,7 +20,7 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Password_is_read_without_normalization()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write("password", "Correct-Horse-Battery-Staple-123!");
 
         Assert.Equal("Correct-Horse-Battery-Staple-123!", SecureSecretFile.ReadPassword(path));
@@ -27,7 +29,7 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Linux_read_only_owner_secret_is_accepted()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write("read-only-password", "Correct-Horse-Battery-Staple-123!");
         File.SetUnixFileMode(path, UnixFileMode.UserRead);
 
@@ -37,7 +39,7 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Linux_bounded_raw_secret_preserves_bytes_and_caller_owns_buffer()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var expected = new byte[] { 0, 1, 2, 3, 0xff };
         var path = Path.Combine(directory, "opaque-secret");
         File.WriteAllBytes(path, expected);
@@ -52,22 +54,31 @@ public sealed class SecretFileTests : IDisposable
     }
 
     [Fact]
+    public void Role_bootstrap_password_buffer_is_zeroed_at_scope_end()
+    {
+        RequireLinux();
+        var path = Write("scoped-password", "Correct-Horse-Battery-Staple-123!");
+        var secret = SensitivePassword.Read(path);
+        Assert.False(secret.IsCleared);
+
+        secret.Dispose();
+
+        Assert.True(secret.IsCleared);
+        Assert.Throws<ObjectDisposedException>(secret.RevealForAuthentication);
+    }
+
+    [Fact]
     public void Linux_bounded_raw_secret_uses_same_rewrite_race_rejection()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write("opaque-rewrite-race", "0123456789abcdef0123456789abcdef");
-        LinuxSecretFile.AfterOpenBeforeReadForTests = () =>
-            File.WriteAllText(path, "fedcba9876543210fedcba9876543210");
-        try
-        {
-            var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
-                SecureSecretFile.ReadBytes(path, 32, 32, "opaque_secret_invalid"));
-            Assert.Equal("opaque_secret_invalid", exception.Code);
-        }
-        finally
-        {
-            LinuxSecretFile.AfterOpenBeforeReadForTests = null;
-        }
+        var probe = new LinuxSecretFileTestProbe(
+            AfterOpenBeforeRead: () =>
+                File.WriteAllText(path, "fedcba9876543210fedcba9876543210"));
+
+        var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
+            LinuxSecretFile.ReadForTests(path, 32, 32, "opaque_secret_invalid", probe));
+        Assert.Equal("opaque_secret_invalid", exception.Code);
     }
 
     [Theory]
@@ -124,7 +135,7 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Linux_group_readable_secret_is_rejected()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write("group-readable", "Correct-Horse-Battery-Staple-123!");
         File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite |
                                   UnixFileMode.GroupRead);
@@ -138,7 +149,7 @@ public sealed class SecretFileTests : IDisposable
     [InlineData(0x124)]
     public void Linux_read_only_non_owner_secret_is_rejected(int rawMode)
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write($"non-owner-readable-{rawMode}", "Correct-Horse-Battery-Staple-123!");
         File.SetUnixFileMode(path, (UnixFileMode)rawMode);
 
@@ -149,7 +160,7 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Linux_non_private_secret_directory_is_rejected()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write("public-directory", "Correct-Horse-Battery-Staple-123!");
         File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite |
             UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute);
@@ -168,12 +179,19 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Linux_secret_owned_by_different_effective_user_is_rejected()
     {
-        if (!OperatingSystem.IsLinux() || GetEffectiveUserId() != 0) return;
+        RequireLinux();
         var path = Write("wrong-file-owner", "Correct-Horse-Battery-Staple-123!");
-        Assert.Equal(0, ChangeOwner(path, 65534, 65534));
+        var probe = new LinuxSecretFileTestProbe(TransformUserId: (stage, userId) =>
+            stage is SecretFileObservationStage.PathBefore
+                or SecretFileObservationStage.OpenedHandle
+                or SecretFileObservationStage.PathAfter
+                or SecretFileObservationStage.HandleAfter
+                ? DifferentUser(userId)
+                : userId);
 
         var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
-            SecureSecretFile.ReadPassword(path));
+            LinuxSecretFile.ReadForTests(path, 20, 512,
+                "login_password_secret_invalid", probe));
 
         Assert.Equal("login_password_secret_invalid", exception.Code);
     }
@@ -181,45 +199,41 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Linux_secret_parent_owned_by_different_effective_user_is_rejected()
     {
-        if (!OperatingSystem.IsLinux() || GetEffectiveUserId() != 0) return;
+        RequireLinux();
         var path = Write("wrong-parent-owner", "Correct-Horse-Battery-Staple-123!");
-        Assert.Equal(0, ChangeOwner(directory, 65534, 65534));
-        try
-        {
-            var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
-                SecureSecretFile.ReadPassword(path));
-            Assert.Equal("login_password_secret_invalid", exception.Code);
-        }
-        finally
-        {
-            Assert.Equal(0, ChangeOwner(directory, 0, 0));
-        }
+        var probe = new LinuxSecretFileTestProbe(TransformUserId: (stage, userId) =>
+            stage is SecretFileObservationStage.ParentBefore
+                or SecretFileObservationStage.ParentAfter
+                ? DifferentUser(userId)
+                : userId);
+
+        var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
+            LinuxSecretFile.ReadForTests(path, 20, 512,
+                "login_password_secret_invalid", probe));
+        Assert.Equal("login_password_secret_invalid", exception.Code);
     }
 
     [Fact]
     public void Linux_same_inode_same_size_rewrite_race_is_rejected()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var original = "Correct-Horse-Battery-Staple-123!";
         var replacement = "Changed-Horse-Battery-Staple-123!";
         Assert.Equal(original.Length, replacement.Length);
         var path = Write("rewrite-race", original);
-        LinuxSecretFile.AfterOpenBeforeReadForTests = () => File.WriteAllText(path, replacement);
-        try
-        {
-            var exception = Assert.Throws<DatabaseSecurityRejectedException>(() => SecureSecretFile.ReadPassword(path));
-            Assert.Equal("login_password_secret_invalid", exception.Code);
-        }
-        finally
-        {
-            LinuxSecretFile.AfterOpenBeforeReadForTests = null;
-        }
+        var probe = new LinuxSecretFileTestProbe(
+            AfterOpenBeforeRead: () => File.WriteAllText(path, replacement));
+
+        var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
+            LinuxSecretFile.ReadForTests(
+                path, 24, 512, "login_password_secret_invalid", probe));
+        Assert.Equal("login_password_secret_invalid", exception.Code);
     }
 
     [Fact]
     public void Linux_hard_linked_secret_is_rejected()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write("hard-link-target", "Correct-Horse-Battery-Staple-123!");
         var hardLink = Path.Combine(directory, "hard-link");
         Assert.Equal(0, CreateHardLink(path, hardLink));
@@ -243,20 +257,16 @@ public sealed class SecretFileTests : IDisposable
     [Fact]
     public void Linux_mount_change_between_path_and_opened_handle_is_rejected()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var path = Write("mount-race", "Correct-Horse-Battery-Staple-123!");
-        LinuxSecretFile.MountIdForTests = (stage, mountId) =>
-            stage == SecretFileObservationStage.OpenedHandle ? mountId + 1 : mountId;
-        try
-        {
-            var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
-                SecureSecretFile.ReadPassword(path));
-            Assert.Equal("login_password_secret_invalid", exception.Code);
-        }
-        finally
-        {
-            LinuxSecretFile.MountIdForTests = null;
-        }
+        var probe = new LinuxSecretFileTestProbe(
+            TransformMountId: (stage, mountId) =>
+                stage == SecretFileObservationStage.OpenedHandle ? mountId + 1 : mountId);
+
+        var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
+            LinuxSecretFile.ReadForTests(
+                path, 24, 512, "login_password_secret_invalid", probe));
+        Assert.Equal("login_password_secret_invalid", exception.Code);
     }
 
     [Fact]
@@ -306,6 +316,15 @@ public sealed class SecretFileTests : IDisposable
         return path;
     }
 
+    private static void RequireLinux()
+    {
+        if (!OperatingSystem.IsLinux())
+            throw Xunit.Sdk.SkipException.ForSkip(
+                "Linux openat2/statx contract is required for this test.");
+    }
+
+    private static uint DifferentUser(uint userId) => userId == uint.MaxValue ? 0 : userId + 1;
+
     public void Dispose()
     {
         if (!Directory.Exists(directory)) return;
@@ -317,9 +336,4 @@ public sealed class SecretFileTests : IDisposable
     [DllImport("libc", EntryPoint = "link", CharSet = CharSet.Ansi, SetLastError = true)]
     private static extern int CreateHardLink(string existingPath, string newPath);
 
-    [DllImport("libc", EntryPoint = "chown", CharSet = CharSet.Ansi, SetLastError = true)]
-    private static extern int ChangeOwner(string path, uint owner, uint group);
-
-    [DllImport("libc", EntryPoint = "geteuid")]
-    private static extern uint GetEffectiveUserId();
 }

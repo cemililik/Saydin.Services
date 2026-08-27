@@ -7,7 +7,22 @@ using Saydin.DatabaseSecurity;
 
 namespace Saydin.DataRepair;
 
-internal sealed class RepairTrustLease : IAsyncDisposable
+internal sealed record VerifiedPhysicalRepairTarget
+{
+    private VerifiedPhysicalRepairTarget(RepairTarget target) => Target = target;
+
+    public RepairTarget Target { get; }
+    public bool IsProduction => Target.Environment == "production";
+
+    internal static VerifiedPhysicalRepairTarget FromLiveTrust(RepairTarget target) => new(target);
+}
+
+internal interface IRepairTargetLease
+{
+    Task VerifyAliveAsync(CancellationToken cancellationToken);
+}
+
+internal sealed class RepairTrustLease : IAsyncDisposable, IRepairTargetLease
 {
     private readonly NpgsqlConnection lockConnection;
     private readonly long targetLockKey;
@@ -46,7 +61,7 @@ internal sealed class RepairTrustLease : IAsyncDisposable
         }
     }
 
-    public async Task VerifyLiveTrustAsync(
+    public async Task<VerifiedPhysicalRepairTarget> VerifyLiveTrustAsync(
         NpgsqlDataSource auditDataSource,
         VerifiedRepairPlan plan,
         RoleContract contract,
@@ -70,6 +85,37 @@ internal sealed class RepairTrustLease : IAsyncDisposable
             connection, transaction, plan.Plan.MigrationTrust, cancellationToken);
         await VerifyAuditReadOnlyAsync(connection, transaction, cancellationToken);
         await transaction.RollbackAsync(cancellationToken);
+        await VerifyAliveAsync(cancellationToken);
+        return VerifiedPhysicalRepairTarget.FromLiveTrust(plan.Plan.Target);
+    }
+
+    public async Task VerifyAliveAsync(CancellationToken cancellationToken)
+    {
+        if (lockConnection.State != ConnectionState.Open)
+            throw Rejected("repair_target_lock_lost");
+        try
+        {
+            await using var command = new NpgsqlCommand("SELECT 1", lockConnection);
+            if (await command.ExecuteScalarAsync(cancellationToken) is not 1)
+                throw Rejected("repair_target_lock_lost");
+        }
+        catch (RepairRejectedException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is NpgsqlException or InvalidOperationException)
+        {
+            throw Rejected("repair_target_lock_lost");
+        }
+    }
+
+    internal async Task<int> GetBackendProcessIdAsync(CancellationToken cancellationToken)
+    {
+        await VerifyAliveAsync(cancellationToken);
+        await using var command = new NpgsqlCommand("SELECT pg_catalog.pg_backend_pid()", lockConnection);
+        return await command.ExecuteScalarAsync(cancellationToken) is int processId
+            ? processId
+            : throw Rejected("repair_target_lock_lost");
     }
 
     public async ValueTask DisposeAsync()

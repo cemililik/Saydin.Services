@@ -9,7 +9,8 @@ internal sealed record ScanOptions(
     string? EvidencePrivateKeyFile,
     string HmacKeyFile,
     string OutputDirectory,
-    EvidenceSignerConfiguration? EvidenceSigner = null) : AuditCommandOptions;
+    EvidenceSignerConfiguration? EvidenceSigner = null,
+    string? ProductionTargetAuthorityFile = null) : AuditCommandOptions;
 
 internal abstract record EvidenceSignerConfiguration;
 
@@ -62,6 +63,7 @@ internal static class AuditOptions
             "--evidence-public-key",
             "--allowed-evidence-key-ids",
             "--kms-timeout-seconds",
+            "--production-target-authority-file",
         };
         var values = ParseOptionalPairs(args, allowed);
         foreach (var required in new[]
@@ -114,7 +116,8 @@ internal static class AuditOptions
             privateKey,
             values["--hmac-key-file"],
             values["--output"],
-            signer);
+            signer,
+            values.GetValueOrDefault("--production-target-authority-file"));
     }
 
     private static VerifyEvidenceOptions ParseVerify(string[] args)

@@ -21,7 +21,11 @@ internal static class RepairApplication
         Func<string, string?> environment,
         CancellationToken cancellationToken = default,
         Func<OciKmsReceiptSignerConfiguration, IKmsSigningClient>? kmsFactory = null,
-        ICommitBoundary? commitBoundary = null)
+        ICommitBoundary? commitBoundary = null,
+        IRepairDatabaseFaultInjector? databaseFaultInjector = null,
+        int maximumGuardRows = 100_000,
+        Action<ReceiptStoreCheckpoint>? receiptCheckpoint = null,
+        Func<RepairTrustLease, CancellationToken, Task>? afterLiveTrust = null)
     {
         try
         {
@@ -29,9 +33,6 @@ internal static class RepairApplication
             var plan = SignedRepairPlan.LoadAndVerify(
                 options.PlanFile, options.PlanSignatureFile,
                 options.PlanPublicKeyFile, timeProvider);
-            await DqaEvidenceVerifier.VerifyAsync(
-                options.EvidenceBundleDirectory, options.EvidencePublicKeyFile,
-                plan.Plan.Evidence, plan.Plan.Target.Environment, cancellationToken);
             var runtime = RuntimeDatabaseOptions.FromEnvironment(
                 LoginPurpose.Ingestion, RuntimeDatabasePooling.Disabled, environment);
             ValidateTarget(plan.Plan.Target, runtime, environment);
@@ -42,9 +43,15 @@ internal static class RepairApplication
                 dataSource, runtime.Contract, cancellationToken);
             await using var auditDataSource = await RuntimeDatabase.OpenVerifiedDataSourceAsync(
                 audit, cancellationToken: cancellationToken);
-            await trustLease.VerifyLiveTrustAsync(
+            var physicalTarget = await trustLease.VerifyLiveTrustAsync(
                 auditDataSource, plan, runtime.Contract, cancellationToken);
-            var database = new RepairDatabase(dataSource);
+            if (afterLiveTrust is not null)
+                await afterLiveTrust(trustLease, cancellationToken);
+            await DqaEvidenceVerifier.VerifyAsync(
+                options.EvidenceBundleDirectory, options.EvidencePublicKeyFile,
+                plan.Plan.Evidence, physicalTarget, cancellationToken);
+            var database = new RepairDatabase(
+                dataSource, trustLease, databaseFaultInjector, maximumGuardRows);
             await database.VerifyPreflightAsync(cancellationToken);
 
             if (options.Mode == RepairMode.DryRun)
@@ -60,9 +67,9 @@ internal static class RepairApplication
             RepairFiles.ValidateApprovalToken(
                 options.ApprovalTokenFile!, plan.Plan.ApprovalTokenSha256);
             await using var signer = ReceiptSignerFactory.Create(
-                options.ReceiptSigner!, plan.Plan.Target, plan.Plan.ReceiptKeyId,
+                options.ReceiptSigner!, physicalTarget, plan.Plan.ReceiptKeyId,
                 environment, kmsFactory);
-            var store = new ReceiptStore(options.ReceiptRoot!);
+            var store = new ReceiptStore(options.ReceiptRoot!, receiptCheckpoint);
             var executor = new RepairExecutor(
                 database, store, signer, commitBoundary ?? new DefaultCommitBoundary());
             var result = options.Mode == RepairMode.Apply

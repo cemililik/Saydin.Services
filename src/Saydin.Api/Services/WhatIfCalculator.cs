@@ -47,6 +47,7 @@ public sealed class WhatIfCalculator(
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsurePositive(request.Amount, nameof(request.Amount));
+        EnsureNotFuture(request.SellDate, nameof(request.SellDate));
 
         var user = await GetAuthenticatedUserAsync(ct);
         var features = options.Value.GetTierOptions(user.Tier).Features;
@@ -91,6 +92,7 @@ public sealed class WhatIfCalculator(
                 field: nameof(request.AssetSymbols));
         EnsureRequired(request.AmountType, nameof(request.AmountType));
         EnsurePositive(request.Amount, nameof(request.Amount));
+        EnsureNotFuture(request.SellDate, nameof(request.SellDate));
 
         var user = await GetAuthenticatedUserAsync(ct);
 
@@ -176,6 +178,7 @@ public sealed class WhatIfCalculator(
         EnsureRequired(request.AssetSymbol, nameof(request.AssetSymbol));
         EnsureRequired(request.TargetAmountType, nameof(request.TargetAmountType));
         EnsurePositive(request.TargetAmount, nameof(request.TargetAmount));
+        EnsureNotFuture(request.SellDate, nameof(request.SellDate));
 
         var user = await GetAuthenticatedUserAsync(ct);
         var features = options.Value.GetTierOptions(user.Tier).Features;
@@ -222,6 +225,7 @@ public sealed class WhatIfCalculator(
         var symbol           = request.AssetSymbol.ToUpperInvariant();
         var sellDate         = request.SellDate
             ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
+        EnsureNotFuture(sellDate, nameof(request.SellDate));
         var targetAmountType = request.TargetAmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
@@ -409,6 +413,7 @@ public sealed class WhatIfCalculator(
         var symbol     = request.AssetSymbol.ToUpperInvariant();
         var sellDate   = request.SellDate
             ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
+        EnsureNotFuture(sellDate, nameof(request.SellDate));
         var amountType = request.AmountType.ToLowerInvariant();
 
         if (request.BuyDate > sellDate)
@@ -420,7 +425,7 @@ public sealed class WhatIfCalculator(
         var amountStr = request.Amount.ToString("G", CultureInfo.InvariantCulture);
         var catalog = await assetService.GetCatalogVersionAsync(ct);
         var cacheKey = AuthorityCacheNamespace.Key(
-            $"catalog:{catalog.Token}:whatif:v3:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{amountType}{inflationSuffix}:{lang}");
+            $"catalog:{catalog.Token}:whatif:v4:{symbol}:{request.BuyDate:yyyy-MM-dd}:{sellDate:yyyy-MM-dd}:{amountStr}:{amountType}{inflationSuffix}:{lang}");
 
         var cached = await cache.TryGetAsync<WhatIfCacheEntry>(cacheKey, ct);
         if (cached is not null && cached.IsValid(
@@ -461,16 +466,19 @@ public sealed class WhatIfCalculator(
 
         decimal initialValueTry;
         decimal unitsAcquired;
+        decimal calculationUnits;
 
         switch (amountType)
         {
             case QuantityUnits.Try:
-                initialValueTry = request.Amount;
-                unitsAcquired   = Math.Round(request.Amount / buyPrice, 6, MidpointRounding.AwayFromZero);
+                calculationUnits = request.Amount / buyPrice;
+                unitsAcquired   = Math.Round(calculationUnits, 6, MidpointRounding.AwayFromZero);
+                initialValueTry = Math.Round(request.Amount, 2, MidpointRounding.AwayFromZero);
                 break;
             case QuantityUnits.Units:
             case QuantityUnits.Grams:
-                unitsAcquired   = request.Amount;
+                calculationUnits = request.Amount;
+                unitsAcquired   = calculationUnits;
                 initialValueTry = Math.Round(request.Amount * buyPrice, 2, MidpointRounding.AwayFromZero);
                 break;
             default:
@@ -479,7 +487,7 @@ public sealed class WhatIfCalculator(
                     field: nameof(request.AmountType));
         }
 
-        var finalValueTry     = Math.Round(unitsAcquired * sellPrice, 2, MidpointRounding.AwayFromZero);
+        var finalValueTry     = Math.Round(calculationUnits * sellPrice, 2, MidpointRounding.AwayFromZero);
         var profitLossTry     = finalValueTry - initialValueTry;
         var profitLossPercent = initialValueTry == 0
             ? 0m
@@ -614,6 +622,16 @@ public sealed class WhatIfCalculator(
             throw new ValidationException(localizer["AmountMustBePositive"], field: field);
     }
 
+    private void EnsureNotFuture(DateOnly? date, string field)
+    {
+        if (date is not { } value
+            || value <= BusinessClock.TodayInIstanbul(timeProvider))
+            return;
+
+        throw new ValidationException(
+            localizer["CalculationEndDateCannotBeInFuture"], field: field);
+    }
+
     /// <summary>
     /// F2.2-21 ([G-B-01]): Tier'ın <c>PriceHistoryMonths</c> sınırı (0 = sınırsız)
     /// alış tarihine dayatılır. BuyDate "bugünden <c>months</c> ay önceki tarihten önce"
@@ -622,7 +640,7 @@ public sealed class WhatIfCalculator(
     private void EnsureWithinHistoryWindow(DateOnly buyDate, int months)
     {
         if (months <= 0) return;
-        var earliestAllowed = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime).AddMonths(-months);
+        var earliestAllowed = BusinessClock.TodayInIstanbul(timeProvider).AddMonths(-months);
         if (buyDate < earliestAllowed)
             throw new FeatureDisabledException(localizer[FeatureDisabledKey], featureKey: "extended_history");
     }

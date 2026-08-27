@@ -39,7 +39,9 @@ internal sealed record AuditBudget(
     long MaxEvidenceBytes,
     int StatementTimeoutMilliseconds,
     int LockTimeoutMilliseconds,
-    int TotalTimeoutSeconds);
+    int TotalTimeoutSeconds,
+    int MaxGlobalRows,
+    int MaxCalendarReleases);
 
 internal sealed record AuditScope(
     DateTimeOffset AsOfUtc,
@@ -83,6 +85,16 @@ internal sealed record RepairRecommendation(
     string? PostimageSha256,
     bool RequiresProviderEvidence);
 
+internal enum RepairAction
+{
+    Requeue,
+    Refetch,
+    RestoreSchemaContract,
+    RestoreCalendarRelease,
+    ReconcileAuthorityEvidence,
+    ManualReview,
+}
+
 internal sealed record EvidenceContent(
     int SchemaVersion,
     string RulesetVersion,
@@ -103,6 +115,8 @@ internal sealed record EvidenceManifest(
     DateTimeOffset CreatedAtUtc,
     string ContentBundleSha256,
     IReadOnlyList<EvidenceFileHash> Files);
+
+internal sealed record EvidenceVerificationResult(bool IsValid, string Code);
 
 internal sealed record EmbeddedMigration(string Version, string FileName, string Checksum);
 
@@ -142,5 +156,6 @@ internal sealed class AuditRejectedException(string code, int exitCode) : Except
 [JsonSerializable(typeof(AuditInputManifest))]
 [JsonSerializable(typeof(EvidenceContent))]
 [JsonSerializable(typeof(EvidenceManifest))]
+[JsonSerializable(typeof(RepairRecommendation[]))]
 [JsonSerializable(typeof(IReadOnlyList<AuditCheckResult>))]
 internal partial class AuditJsonContext : JsonSerializerContext;

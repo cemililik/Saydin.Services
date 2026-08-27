@@ -1,5 +1,7 @@
 namespace Saydin.CalendarData.Tests;
 
+using Xunit.Sdk;
+
 public sealed class InfrastructureCalendarContractTests
 {
     [Fact]
@@ -34,15 +36,39 @@ public sealed class InfrastructureCalendarContractTests
         Assert.Contains("--kill-after=30s 15m", acquisition);
         Assert.Contains("while [ \"$attempt\" -le 3 ]", acquisition);
         Assert.Contains("@sha256:[0-9a-f]{64}", acquisition);
+        Assert.Contains("--memory 256m", acquisition);
+        Assert.Contains("--pids-limit 128", acquisition);
+        Assert.Contains("materialize-plan", acquisition);
+        Assert.Contains("calendar_acquisition_noop", acquisition);
         Assert.Contains("openssl dgst -sha256 -verify", verifier);
         Assert.Contains("--network none", verifier);
+        Assert.Contains("SAYDIN_CALENDAR_REVIEWER_PUBLIC_KEY_SHA256", verifier);
+        Assert.Contains("candidate_owner_identity_mismatch", verifier);
         Assert.Contains("candidate_contains_untracked_file", verifier);
         Assert.Contains("mv -T -n", promotion);
+        Assert.Contains("SAYDIN_CALENDAR_VERIFY_CANDIDATE", promotion);
+        Assert.Contains("candidate_not_in_quarantine", promotion);
+        Assert.Contains("calendar_quarantine_candidate_removed", promotion);
         Assert.Contains("database_activation_not_performed", promotion);
         Assert.DoesNotContain(" import ", acquisition);
         Assert.DoesNotContain(" activate ", acquisition);
         Assert.DoesNotContain(" import ", promotion);
         Assert.DoesNotContain(" activate ", promotion);
+    }
+
+    [Fact]
+    public void CalendarImage_IsLockedMultiStageAndNonRoot1001()
+    {
+        var dockerfile = File.ReadAllText(Path.Combine(RepositoryRoot(),
+            "tools/calendar-data/Dockerfile"));
+
+        Assert.Contains("AS build", dockerfile);
+        Assert.Contains("-p:RestoreLockedMode=true", dockerfile);
+        Assert.Contains("FROM mcr.microsoft.com/dotnet/runtime@sha256:", dockerfile);
+        Assert.Contains("groupadd -g 1001", dockerfile);
+        Assert.Contains("useradd -r -u 1001 -g 1001", dockerfile);
+        Assert.Contains("USER appuser", dockerfile);
+        Assert.DoesNotContain("FROM mcr.microsoft.com/dotnet/sdk:10.0", dockerfile);
     }
 
     [Theory]
@@ -51,14 +77,18 @@ public sealed class InfrastructureCalendarContractTests
     public async Task Promotion_SourceMutationAfterFirstVerification_FailsWithoutPendingOrFinal(
         bool replaceWithSymlink)
     {
-        if (!OperatingSystem.IsLinux()) return;
+        if (!OperatingSystem.IsLinux())
+            throw SkipException.ForSkip(
+                "Linux-specific symlink/rename race; required Docker CI executes this test with zero skips.");
         using var temp = new TempRoot();
         var root = RepositoryRoot();
         var scriptDirectory = Path.Combine(temp.Path, "scripts");
-        var candidate = Path.Combine(temp.Path, "candidate");
+        var staging = Path.Combine(temp.Path, "quarantine");
+        var candidate = Path.Combine(staging, "candidate-under-test");
         var promotion = Path.Combine(temp.Path, "promotion");
         var barrier = Path.Combine(temp.Path, "barrier");
         Directory.CreateDirectory(scriptDirectory);
+        Directory.CreateDirectory(staging);
         Directory.CreateDirectory(candidate);
         Directory.CreateDirectory(promotion);
         Directory.CreateDirectory(barrier);
@@ -105,6 +135,10 @@ public sealed class InfrastructureCalendarContractTests
         process.StartInfo.ArgumentList.Add("release-under-test");
         process.StartInfo.ArgumentList.Add($"calendar.invalid/test@sha256:{new string('a', 64)}");
         process.StartInfo.Environment["SAYDIN_TEST_PROMOTION_BARRIER"] = barrier;
+        process.StartInfo.Environment["SAYDIN_CALENDAR_VERIFY_CANDIDATE"] = verifier;
+        process.StartInfo.Environment["SAYDIN_CALENDAR_STAGING_ROOT"] = staging;
+        process.StartInfo.Environment["SAYDIN_CALENDAR_RUNTIME_UID"] = GetUnixId("-u");
+        process.StartInfo.Environment["SAYDIN_CALENDAR_RUNTIME_GID"] = GetUnixId("-g");
         Assert.True(process.Start());
 
         var verified = Path.Combine(barrier, "verified");
@@ -138,6 +172,21 @@ public sealed class InfrastructureCalendarContractTests
 
     private static string RepositoryRoot() =>
         Path.GetFullPath(Path.Combine(CalendarDataTestRoot.DataRoot, "..", "..", ".."));
+
+    private static string GetUnixId(string argument)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo("id")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+        };
+        start.ArgumentList.Add(argument);
+        using var process = System.Diagnostics.Process.Start(start)!;
+        var value = process.StandardOutput.ReadToEnd().Trim();
+        process.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
+        return value;
+    }
 
     private sealed class TempRoot : IDisposable
     {

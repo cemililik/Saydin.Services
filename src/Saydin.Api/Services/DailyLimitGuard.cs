@@ -61,16 +61,19 @@ public sealed class DailyLimitGuard : IDailyLimitGuard
 
     private readonly IConnectionMultiplexer _redis;
     private readonly IOptions<PlanOptions> _options;
+    private readonly IQuotaSubjectPseudonymizer _pseudonymizer;
     private readonly ILogger<DailyLimitGuard> _logger;
 
     public DailyLimitGuard(
         IConnectionMultiplexer redis,
         IOptions<PlanOptions> options,
+        IQuotaSubjectPseudonymizer pseudonymizer,
         TimeProvider timeProvider,
         ILogger<DailyLimitGuard> logger)
     {
         _redis = redis;
         _options = options;
+        _pseudonymizer = pseudonymizer;
         _logger = logger;
         _ = timeProvider; // Kept for source/DI compatibility; Redis TIME is authoritative.
     }
@@ -92,7 +95,7 @@ public sealed class DailyLimitGuard : IDailyLimitGuard
             for (var attempt = 0; attempt < MaximumCalendarRaceRetries; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
-                var key = BuildUsageKey(user, deviceId, usageKeyPrefix, day);
+                var key = BuildUsageKey(PseudonymizeSubject(user, deviceId), usageKeyPrefix, day);
                 var result = ParsePair(await database.ScriptEvaluateAsync(
                     CheckScript, [key], [day, limit]).WaitAsync(ct));
                 if (result.Status == -1)
@@ -156,7 +159,7 @@ public sealed class DailyLimitGuard : IDailyLimitGuard
             for (var attempt = 0; attempt < MaximumCalendarRaceRetries; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
-                var key = BuildUsageKey(user, deviceId, usageKeyPrefix, day);
+                var key = BuildUsageKey(PseudonymizeSubject(user, deviceId), usageKeyPrefix, day);
                 var values = new RedisValue[] { day, limit, nonce, RetentionMilliseconds };
                 RedisResult rawResult;
                 try
@@ -233,28 +236,30 @@ public sealed class DailyLimitGuard : IDailyLimitGuard
         }
     }
 
-    internal static string BuildUsageKey(
-        User? user,
-        string deviceId,
-        string prefix,
-        DateTime now) =>
-        BuildUsageKey(user, deviceId, prefix,
-            checked(new DateTimeOffset(now.ToUniversalTime()).ToUnixTimeSeconds() / 86400));
-
-    internal static string BuildUsageKey(User? user, string deviceId, string prefix, long utcDay)
+    internal static string BuildUsageKey(string quotaSubject, string prefix, long utcDay)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prefix);
         if (prefix.Length > 128 || prefix.Any(char.IsControl))
             throw new ArgumentException("Invalid quota key prefix.", nameof(prefix));
 
-        var subject = user?.Id.ToString("D", CultureInfo.InvariantCulture) ?? deviceId;
-        ArgumentException.ThrowIfNullOrWhiteSpace(subject);
-        if (subject.Length > 256 || subject.Any(char.IsControl))
-            throw new ArgumentException("Invalid quota subject.", nameof(deviceId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(quotaSubject);
+        if (quotaSubject.Length != 35 || !quotaSubject.StartsWith("q1:", StringComparison.Ordinal) ||
+            quotaSubject[3..].Any(character =>
+                !((character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f'))))
+            throw new ArgumentException("Invalid quota pseudonym.", nameof(quotaSubject));
 
         var date = DateTimeOffset.FromUnixTimeSeconds(checked(utcDay * 86400))
             .UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-        return $"{prefix}{subject}:{date}";
+        return $"{prefix}{quotaSubject}:{date}";
+    }
+
+    private string PseudonymizeSubject(User? user, string deviceId)
+    {
+        var subject = user is null
+            ? deviceId
+            : user.Id.ToString("N", CultureInfo.InvariantCulture);
+        return _pseudonymizer.PseudonymizeQuotaSubject(subject);
     }
 
     private (bool HasLimit, int Limit) GetLimit(User? user, int? limitOverride)

@@ -85,31 +85,36 @@ Bu kural kasıtlı olarak uygulanır. Bir servisin diğerini doğrudan çağırm
 
 ## Resilience Katmanı
 
-Her `IExternalPriceAdapter` implementasyonu `Microsoft.Extensions.Http.Resilience`
-(`AddStandardResilienceHandler`, Polly v8) ile merkezi resilience pipeline'ı kullanır:
+Her dış provider adapter'ı `Microsoft.Extensions.Http.Resilience`
+(`AddResilienceHandler`, Polly v8) ile merkezi, tek-kontratlı resilience pipeline'ı kullanır:
 
 ```mermaid
 flowchart LR
-    Req["Request"] --> T["AttemptTimeout 30s<br/>(TotalRequestTimeout 3 dk)"]
-    T --> Rt["Retry ×3<br/>(exponential + jitter)"]
-    Rt --> CB["CircuitBreaker<br/>MinThroughput=2 · FailureRatio=1.0 · Sampling=120s"]
-    CB --> Ad["Adapter / dış API"]
+    Req["Request"] --> CB["CircuitBreaker<br/>MinThroughput=2 · FailureRatio=1.0 · Sampling=600s"]
+    CB --> Total["TotalRequestTimeout 3 dk<br/>tek retry-chain bütçesi"]
+    Total --> Rt["Retry ×3<br/>exponential + jitter"]
+    Rt --> T["AttemptTimeout 30s<br/>send/header acquisition"]
+    T --> Ad["Dış API"]
 ```
 
 `IHttpClientFactory` üzerinden `HttpResilienceExtensions.AddSaydinResilience` ile uygulanır.
-Düşük-trafik worker'larda (örn. EVDS aylık) circuit breaker pratikte ~2 ardışık hatada 120 sn
-açılır (eski "5 ardışık" hedefinden ödün; rationale `HttpResilienceExtensions` içi yorumda).
+Düşük-trafik worker'larda circuit breaker iki exhausted logical çağrıdan sonra 120 sn açılır;
+600 sn örnekleme penceresi iki stall/timeout zincirini de kapsar.
+`Retry-After` yalnız 429'da değerlendirilir; gecikme
+`max(exponential+jitter, bounded Retry-After)` olur ve dış 3 dk bütçeyi aşamaz. HTTP
+attempt timeout'u `ResponseHeadersRead` nedeniyle gövde okumayı kapsamaz. Bu yüzden worker,
+aynı 3 dk sabitini adapter çağrısının tamamına uygular: header + body + parse + lease renewal.
+Aşım durable, retryable `provider_deadline` sonucudur; host cancellation ayrı kalır. OXR'nin
+gün-başına istek modeli 90 günlük durable window'lara bölünür. Retryable ledger pencereleri
+attempt sayısına göre jitter'lı exponential backoff uygular ve altı saatte tavanlanır.
 
 ## Veritabanı Erişim Deseni
 
-```sql
--- price_points tablosuna her zaman UPSERT:
-INSERT INTO price_points (asset_id, price_date, close, ...)
-VALUES (@assetId, @date, @close, ...)
-ON CONFLICT (asset_id, price_date) DO UPDATE
-  SET close = EXCLUDED.close,
-      updated_at = NOW();
-```
+`price_points` ve `inflation_rates` authority tuple'ları append-once/immutable'dır. Aynı
+provider observation'ının idempotent replay'i veri değiştirmez; farklı revision aynı
+asset/source/tarih authority anahtarına gelirse DB constraint'i worker'da typed
+`provider_revision_conflict` permanent sonucuna çevrilir. Otomatik `ON CONFLICT DO UPDATE`
+ile sessiz authority revizyonu yapılmaz.
 
 `float`/`double` yasak. Tüm fiyat değerleri: `decimal` (C#) / `NUMERIC(18,6)` (PostgreSQL).
 
@@ -211,7 +216,10 @@ Feature flag'lar `/v1/config` endpoint'inden istemciye döner — UI dinamik ola
 
 Tüm finansal hesaplamalar `decimal` + `MidpointRounding.AwayFromZero` ile yapılır; birim
 adetleri **6 hane**, TL tutarları **2 hane** yuvarlanır (CLAUDE.md finansal hassasiyet
-kuralı). Ters hesaplama (`POST /v1/what-if/reverse`) `try` modunda, yanıttaki
+kuralı). İleri WhatIf ve DCA `try` modunda gerçekleşebilir yatırım maliyetini
+`Round(UnitsAcquired × BuyPrice, 2)` olarak türetir; ham istek tutarı ile 6 haneli
+birim granülasyonu karıştırılmaz. Böylece alış ve satış fiyatı eşitse P/L tam sıfırdır.
+Ters hesaplama (`POST /v1/what-if/reverse`) `try` modunda, yanıttaki
 `TargetValueTry` ham hedeften DEĞİL, birim granülasyonundan **ileri-türetilir**
 (forward-consistency): `TargetValueTry = Round(UnitsAcquired × SellPrice, 2)`. Böylece
 UI'da `UnitsAcquired × SellPrice == TargetValueTry` birebir uyuşur; ham hedeften sapma
@@ -226,27 +234,33 @@ Aylık DCA serilerinde her alım tarihi orijinal `startDate`'e göre **indeks-ba
 olarak 28'e takılmaz. Kısa aylarda .NET `AddMonths` son geçerli güne **CLAMP** eder
 (31 Oca → 28 Şub); **SKIP UYGULANMAZ** çünkü kullanıcı o ay da yatırım yapar — ayı atlamak
 toplam yatırılan sermayeyi olduğundan az gösterir. Hafta sonu/tatil durumunda alım en yakın
-işlem gününe taşınır; aynı `PriceDate`'e iki alım düşerse tekilleştirilir (F1.3-3 / F1.3-4).
+işlem gününe taşınır; aynı `PriceDate`'e iki alım düşerse response satırı birleştirilir,
+ancak iki nakit akışı finansal hesapta ayrı kalır. Tekil katkı tarihi için ±7 günde fiyat
+bulunamazsa tarih `SkippedPurchaseDates` içinde bildirilir ve warning'li kısmi sonuç
+cache'lenmez (F1.3-3 / F1.3-4).
 Kaynak: `DcaCalculator.GeneratePurchaseDates`.
 
-### DCA reel getiri — cash-flow CPI terminal v1
+### DCA reel getiri — cash-flow CPI LKV terminal v1
 
 `IncludeInflation=true` için her katkı, planlanan tarihin değil fiilen fiyat bulunan piyasa
-gününün ayındaki exact TÜFE endeksinden terminal fiyat gününün exact TÜFE ayına taşınır.
+gününün ayındaki exact TÜFE endeksinden terminal tarihten ileri olmayan en son final TÜFE
+deflatörüne taşınır. Ara katkı aylarında exact CPI şarttır. Terminal hedef ayındaki katkılar,
+henüz yayımlanmamış current-month CPI beklenmeden terminal deflatörle nötr taşınır.
 Katkı `Cᵢ`, katkı endeksi `Iᵢ`, terminal endeksi `Iₜ`, raw terminal portföy değeri `Vₜ` ise:
 
 - `InflationAdjustedInvestedTry = Σ(Cᵢ × Iₜ / Iᵢ)`
 - `RealProfitLossTry = Vₜ - InflationAdjustedInvestedTry`
 - `RealProfitLossPercent = (Vₜ / InflationAdjustedInvestedTry - 1) × 100`
 
-Hesaplar `decimal` ile yapılır; katkı ve terminal portföy için ara parasal yuvarlama
-yapılmaz. TL alanları ve yüzde yalnız response sınırında sırasıyla 2 haneye
-`MidpointRounding.AwayFromZero` ile yuvarlanır. `RealReturnMethod` değeri
-`cashflow_cpi_terminal_v1`; `InflationTerminalMonth` ve backward-compatible
-`InflationDataAsOf` başarılı hesapta gerçek terminal fiyat gününün exact CPI ayıdır.
-Herhangi bir required CPI ayı eksik veya pozitif değilse nominal alanlar döner, reel
-tutar/yüzde alanları `null` kalır ve incomplete yanıt cache'lenmez. XIRR/yıllıklandırma
-bu sözleşmenin parçası değildir.
+Hesaplar `decimal` ile yapılır; `Cᵢ` 6 haneli birim granülasyonundan türeyen iki haneli
+gerçekleşebilir yatırım maliyetidir. Deflatör oranı/toplamı ve terminal portföy için ara
+yuvarlama yapılmaz; TL alanları ve yüzde yalnız response sınırında yuvarlanır.
+`RealReturnMethod = cashflow_cpi_lkv_terminal_v1`; `InflationTerminalMonth` gerçekten
+kullanılan final CPI ayıdır. Backward-compatible `InflationDataAsOf`, WhatIf ile aynı
+semantiği taşır: exact hedef ayda `null`, LKV gecikmişse kullanılan ay. Herhangi bir ara
+exact CPI veya terminal LKV eksik/pozitif değilse nominal alanlar döner, reel alanlar
+`null` kalır ve incomplete yanıt cache'lenmez. XIRR/yıllıklandırma bu sözleşmenin parçası
+değildir.
 
 ## Senaryo Tipi Normalizasyonu
 
@@ -318,9 +332,9 @@ authority-final-v1:catalog:{revision.sha}:price:{symbol}:{date}                 
 authority-final-v1:catalog:{revision.sha}:nearest-price:{symbol}:{date}          → TTL 24 saat
 authority-final-v1:catalog:{revision.sha}:prices:{symbol}:{from}:{to}:{interval} → TTL 1 saat
 authority-final-v1:catalog:{revision.sha}:latest-date:{symbol}                   → TTL 1 saat
-authority-final-v1:catalog:{revision.sha}:whatif:v3:{...}:{lang}                 → TTL 1 saat
+authority-final-v1:catalog:{revision.sha}:whatif:v4:{...}:{lang}                 → TTL 1 saat
 authority-final-v1:catalog:{revision.sha}:whatif:reverse:v2:{...}:{lang}         → TTL 1 saat
-authority-final-v1:catalog:{revision.sha}:dca:v2:{...}:{lang}                    → TTL 1 saat
+authority-final-v1:catalog:{revision.sha}:dca:v3:{...}:{lang}                    → TTL 1 saat
 authority-final-v1:catalog:{revision.sha}:assets:list                            → TTL 6 saat
 authority-final-v1:catalog:{revision.sha}:assets:info:{lang}                     → TTL 1 saat
 ```
@@ -330,7 +344,10 @@ authority-final-v1:catalog:{revision.sha}:assets:info:{lang}                    
 
 Cache anahtarı normalize edilmiş parametrelerle oluşturulur.
 
-**`whatif` cache versiyonlama:** Lokalize `assetDisplayName` eklendikten sonra anahtar `whatif:v3:...:lang` olarak güncellendi. Dil kodu (`tr`/`en`) cache key'in parçasıdır — farklı dillerdeki istekler ayrı cache'lenir.
+**Finansal cache versiyonlama:** Gerçekleşebilir yatırım maliyeti forward yolu
+`whatif:v4`, terminal LKV cash-flow CPI yöntemi ve kısmi katkı sözleşmesi `dca:v3`
+namespace'ine taşır. Dil kodu (`tr`/`en`) cache key'in parçasıdır; farklı dillerdeki
+istekler ayrı cache'lenir.
 
 **Asset listesi cache stratejisi:** DB-owned monoton catalog revision + SHA bütün data-bearing
 key'lere bağlanır; salt count imzası yoktur. Cache envelope catalog identity, requested symbol/date

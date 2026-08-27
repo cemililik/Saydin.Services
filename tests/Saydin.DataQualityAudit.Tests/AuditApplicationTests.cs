@@ -10,7 +10,7 @@ public sealed class AuditApplicationTests
         var output = new StringWriter();
         var error = new StringWriter();
 
-        var exit = await AuditApplication.RunAsync([], output, error, TimeProvider.System);
+        var exit = await AuditApplication.RunAsync([], output, error, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         exit.Should().Be(AuditExitCodes.InvalidArguments);
         error.ToString().Should().Contain("code=command_missing").And.NotContain("Password=");
@@ -30,10 +30,10 @@ public sealed class AuditApplicationTests
 
         var exit = await AuditApplication.RunAsync(
             ["verify-evidence", "--bundle", directory, "--public-key", files.PublicKeyPath],
-            TextWriter.Null, error, TimeProvider.System);
+            TextWriter.Null, error, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         exit.Should().Be(AuditExitCodes.EvidenceFailure);
-        error.ToString().Should().Contain("code=evidence_verification_failed");
+        error.ToString().Should().Contain("code=evidence_file_integrity_invalid");
     }
 
     [Fact]
@@ -58,10 +58,12 @@ public sealed class AuditApplicationTests
     {
         using var files = new TestFiles();
         var baseline = files.ValidManifest();
-        var signed = files.WriteSignedInput(baseline with
+        var productionManifest = baseline with
         {
             Target = baseline.Target with { Environment = "production" },
-        });
+        };
+        var signed = files.WriteSignedInput(productionManifest);
+        var authority = files.WriteProductionTargetAuthority(productionManifest.Target);
         var bundle = Path.Combine(files.Root, "production-local-rejected");
         var error = new StringWriter();
 
@@ -73,7 +75,8 @@ public sealed class AuditApplicationTests
             "--evidence-private-key", "/must/not/be/read/private.pem",
             "--hmac-key-file", "/must/not/be/read/hmac",
             "--output", bundle,
-        ], TextWriter.Null, error, TimeProvider.System, environment: _ => null);
+            "--production-target-authority-file", authority,
+        ], TextWriter.Null, error, new FixedTimeProvider(DateTimeOffset.UtcNow), environment: _ => null);
 
         exit.Should().Be(AuditExitCodes.InvalidArguments);
         error.ToString().Should().Contain("code=production_signer_mode_rejected");

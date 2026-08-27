@@ -13,6 +13,7 @@ internal static class EvidenceBundle
     private const string ManifestFile = "manifest.json";
     private const string ManifestHashFile = "manifest.sha256";
     private const string SignatureFile = "manifest.sig";
+    private const string IncompleteFile = ".incomplete";
 
     public static async Task<EvidenceManifest> WriteAsync(
         string directory,
@@ -50,10 +51,12 @@ internal static class EvidenceBundle
             content, AuditJsonContext.Default.EvidenceContent);
         AddEvidenceFile(ContentFile, contentBytes);
 
+        var orderedRecommendations = content.RepairRecommendations
+            .OrderBy(item => item.CheckId, StringComparer.Ordinal)
+            .ThenBy(item => item.BusinessKeyHmac, StringComparer.Ordinal)
+            .ToArray();
         var repairJson = JsonSerializer.SerializeToUtf8Bytes(
-            content.RepairRecommendations.OrderBy(item => item.CheckId, StringComparer.Ordinal)
-                .ThenBy(item => item.BusinessKeyHmac, StringComparer.Ordinal),
-            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            orderedRecommendations, AuditJsonContext.Default.RepairRecommendationArray);
         var repairBytes = CanonicalJson.Canonicalize(repairJson);
         AddEvidenceFile(RepairFile, repairBytes);
 
@@ -103,6 +106,8 @@ internal static class EvidenceBundle
                 Directory.CreateDirectory(staging,
                     UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             RejectLinkTraversal(staging);
+            await WriteNewFileAsync(
+                Path.Combine(staging, IncompleteFile), "incomplete\n"u8.ToArray(), cancellationToken);
             foreach (var payload in payloads)
             {
                 var path = ResolveContainedPath(staging, payload.Path);
@@ -113,6 +118,7 @@ internal static class EvidenceBundle
             }
             if (beforePublish is not null)
                 await beforePublish(staging, fullOutput, cancellationToken);
+            File.Delete(Path.Combine(staging, IncompleteFile));
             EnsureOutputAbsentAndParentSafe(fullOutput);
             Directory.Move(staging, fullOutput);
         }
@@ -135,26 +141,36 @@ internal static class EvidenceBundle
     public static async Task<bool> VerifyAsync(
         string directory,
         string publicKeyPath,
+        CancellationToken cancellationToken) =>
+        (await VerifyDetailedAsync(directory, publicKeyPath, cancellationToken)).IsValid;
+
+    public static async Task<EvidenceVerificationResult> VerifyDetailedAsync(
+        string directory,
+        string publicKeyPath,
         CancellationToken cancellationToken)
     {
+        var phase = "evidence_bundle_unreadable";
         try
         {
-            if (File.Exists(Path.Combine(directory, ".incomplete")))
-                return false;
+            if (File.Exists(Path.Combine(directory, IncompleteFile)))
+                return Invalid("evidence_bundle_incomplete");
             if (HasLinkInPath(directory))
-                return false;
+                return Invalid("evidence_link_traversal");
+            phase = "evidence_manifest_unreadable";
             var manifestPath = Path.Combine(directory, ManifestFile);
             var manifestBytes = await ReadBoundedFileAsync(
                 manifestPath, AuditFileLimits.EvidenceManifestBytes, cancellationToken);
             var canonical = CanonicalJson.Canonicalize(manifestBytes);
             if (!canonical.AsSpan().SequenceEqual(manifestBytes))
-                return false;
+                return Invalid("evidence_manifest_noncanonical");
+            phase = "evidence_signature_unreadable";
             var signature = await ReadBoundedFileAsync(
                 Path.Combine(directory, SignatureFile),
                 AuditFileLimits.DetachedSignatureBytes,
                 cancellationToken);
             if (!AuditCryptography.Verify(canonical, signature, publicKeyPath))
-                return false;
+                return Invalid("evidence_signature_invalid");
+            phase = "evidence_manifest_hash_unreadable";
             var expectedManifestHash = Encoding.ASCII.GetString(await ReadBoundedFileAsync(
                 Path.Combine(directory, ManifestHashFile),
                 AuditFileLimits.EvidenceManifestHashBytes,
@@ -162,8 +178,9 @@ internal static class EvidenceBundle
             var manifestHashLength = new FileInfo(Path.Combine(directory, ManifestHashFile)).Length;
             if (!string.Equals(expectedManifestHash, AuditCryptography.Sha256Hex(canonical),
                     StringComparison.Ordinal))
-                return false;
+                return Invalid("evidence_manifest_hash_invalid");
 
+            phase = "evidence_manifest_contract_invalid";
             var manifest = JsonSerializer.Deserialize(
                 canonical, AuditJsonContext.Default.EvidenceManifest);
             if (manifest is null || manifest.SchemaVersion != 2 ||
@@ -181,15 +198,15 @@ internal static class EvidenceBundle
                     !IsSha256(file.Sha256)) ||
                 manifest.Files.Select(file => file.Path).Distinct(StringComparer.Ordinal).Count()
                     != manifest.Files.Count)
-                return false;
+                return Invalid("evidence_manifest_contract_invalid");
             if (!string.Equals(manifest.KeyId, AuditCryptography.PublicKeyId(publicKeyPath),
                     StringComparison.Ordinal))
-                return false;
+                return Invalid("evidence_key_identity_mismatch");
             var expectedFiles = manifest.Files.Select(file => file.Path)
                 .Append(ManifestFile).Append(ManifestHashFile).Append(SignatureFile)
                 .ToHashSet(StringComparer.Ordinal);
             if (!InventoryMatches(directory, expectedFiles, cancellationToken))
-                return false;
+                return Invalid("evidence_inventory_invalid");
             long declaredBytes = 0;
             foreach (var file in manifest.Files)
             {
@@ -197,14 +214,15 @@ internal static class EvidenceBundle
                     file.Sha256.Length != 64 || !file.Sha256.All(character =>
                         character is >= '0' and <= '9' or >= 'a' and <= 'f') ||
                     declaredBytes > AuditFileLimits.EvidenceBundleBytes - file.Bytes)
-                    return false;
+                    return Invalid("evidence_size_contract_invalid");
                 declaredBytes += file.Bytes;
+                phase = "evidence_file_unreadable";
                 var path = ResolveContainedPath(directory, file.Path);
                 var info = new FileInfo(path);
                 if (!info.Exists || info.Length != file.Bytes ||
                     !string.Equals(await Sha256FileAsync(path, cancellationToken), file.Sha256,
                         StringComparison.Ordinal))
-                    return false;
+                    return Invalid("evidence_file_integrity_invalid");
             }
 
             if (declaredBytes > AuditFileLimits.EvidenceBundleBytes - manifestBytes.LongLength ||
@@ -212,21 +230,27 @@ internal static class EvidenceBundle
                     AuditFileLimits.EvidenceBundleBytes - signature.LongLength ||
                 declaredBytes + manifestBytes.LongLength + signature.LongLength >
                     AuditFileLimits.EvidenceBundleBytes - manifestHashLength)
-                return false;
+                return Invalid("evidence_size_contract_invalid");
 
             var contentEntry = manifest.Files.SingleOrDefault(file => file.Path == ContentFile);
             return InventoryMatches(directory, expectedFiles, cancellationToken) &&
                    contentEntry is not null &&
                    string.Equals(contentEntry.Sha256, manifest.ContentBundleSha256,
-                       StringComparison.Ordinal);
+                       StringComparison.Ordinal)
+                ? Valid()
+                : Invalid("evidence_content_binding_invalid");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                                                or JsonException or InvalidOperationException
                                                or AuditRejectedException or ArgumentException)
         {
-            return false;
+            return Invalid(phase);
         }
     }
+
+    private static EvidenceVerificationResult Valid() => new(true, "evidence_verified");
+
+    private static EvidenceVerificationResult Invalid(string code) => new(false, code);
 
     private static void EnsureOutputAbsentAndParentSafe(string directory)
     {

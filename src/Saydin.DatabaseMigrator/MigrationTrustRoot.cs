@@ -15,7 +15,8 @@ internal static class MigrationTrustRoot
         "014_schema_migrations", "015_ingestion_windows", "016_ingestion_write_fence",
         "017_authoritative_market_calendars", "018_scenario_integrity",
         "019_privilege_separation", "020_price_authority_expand", "021_api_trust_expand",
-        "022_principal_retention",
+        "022_principal_retention", "023_installation_lifecycle_admission",
+        "024_installation_credential_rehash", "025_ingestion_calendar_rebind",
     });
 
     internal static IReadOnlyDictionary<string, string> Checksums { get; } =
@@ -45,5 +46,8 @@ internal static class MigrationTrustRoot
             ["020_price_authority_expand"] = "8cb3f07bffef6013f42d196a20f0c08ed3e02547028d5694d6fba5f9749c52a8",
             ["021_api_trust_expand"] = "1f44aa1413d611cb8b078541e0100985c33614274e2fd700a8f8b94303045c1e",
             ["022_principal_retention"] = "568017c27eb6038a06b48ee00f2f0820bba6cf7b577dd5f283291ac9995e8afd",
+            ["023_installation_lifecycle_admission"] = "1b76002b7c2e3b9156e433e1268a085027e383fa0025e82f398f2bb27aa1663e",
+            ["024_installation_credential_rehash"] = "afda0e5a86b8d4b2c6b0f809372db72933f5c7e5b4b1dd18eaa8dd50dbc773d9",
+            ["025_ingestion_calendar_rebind"] = "a20338e2d3db8f75a848949a937baaee4fa3f426e58814a4de352b0cfc2be051",
         };
 }

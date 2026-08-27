@@ -3,6 +3,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using Saydin.PriceIngestion.Adapters;
 
@@ -17,8 +18,9 @@ public class TwelveDataAdapterTests
     {
         var (adapter, handler) = Build(_ => OkPayload());
 
-        await adapter.FetchRangeAsync(Request(), default);
+        var result = await adapter.FetchRangeAsync(Request(), default);
 
+        result.Kind.Should().Be(AdapterOutcomeKind.Data);
         var request = handler.Requests.Single();
         request.Headers.Authorization!.ToString().Should().Be("apikey test-key");
         request.RequestUri!.Query.Should().NotContain("test-key");
@@ -45,14 +47,22 @@ public class TwelveDataAdapterTests
     }
 
     [Fact]
-    public async Task EmptyValues_IsPartialRejected_NotSuccessEmpty()
+    public async Task EmptyValues_IsHistoricalPartialButCurrentTerminalIsRetryable()
     {
-        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        HttpResponseMessage Empty() => new(HttpStatusCode.OK)
         {
             Content = new StringContent("""{"status":"ok","meta":{"symbol":"THYAO","interval":"1day","exchange":"BIST","mic_code":"XIST","exchange_timezone":"Europe/Istanbul","currency":"TRY","type":"Common Stock"},"values":[]}"""),
-        });
+        };
+        var (adapter, _) = Build(_ => Empty());
         (await adapter.FetchRangeAsync(Request(), default)).Kind
             .Should().Be(AdapterOutcomeKind.PartialRejected);
+
+        var currentTime = new FakeTimeProvider(
+            new DateTimeOffset(2024, 1, 3, 12, 0, 0, TimeSpan.Zero));
+        var (currentAdapter, _) = Build(_ => Empty(), timeProvider: currentTime);
+        var current = await currentAdapter.FetchRangeAsync(Request(), default);
+        current.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        current.Code.Should().Be("not_published_yet");
     }
 
     [Fact]
@@ -77,19 +87,41 @@ public class TwelveDataAdapterTests
         }
     }
 
+    [Fact]
+    public async Task OversizedTransportIsRetryable_AndWrongValueKindIsPermanent()
+    {
+        var (oversized, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new string('x', ProviderTransportLimits.MaxResponseBytes + 1)),
+        });
+        var size = await oversized.FetchRangeAsync(Request(), default);
+        size.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        size.Code.Should().Be("transport_payload_too_large");
+
+        var (wrongKind, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"status":true,"values":[]}"""),
+        });
+        var kind = await wrongKind.FetchRangeAsync(Request(), default);
+        kind.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        kind.Code.Should().Be("contract_value_kind_invalid");
+    }
+
     private static PriceFetchRequest Request() =>
         new(Guid.NewGuid(), "THYAO", "THYAO", Day, Day, new HashSet<DateOnly>());
 
     private static HttpResponseMessage OkPayload() => new(HttpStatusCode.OK)
     {
         Content = new StringContent("""
-            {"status":"ok","meta":{"symbol":"THYAO","interval":"1day","exchange":"BIST","mic_code":"XIST","exchange_timezone":"Europe/Istanbul","currency":"TRY","type":"Common Stock"},"values":[{"datetime":"2024-01-03","open":"99","high":"102","low":"98","close":"100.5"}]}
+            {"status":"ok","meta":{"symbol":"THYAO","interval":"1day","exchange":"BIST","mic_code":"XIST","exchange_timezone":"Europe/Istanbul","currency":"TRY","type":"Common Stock"},"values":[{"datetime":"2024-01-03","open":"99","high":"102","low":"98","close":"100.5","volume":"1"}]}
             """),
     };
 
     private static (TwelveDataAdapter, StubHttpMessageHandler) Build(
         Func<HttpRequestMessage, HttpResponseMessage> responder, string? apiKey = "test-key",
-        ILogger<TwelveDataAdapter>? logger = null)
+        ILogger<TwelveDataAdapter>? logger = null,
+        TimeProvider? timeProvider = null)
     {
         var handler = new StubHttpMessageHandler(responder);
         var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.twelvedata.com/") };
@@ -97,7 +129,7 @@ public class TwelveDataAdapterTests
         factory.CreateClient("twelvedata").Returns(client);
         var config = new ConfigurationBuilder().AddInMemoryCollection(
             new Dictionary<string, string?> { ["ExternalApis:TwelveData:ApiKey"] = apiKey }).Build();
-        return (new TwelveDataAdapter(factory, config,
+        return (new TwelveDataAdapter(factory, config, timeProvider ?? TimeProvider.System,
             logger ?? NullLogger<TwelveDataAdapter>.Instance), handler);
     }
 

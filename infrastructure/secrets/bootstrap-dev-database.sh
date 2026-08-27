@@ -17,6 +17,8 @@ bootstrap_compose() {
     SAYDIN_INGESTION_LOGIN=bootstrap-not-started \
     SAYDIN_CALENDAR_IMPORTER_LOGIN=bootstrap-not-started \
     SAYDIN_EXPORTER_LOGIN=bootstrap-not-started \
+    SAYDIN_AUDIT_LOGIN=bootstrap-not-started \
+    SAYDIN_BACKUP_V1_VALID_UNTIL=2099-01-01T00:00:00Z \
     PGADMIN_PASSWORD=bootstrap-service-not-started \
     REDIS_PASSWORD=bootstrap-service-not-started \
     docker compose "$@"
@@ -42,6 +44,7 @@ expected_keys=(
   SAYDIN_CALENDAR_IMPORTER_LOGIN
   SAYDIN_EXPORTER_LOGIN
   SAYDIN_AUDIT_LOGIN
+  SAYDIN_BACKUP_V1_VALID_UNTIL
 )
 
 [[ "$(printf '%s\n' "$metadata" | wc -l | tr -d ' ')" == "${#expected_keys[@]}" ]] || {
@@ -60,6 +63,7 @@ if printf '%s\n' "$metadata" | grep -Eqi 'password|secret|url=|connection'; then
 fi
 printf '%s\n' "$metadata" | grep -Eq '^SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256=[0-9a-f]{64}$' || exit 3
 printf '%s\n' "$metadata" | grep -Eq '^SAYDIN_DATABASE_ROLE_PREFIX=saydin_[a-z][a-z0-9_]{2}_[0-9a-f]{24}$' || exit 3
+printf '%s\n' "$metadata" | grep -Eq '^SAYDIN_BACKUP_V1_VALID_UNTIL=[0-9]{4}-[0-9]{2}-[0-9]{2}T00:00:00Z$' || exit 3
 
 temporary_file="$(mktemp "$repo_root/.env.database-runtime.XXXXXX")"
 cleanup() {
@@ -73,6 +77,12 @@ printf '%s\n' "$metadata" > "$temporary_file"
 mv -f -- "$temporary_file" "$metadata_file"
 temporary_file=''
 
-docker compose --env-file "$metadata_file" config --quiet
+compose_env_files=()
+if [[ -f "$repo_root/.env" ]]; then
+  compose_env_files+=(--env-file "$repo_root/.env")
+fi
+compose_env_files+=(--env-file "$metadata_file")
+docker compose "${compose_env_files[@]}" config --quiet
 printf 'database runtime metadata ready: %s\n' "$metadata_file"
-printf '%s\n' 'start with: docker compose --env-file .env.database-runtime up --build'
+printf '%s\n' \
+  'start with: docker compose --env-file .env --env-file .env.database-runtime up --build'

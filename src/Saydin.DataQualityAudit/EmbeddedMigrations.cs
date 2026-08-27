@@ -17,6 +17,14 @@ internal static partial class EmbeddedMigrations
     internal const string PrincipalRetentionVersion = "022_principal_retention";
     internal const string PrincipalRetentionChecksum =
         "568017c27eb6038a06b48ee00f2f0820bba6cf7b577dd5f283291ac9995e8afd";
+    internal const string InstallationLifecycleAdmissionVersion =
+        "023_installation_lifecycle_admission";
+    internal const string InstallationLifecycleAdmissionChecksum =
+        "1b76002b7c2e3b9156e433e1268a085027e383fa0025e82f398f2bb27aa1663e";
+    internal const string InstallationCredentialRehashVersion =
+        "024_installation_credential_rehash";
+    internal const string InstallationCredentialRehashChecksum =
+        "afda0e5a86b8d4b2c6b0f809372db72933f5c7e5b4b1dd18eaa8dd50dbc773d9";
 
     internal static IReadOnlyDictionary<string, string> PinnedChecksums =>
         MigrationTrustRoot.Checksums;

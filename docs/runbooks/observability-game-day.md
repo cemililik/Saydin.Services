@@ -8,7 +8,9 @@ time, route time, acknowledgement, recovery, resolve notification and runbook ou
 | Stop API process | `SaydinApiUnavailable` | 3 minutes |
 | Return controlled 5xx traffic | `SaydinApiErrorBudgetBurn` | 15 minutes |
 | Delay controlled API route | `SaydinApiLatencyHigh` | 20 minutes |
-| Suppress ingestion freshness | `SaydinIngestionStale` | freshness threshold + 15 minutes |
+| Suppress both ingestion freshness metric families | `SaydinIngestionFreshnessMetricMissing` | 15 minutes |
+| Suppress daily ingestion freshness | `SaydinDailyIngestionStale` | 26 hours + 15 minutes |
+| Suppress monthly ingestion freshness | `SaydinMonthlyIngestionStale` | 40 days + 15 minutes |
 | Stop PostgreSQL/Redis exporter connectivity | database/Redis unavailable | 4 minutes |
 | Fill disposable filesystem below 15 percent free | `SaydinHostDiskPressure` | 20 minutes |
 | Suppress backup checkpoint metric | backup missing/stale | 30 minutes |

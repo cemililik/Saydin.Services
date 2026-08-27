@@ -4,6 +4,7 @@ using FluentAssertions;
 
 namespace Saydin.DatabaseMigrator.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class SqlScriptNormalizerTests
 {
     [Fact]
@@ -55,6 +56,7 @@ public sealed class SqlScriptNormalizerTests
     [Theory]
     [InlineData("VACUUM assets;")]
     [InlineData("CREATE INDEX CONCURRENTLY idx_assets_source ON assets(source);")]
+    [InlineData("CREATE UNIQUE INDEX CONCURRENTLY uq_assets_source ON assets(source);")]
     [InlineData("CREATE DATABASE unsafe;")]
     public void Normalize_TransactionIncompatibleStatement_RejectsBeforeExecution(string sql)
     {
@@ -74,9 +76,23 @@ public sealed class SqlScriptNormalizerTests
         foreach (var migration in migrations.Migrations.Where(item => item.Kind == MigrationKind.Sql))
         {
             var normalized = SqlScriptNormalizer.Normalize(migration);
+            var raw = migration.ReadSql();
             normalized.Should().NotBeNullOrWhiteSpace(migration.FileName);
             normalized.Count(character => character == '\n')
-                .Should().Be(migration.ReadSql().Count(character => character == '\n'), migration.FileName);
+                .Should().Be(raw.Count(character => character == '\n'), migration.FileName);
+            normalized.Length.Should().Be(raw.Length,
+                $"normalization must preserve raw byte positions for {migration.FileName}");
+            var removed = new string(raw.Where((character, index) =>
+                    character != normalized[index]).ToArray());
+            removed.Replace(" ", string.Empty, StringComparison.Ordinal)
+                .Replace("\r", string.Empty, StringComparison.Ordinal)
+                .Replace("\n", string.Empty, StringComparison.Ordinal)
+                .ToLowerInvariant().Should().BeOneOf([string.Empty, "begin;commit;"],
+                    $"only the outer transaction wrapper may differ for {migration.FileName}");
+            for (var index = 0; index < raw.Length; index++)
+                if (raw[index] != normalized[index])
+                    normalized[index].Should().Be(' ',
+                        $"normalization may only blank non-newline bytes in {migration.FileName}");
         }
     }
 

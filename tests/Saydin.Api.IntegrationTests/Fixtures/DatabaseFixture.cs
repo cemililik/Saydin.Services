@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
+using Saydin.Api.Repositories;
 using Saydin.DatabaseSecurity;
 using Saydin.Shared.Data;
 using Saydin.Shared.Entities;
@@ -507,6 +508,7 @@ public sealed class DatabaseFixture : IDisposable
     public bool IngestionWriteFence { get; }
     public bool ScenarioIntegrity { get; }
     public bool PriceAuthority { get; }
+    public bool ApiTrust { get; private set; }
     public string ConnectionString { get; } = string.Empty;
 
     public DatabaseFixture()
@@ -606,6 +608,28 @@ public sealed class DatabaseFixture : IDisposable
                 admin.Open();
                 PriceAuthority = PriceAuthority
                     && VerifyPriceAuthorityFingerprint(admin);
+                using var apiTrust = admin.CreateCommand();
+                apiTrust.CommandText = """
+                    SELECT EXISTS (
+                               SELECT 1 FROM public.schema_migrations
+                                WHERE version='024_installation_credential_rehash'
+                                  AND state='succeeded')
+                       AND pg_catalog.to_regprocedure(
+                               'public.register_installation(uuid,uuid,bytea,smallint)') IS NOT NULL
+                       AND pg_catalog.to_regprocedure(
+                               'public.resolve_installation_rotation_commit(uuid,bytea,smallint)') IS NOT NULL
+                       AND pg_catalog.to_regprocedure(
+                               'public.resolve_installation_and_rehash(bytea,smallint,bytea,smallint)') IS NOT NULL
+                       AND pg_catalog.to_regprocedure(
+                               'public.enforce_activity_action_allowlist()') IS NOT NULL
+                       AND EXISTS (
+                               SELECT 1 FROM pg_catalog.pg_trigger
+                                WHERE tgrelid='public.activity_logs'::pg_catalog.regclass
+                                  AND tgname='trg_activity_action_allowlist'
+                                  AND tgfoid='public.enforce_activity_action_allowlist()'::pg_catalog.regprocedure
+                                  AND tgenabled='O' AND NOT tgisinternal)
+                    """;
+                ApiTrust = apiTrust.ExecuteScalar() is true;
             }
 
             if (required && !CompositeInflationPk)
@@ -620,6 +644,9 @@ public sealed class DatabaseFixture : IDisposable
             if (required && !PriceAuthority)
                 throw new InvalidOperationException(
                     "Required integration DB'sinde frozen migration 020 authority fingerprint doğrulanamadı.");
+            if (required && !ApiTrust)
+                throw new InvalidOperationException(
+                    "Required integration DB'sinde migration 023 API admission contract doğrulanamadı.");
 
             _options = new DbContextOptionsBuilder<SaydinDbContext>()
                 .UseNpgsql(_dataSource, npgsql => npgsql.MapEnum<AssetCategory>("asset_category"))
@@ -668,6 +695,9 @@ public sealed class DatabaseFixture : IDisposable
 
     public SaydinDbContext CreateAdminContext() =>
         new(_adminOptions ?? throw new InvalidOperationException(SkipReason));
+
+    internal InstallationRepository CreateInstallationRepository() =>
+        new(_dataSource ?? throw new InvalidOperationException(SkipReason));
 
     internal static bool VerifyPriceAuthorityFingerprint(
         NpgsqlConnection connection,

@@ -67,10 +67,6 @@ internal sealed class RepairExecutor(
                 throw Rejected("receipt_database_postimage_mismatch");
             return Result("idempotent", final);
         }
-        if (!await database.MatchesReceiptStateAsync(
-                plan, apply, postState: true, cancellationToken))
-            throw Rejected("rollback_apply_postimage_changed");
-
         // A pending rollback can only be interpreted after the apply receipt is known.
         if (receipts.PendingExists(plan.NonceSha256, "rollback"))
         {
@@ -78,6 +74,9 @@ internal sealed class RepairExecutor(
                 plan, "rollback", apply.ReceiptSha256, cancellationToken);
             if (recovered is not null) return Result("reconciled", recovered);
         }
+        if (!await database.MatchesReceiptStateAsync(
+                plan, apply, postState: true, cancellationToken, verifyGuard: false))
+            throw Rejected("rollback_apply_postimage_changed");
 
         var prepared = await database.PrepareRollbackAsync(plan, apply, cancellationToken);
         await using var connection = prepared.Connection;
@@ -127,8 +126,9 @@ internal sealed class RepairExecutor(
         }
         catch
         {
-            // The committed DB state and signed pending receipt deliberately remain
-            // available for a later exact postimage reconciliation.
+            // The committed DB state and signed receipt deliberately remain either
+            // pending (pre-rename failure) or final (post-rename durability failure)
+            // for a later exact reconciliation/durability retry.
             throw Rejected("receipt_publish_after_commit_failed");
         }
     }
@@ -147,7 +147,8 @@ internal sealed class RepairExecutor(
                 cancellationToken);
             ValidateBinding(plan, final, mode, priorReceiptSha256);
             if (!await database.MatchesReceiptStateAsync(
-                    plan, final, postState: true, cancellationToken))
+                    plan, final, postState: true, cancellationToken,
+                    allowNormalIngestionProgress: mode == "apply"))
                 throw Rejected("receipt_database_postimage_mismatch");
             return final;
         }
@@ -217,7 +218,7 @@ internal sealed class RepairExecutor(
         string mode,
         string? priorReceiptSha256,
         PreparedRepair prepared) =>
-        new(1,
+        new(plan.Plan.SchemaVersion,
             "ECDSA-SHA256-RFC3279-DER",
             signer.Identity.Provider,
             signer.Identity.KeyIdentity,

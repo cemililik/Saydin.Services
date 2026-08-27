@@ -17,6 +17,8 @@ services:
       - -c
       - wal_keep_size=8GB
       - -c
+      - archive_timeout=300s
+      - -c
       - ssl=on
       - -c
       - ssl_cert_file=/run/saydin-secrets/private/server.crt
@@ -108,17 +110,17 @@ services:
       - --backup-v1-valid-until
       - ${SAYDIN_BACKUP_V1_VALID_UNTIL:?backup v1 validity required}
       - --migrator-password-file
-      - /run/saydin-secrets/private/migrator-v1
+      - /run/saydin-secrets/private/migrator-current
       - --api-password-file
-      - /run/saydin-secrets/private/api-v1
+      - /run/saydin-secrets/private/api-current
       - --ingestion-password-file
-      - /run/saydin-secrets/private/ingestion-v1
+      - /run/saydin-secrets/private/ingestion-current
       - --calendar-importer-password-file
-      - /run/saydin-secrets/private/calendar_importer-v1
+      - /run/saydin-secrets/private/calendar_importer-current
       - --exporter-password-file
-      - /run/saydin-secrets/private/exporter-v1
+      - /run/saydin-secrets/private/exporter-current
       - --audit-password-file
-      - /run/saydin-secrets/private/audit-v1
+      - /run/saydin-secrets/private/audit-current
       - --backup-password-file
       - /run/saydin-secrets/private/backup-v1
     volumes:
@@ -150,12 +152,12 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_MIGRATOR_LOGIN:?managed migrator login required}
-      PGSSLMODE: Disable
+      PGSSLMODE: Require
       SAYDIN_MIGRATOR_PASSWORD_FILE: /run/saydin-secrets/private/password
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
-      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_MIGRATOR_LOGIN_VERSION: ${SAYDIN_MIGRATOR_LOGIN_VERSION:?migrator login version required}
       SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_BACKUP_V1_VALID_UNTIL:?backup v1 validity required}
     volumes:
       - migrator_secret:/run/saydin-secrets:ro
@@ -191,19 +193,28 @@ services:
       ForwardedHeaders__KnownNetworks: ${SAYDIN_PROXY_NETWORK_CIDR:?exact proxy CIDR required}
       ForwardedHeaders__ForwardLimit: "1"
       DistributedSecurityLimiter__Enabled: "true"
+      DistributedSecurityLimiter__RegistrationExactHourlyLimit: "3"
+      DistributedSecurityLimiter__RegistrationExactDailyLimit: "5"
+      DistributedSecurityLimiter__RegistrationNetworkHourlyLimit: "20"
+      DistributedSecurityLimiter__RegistrationNetworkDailyLimit: "100"
+      DistributedSecurityLimiter__RegistrationIpv4ExactHourlyLimit: "60"
+      DistributedSecurityLimiter__RegistrationIpv4NetworkHourlyLimit: "1000"
+      DistributedSecurityLimiter__CalculationNetworkDailyLimit: "500"
       DistributedSecurityLimiter__HmacKeyFile: /run/saydin-secrets/private/security-limiter-hmac
       InstallationCredentials__SecretFile: /run/saydin-secrets/private/installation-keyring.json
+      ActivityPrincipalPseudonym__SecretFile: /run/saydin-secrets/private/activity-principal-hmac
       PGHOST: postgres
       PGPORT: "5432"
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_API_LOGIN:?managed API login required}
-      PGSSLMODE: Disable
+      PGSSLMODE: Require
       SAYDIN_API_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
-      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_DATABASE_LOGIN_VERSION: ${SAYDIN_API_LOGIN_VERSION:?API login version required}
       Otlp__Endpoint: http://otel-collector:4317
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=${SAYDIN_DEPLOYMENT_ID:?deployment id required}:saydin-api
       GeoIp__DatabasePath: /app/geoip/GeoLite2-City.mmdb
       SAYDIN_SERVICE_VERSION: ${SAYDIN_SERVICE_VERSION:?canonical service version required}
       SAYDIN_RELEASE_VERSION: ${SAYDIN_RELEASE_VERSION:?release version required}
@@ -222,7 +233,7 @@ services:
         bind: {create_host_path: false}
     tmpfs:
       - /tmp:uid=1001,gid=1001,mode=0700,size=64m
-    networks: [app, data, management]
+    networks: [app, data, telemetry-ingest, monitoring-scrape]
     depends_on:
       database-migrator: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -257,13 +268,14 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_INGESTION_LOGIN:?managed ingestion login required}
-      PGSSLMODE: Disable
+      PGSSLMODE: Require
       SAYDIN_INGESTION_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
-      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_DATABASE_LOGIN_VERSION: ${SAYDIN_INGESTION_LOGIN_VERSION:?ingestion login version required}
       Otlp__Endpoint: http://otel-collector:4317
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=${SAYDIN_DEPLOYMENT_ID:?deployment id required}:saydin-price-ingestion
       SAYDIN_RELEASE_VERSION: ${SAYDIN_RELEASE_VERSION:?release version required}
       SAYDIN_GIT_SHA: ${SAYDIN_GIT_SHA:?git SHA required}
     volumes:
@@ -275,7 +287,7 @@ services:
         volume: {nocopy: true, subpath: appsettings.Production.json}
     tmpfs:
       - /tmp:uid=1001,gid=1001,mode=0700,size=64m
-    networks: [data, management, provider-egress]
+    networks: [data, telemetry-ingest, provider-egress]
     depends_on:
       database-migrator: {condition: service_completed_successfully}
       otel-collector: {condition: service_started}
@@ -323,6 +335,15 @@ services:
     networks: [edge, app]
     depends_on:
       saydin-api: {condition: service_healthy}
+    healthcheck:
+      # The HTTP listener intentionally redirects before proxying. A 307/308 proves
+      # the Caddy listener and exact Host route are alive without depending on ACME
+      # hairpin DNS; deploy-release.sh separately gates the real public HTTPS path.
+      test: [CMD-SHELL, "wget -S --spider --header='Host: '$$SAYDIN_PUBLIC_HOST http://127.0.0.1:8080/health/live 2>&1 | grep -Eq 'HTTP/1\\.[01] 30[78]'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging: *bounded-logging
 
   postgres-exporter:
@@ -337,14 +358,15 @@ services:
     stop_grace_period: 20s
     restart: unless-stopped
     environment:
-      DATA_SOURCE_URI: postgres:5432/${SAYDIN_DATABASE:?database required}?sslmode=disable
+      DATA_SOURCE_URI: postgres:5432/${SAYDIN_DATABASE:?database required}?sslmode=require
       DATA_SOURCE_USER: ${SAYDIN_EXPORTER_LOGIN:?managed exporter login required}
       DATA_SOURCE_PASS_FILE: /run/saydin-secrets/private/password
+      SAYDIN_EXPORTER_LOGIN_VERSION: ${SAYDIN_EXPORTER_LOGIN_VERSION:?exporter login version required}
     volumes:
       - exporter_secret:/run/saydin-secrets:ro
     tmpfs:
       - /tmp:uid=65534,gid=65534,mode=0700,size=8m
-    networks: [data, management]
+    networks: [data, monitoring-scrape]
     depends_on:
       database-migrator: {condition: service_completed_successfully}
     logging: *bounded-logging
@@ -365,7 +387,7 @@ services:
       REDIS_PASSWORD_FILE: /run/saydin-secrets/private/password
     volumes:
       - redis_exporter_secret:/run/saydin-secrets:ro
-    networks: [data, management]
+    networks: [data, monitoring-scrape]
     depends_on:
       redis: {condition: service_healthy}
     logging: *bounded-logging
@@ -391,7 +413,7 @@ services:
       - otel_queue:/var/lib/otelcol/queue
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=0700,size=32m
-    networks: [management]
+    networks: [telemetry-ingest, monitoring-core]
     depends_on:
       tempo: {condition: service_started}
       loki: {condition: service_started}
@@ -416,7 +438,13 @@ services:
       - tempo_data:/var/tempo
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=0700,size=32m
-    networks: [management]
+    networks: [monitoring-core]
+    healthcheck:
+      test: [CMD, /busybox/wget, -q, --spider, http://127.0.0.1:3200/ready]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging: *bounded-logging
 
   loki:
@@ -438,7 +466,15 @@ services:
       - loki_data:/var/loki
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=0700,size=32m
-    networks: [management]
+    networks: [monitoring-core]
+    # The upstream Loki image is distroless. Runtime HTTP readiness is enforced
+    # from Prometheus' internal-network control point by deploy-release.sh; this
+    # container-local probe still detects a missing/corrupt executable.
+    healthcheck:
+      test: [CMD, /usr/bin/loki, -version]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     logging: *bounded-logging
 
   prometheus:
@@ -463,8 +499,14 @@ services:
       - prometheus_data:/prometheus
     tmpfs:
       - /tmp:uid=65534,gid=65534,mode=0700,size=32m
-    networks: [management]
+    networks: [monitoring-core, monitoring-scrape, blackbox-control, host-scrape]
     depends_on: [otel-collector, tempo, loki, alertmanager, postgres-exporter, redis-exporter]
+    healthcheck:
+      test: [CMD, promtool, check, healthy, --url=http://127.0.0.1:9090]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging: *bounded-logging
 
   alertmanager:
@@ -486,7 +528,13 @@ services:
       - alertmanager_data:/alertmanager
     tmpfs:
       - /tmp:uid=65534,gid=65534,mode=0700,size=16m
-    networks: [management, alert-egress]
+    networks: [monitoring-core, alert-egress]
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:9093/-/ready]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     logging: *bounded-logging
 
   blackbox-exporter:
@@ -503,7 +551,7 @@ services:
     command: [--config.file=/etc/blackbox/config.yml]
     volumes:
       - ./blackbox.yml:/etc/blackbox/config.yml:ro
-    networks: [edge, management]
+    networks: [blackbox-control, probe-egress]
     logging: *bounded-logging
 
   node-exporter:
@@ -519,11 +567,20 @@ services:
     restart: unless-stopped
     command:
       - --path.rootfs=/host
+      - --collector.disable-defaults
+      - --collector.cpu
+      - --collector.filesystem
+      - --collector.loadavg
+      - --collector.meminfo
+      - --collector.stat
+      - --collector.textfile
+      - --collector.time
+      - --collector.uname
       - --collector.textfile.directory=/var/lib/node-exporter/textfile
     volumes:
       - /:/host:ro,rslave
       - backup_metrics:/var/lib/node-exporter/textfile:ro
-    networks: [management]
+    networks: [host-scrape]
     logging: *bounded-logging
 
   calendar-release:
@@ -559,12 +616,12 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_CALENDAR_IMPORTER_LOGIN:?calendar login required}
-      PGSSLMODE: Disable
+      PGSSLMODE: Require
       SAYDIN_CALENDAR_IMPORTER_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
-      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_DATABASE_LOGIN_VERSION: ${SAYDIN_CALENDAR_IMPORTER_LOGIN_VERSION:?calendar login version required}
     volumes:
       - calendar_secret:/run/saydin-secrets:ro
       - calendar_data:/workspace/tools/calendar-data/data:ro
@@ -604,12 +661,12 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_CALENDAR_IMPORTER_LOGIN:?calendar login required}
-      PGSSLMODE: Disable
+      PGSSLMODE: Require
       SAYDIN_CALENDAR_IMPORTER_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
-      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_DATABASE_LOGIN_VERSION: ${SAYDIN_CALENDAR_IMPORTER_LOGIN_VERSION:?calendar login version required}
     volumes:
       - calendar_secret:/run/saydin-secrets:ro
     tmpfs:
@@ -657,6 +714,8 @@ services:
       - /run/saydin-secrets/private/evidence-public.pem
       - --allowed-evidence-key-ids
       - ${SAYDIN_DQA_ALLOWED_EVIDENCE_KEY_IDS:?DQA evidence key allowlist required}
+      - --production-target-authority-file
+      - /run/saydin-secrets/private/production-target
       - --kms-timeout-seconds
       - "10"
       - --hmac-key-file
@@ -668,12 +727,12 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_AUDIT_LOGIN:?audit login required}
-      PGSSLMODE: Disable
+      PGSSLMODE: Require
       SAYDIN_AUDIT_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
-      SAYDIN_DATABASE_LOGIN_VERSION: "1"
+      SAYDIN_DATABASE_LOGIN_VERSION: ${SAYDIN_AUDIT_LOGIN_VERSION:?audit login version required}
       SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_BACKUP_V1_VALID_UNTIL:?backup v1 validity required}
     volumes:
       - audit_secret:/run/saydin-secrets:ro
@@ -684,6 +743,49 @@ services:
     networks: [data, kms-egress]
     depends_on:
       database-migrator: {condition: service_completed_successfully}
+    logging: *bounded-logging
+
+  data-repair:
+    image: ${SAYDIN_DATA_REPAIR_IMAGE:?digest-pinned DataRepair image required}
+    labels:
+      io.saydin.image-class: first-party
+      io.saydin.deployment-id: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      org.opencontainers.image.revision: ${SAYDIN_GIT_SHA:?git SHA required}
+    profiles: [data-repair-operator]
+    user: "1001:1001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: "${SAYDIN_JOB_CPUS:?job CPU limit required}"
+    mem_limit: ${SAYDIN_JOB_MEMORY:?job memory limit required}
+    stop_grace_period: 60s
+    restart: "no"
+    command: [operator-command-required]
+    environment:
+      SAYDIN_ENVIRONMENT: production
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${SAYDIN_DATABASE:?database required}
+      PGUSER: ${SAYDIN_INGESTION_LOGIN:?managed ingestion login required}
+      PGSSLMODE: Require
+      SAYDIN_INGESTION_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/ingestion-current
+      SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
+      SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
+      SAYDIN_DATABASE_LOGIN_VERSION: ${SAYDIN_INGESTION_LOGIN_VERSION:?ingestion login version required}
+      SAYDIN_DATA_REPAIR_AUDIT_LOGIN: ${SAYDIN_AUDIT_LOGIN:?audit login required}
+      SAYDIN_DATA_REPAIR_KMS_KEY_ID: ${SAYDIN_DATA_REPAIR_KMS_KEY_ID:?DataRepair receipt KMS key OCID required}
+      SAYDIN_DATA_REPAIR_KMS_KEY_VERSION_ID: ${SAYDIN_DATA_REPAIR_KMS_KEY_VERSION_ID:?DataRepair receipt KMS key-version OCID required}
+      SAYDIN_DATA_REPAIR_KMS_CRYPTO_ENDPOINT: ${SAYDIN_DATA_REPAIR_KMS_CRYPTO_ENDPOINT:?DataRepair receipt KMS crypto endpoint required}
+      SAYDIN_DATA_REPAIR_OCI_REGION: ${SAYDIN_DATA_REPAIR_OCI_REGION:?DataRepair OCI region required}
+    volumes:
+      - data_repair_secret:/run/saydin-secrets:ro
+      - data_repair_input:/run/repair:ro
+      - data_repair_receipts:/var/lib/saydin/repair-receipts
+    tmpfs:
+      - /tmp:uid=1001,gid=1001,mode=0700,size=32m
+    networks: [data, data-repair-kms-egress]
     logging: *bounded-logging
 
   database-backup:
@@ -709,6 +811,7 @@ services:
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_BACKUP_LOGIN:?dedicated physical-backup login required}
       PGSSLMODE: Require
+      PGCONNECT_TIMEOUT: "10"
       SAYDIN_BACKUP_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
       SAYDIN_BACKUP_BUCKET: ${SAYDIN_BACKUP_BUCKET:?off-host backup bucket required}
       SAYDIN_BACKUP_KMS_KEY_ID: ${SAYDIN_BACKUP_KMS_KEY_ID:?backup KMS key id required}
@@ -719,15 +822,19 @@ services:
       AWS_REGION: ${SAYDIN_BACKUP_REGION:?object-store region required}
       SAYDIN_BACKUP_RPO_MINUTES: "15"
       SAYDIN_BACKUP_RTO_MINUTES: "120"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_BACKUP_V1_VALID_UNTIL:?backup v1 validity required}
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
       SAYDIN_BACKUP_METRICS_DIR: /var/lib/node-exporter/textfile
+      SAYDIN_BACKUP_BASE_STAGING_DIR: /var/lib/saydin-backup/base-staging
+      SAYDIN_BACKUP_BASE_STAGING_MIN_FREE_BYTES: ${SAYDIN_BACKUP_BASE_STAGING_MIN_FREE_BYTES:?base staging capacity floor required}
     volumes:
       - backup_secret:/run/saydin-secrets:ro
       - backup_metrics:/var/lib/node-exporter/textfile
+      - backup_base_staging:/var/lib/saydin-backup/base-staging
     tmpfs:
-      - /tmp:uid=1001,gid=1001,mode=0700,size=2g
+      - /tmp:uid=1001,gid=1001,mode=0700,size=64m
     networks: [backup-db, backup-egress]
     depends_on:
       database-migrator: {condition: service_completed_successfully}
@@ -756,6 +863,7 @@ services:
       PGDATABASE: ${SAYDIN_DATABASE:?database required}
       PGUSER: ${SAYDIN_BACKUP_LOGIN:?dedicated physical-backup login required}
       PGSSLMODE: Require
+      PGCONNECT_TIMEOUT: "10"
       SAYDIN_BACKUP_DATABASE_PASSWORD_FILE: /run/saydin-secrets/private/password
       RESTIC_REPOSITORY: ${SAYDIN_BACKUP_REPOSITORY:?encrypted off-host restic repository required}
       RESTIC_PASSWORD_FILE: /run/saydin-secrets/private/repository-password
@@ -765,6 +873,8 @@ services:
       SAYDIN_BACKUP_KMS_KEY_ID: ${SAYDIN_BACKUP_KMS_KEY_ID:?backup KMS key id required}
       SAYDIN_BACKUP_RPO_MINUTES: "15"
       SAYDIN_BACKUP_RTO_MINUTES: "120"
+      SAYDIN_BACKUP_WAL_UPLOAD_INTERVAL_SECONDS: "300"
+      SAYDIN_BACKUP_WAL_SPOOL_MIN_FREE_BYTES: ${SAYDIN_BACKUP_WAL_SPOOL_MIN_FREE_BYTES:?WAL spool capacity floor required}
       SAYDIN_DEPLOYMENT_ID: ${SAYDIN_DEPLOYMENT_ID:?deployment id required}
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?role prefix required}
       SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256: ${SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256:?database identity required}
@@ -791,11 +901,17 @@ networks:
     internal: true
     ipam:
       config: [{subnet: "${SAYDIN_BACKUP_DATABASE_NETWORK_CIDR:?dedicated backup database CIDR required}"}]
-  management: {internal: true}
+  telemetry-ingest: {internal: true}
+  monitoring-core: {internal: true}
+  monitoring-scrape: {internal: true}
+  blackbox-control: {internal: true}
+  host-scrape: {internal: true}
   provider-egress: {}
   alert-egress: {}
+  probe-egress: {}
   backup-egress: {}
   kms-egress: {}
+  data-repair-kms-egress: {}
 
 volumes:
   postgres_data: {external: true, name: "${SAYDIN_POSTGRES_DATA_VOLUME:?PostgreSQL data volume required}"}
@@ -808,6 +924,7 @@ volumes:
   tempo_data: {external: true, name: "${SAYDIN_TEMPO_DATA_VOLUME:?Tempo data volume required}"}
   loki_data: {external: true, name: "${SAYDIN_LOKI_DATA_VOLUME:?Loki data volume required}"}
   backup_metrics: {external: true, name: "${SAYDIN_BACKUP_METRICS_VOLUME:?backup metrics volume required}"}
+  backup_base_staging: {external: true, name: "${SAYDIN_BACKUP_BASE_STAGING_VOLUME:?backup base staging volume required}"}
   backup_wal_spool: {external: true, name: "${SAYDIN_BACKUP_WAL_VOLUME:?backup WAL spool volume required}"}
   blackbox_targets: {external: true, name: "${SAYDIN_BLACKBOX_TARGETS_VOLUME:?blackbox target volume required}"}
   postgres_secret: {external: true, name: "${SAYDIN_POSTGRES_SECRET_VOLUME:?PostgreSQL secret volume required}"}
@@ -826,4 +943,7 @@ volumes:
   audit_secret: {external: true, name: "${SAYDIN_AUDIT_SECRET_VOLUME:?audit secret volume required}"}
   audit_input: {external: true, name: "${SAYDIN_AUDIT_INPUT_VOLUME:?signed audit input volume required}"}
   audit_output: {external: true, name: "${SAYDIN_AUDIT_OUTPUT_VOLUME:?audit evidence volume required}"}
+  data_repair_secret: {external: true, name: "${SAYDIN_DATA_REPAIR_SECRET_VOLUME:?DataRepair secret volume required}"}
+  data_repair_input: {external: true, name: "${SAYDIN_DATA_REPAIR_INPUT_VOLUME:?signed DataRepair input volume required}"}
+  data_repair_receipts: {external: true, name: "${SAYDIN_DATA_REPAIR_RECEIPTS_VOLUME:?durable DataRepair receipt volume required}"}
   backup_secret: {external: true, name: "${SAYDIN_BACKUP_SECRET_VOLUME:?backup secret volume required}"}

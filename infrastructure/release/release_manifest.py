@@ -11,8 +11,27 @@ import re
 import sys
 from pathlib import Path
 
-EXPECTED_IMAGES = ("api", "backup", "caddy", "calendar", "control", "dqa", "ingestion")
-EXPECTED_RUNTIME_IMAGES = ("alertmanager", "blackbox", "loki", "nodeExporter", "otel", "postgresExporter", "prometheus", "redis", "redisExporter", "tempo", "timescale")
+EXPECTED_IMAGES = (
+    "api", "backup", "caddy", "calendar", "control", "data_repair", "dqa", "ingestion",
+)
+RUNTIME_IMAGE_ENV_KEYS = {
+    "alertmanager": "SAYDIN_ALERTMANAGER_IMAGE",
+    "blackbox": "SAYDIN_BLACKBOX_IMAGE",
+    "data_repair": "SAYDIN_DATA_REPAIR_IMAGE",
+    "loki": "SAYDIN_LOKI_IMAGE",
+    "nodeExporter": "SAYDIN_NODE_EXPORTER_IMAGE",
+    "otel": "SAYDIN_OTEL_IMAGE",
+    "postgresExporter": "SAYDIN_POSTGRES_EXPORTER_IMAGE",
+    "prometheus": "SAYDIN_PROMETHEUS_IMAGE",
+    "redis": "SAYDIN_REDIS_IMAGE",
+    "redisExporter": "SAYDIN_REDIS_EXPORTER_IMAGE",
+    "tempo": "SAYDIN_TEMPO_IMAGE",
+    "timescale": "SAYDIN_TIMESCALE_IMAGE",
+}
+EXPECTED_RUNTIME_IMAGES = tuple(sorted(RUNTIME_IMAGE_ENV_KEYS))
+EXTERNAL_RUNTIME_IMAGES = tuple(
+    name for name in EXPECTED_RUNTIME_IMAGES if name != "data_repair"
+)
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 MIGRATION = re.compile(r"^(\d{3})_[a-z0-9_]+$")
@@ -138,6 +157,13 @@ def verify(manifest: object) -> dict[str, object]:
         fail("runtime_image_not_digest_pinned")
     if len(set(runtime_images.values())) != len(EXPECTED_RUNTIME_IMAGES):
         fail("runtime_image_digest_reused")
+    data_repair = next(
+        item for item in images
+        if isinstance(item, dict) and item.get("name") == "data_repair"
+    )
+    expected_data_repair = f'{data_repair["reference"]}@{data_repair["digest"]}'
+    if runtime_images["data_repair"] != expected_data_repair:
+        fail("data_repair_runtime_image_mismatch")
 
     policy = exact_keys(root["backupPolicy"], {"rpoMinutes", "rtoMinutes", "walDays", "weeklyWeeks", "monthlyMonths"}, "backupPolicy")
     if policy != {"rpoMinutes": 15, "rtoMinutes": 120, "walDays": 14, "weeklyWeeks": 8, "monthlyMonths": 12}:
@@ -160,6 +186,19 @@ def create(args: argparse.Namespace) -> None:
             fail(f"invalid_image_record:{record_path.name}")
         records.append(record)
     previous = None if args.previous_manifest_sha256 == "none" else args.previous_manifest_sha256
+    runtime_images = exact_keys(
+        read_json(Path(args.runtime_images)), set(EXTERNAL_RUNTIME_IMAGES),
+        "externalRuntimeImages",
+    )
+    data_repair = next((
+        record for record in records
+        if isinstance(record, dict) and record.get("name") == "data_repair"
+    ), None)
+    if (not isinstance(data_repair, dict)
+            or not isinstance(data_repair.get("reference"), str)
+            or not isinstance(data_repair.get("digest"), str)):
+        fail("invalid_image_record:data_repair")
+    runtime_images["data_repair"] = f'{data_repair["reference"]}@{data_repair["digest"]}'
     manifest = {
         "schemaVersion": 1,
         "releaseId": args.release_id,
@@ -171,7 +210,7 @@ def create(args: argparse.Namespace) -> None:
             "previousManifestSha256": previous,
         },
         "images": records,
-        "runtimeImages": read_json(Path(args.runtime_images)),
+        "runtimeImages": runtime_images,
         "backupPolicy": {"rpoMinutes": 15, "rtoMinutes": 120, "walDays": 14, "weeklyWeeks": 8, "monthlyMonths": 12},
     }
     output = Path(args.output)

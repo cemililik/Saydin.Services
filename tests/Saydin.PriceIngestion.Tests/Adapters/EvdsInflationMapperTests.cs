@@ -102,6 +102,20 @@ public class EvdsInflationMapperTests
         result[0].PeriodDate.Should().Be(new DateOnly(2003, 2, 1));
     }
 
+    [Fact]
+    public void Map_JsonNullValue_SkipsUnpublishedRow()
+    {
+        const string json = """
+            {"items":[
+              {"Tarih":"2003-1","TP_FG_J0":null,"UNIXTIME":{}},
+              {"Tarih":"2003-2","TP_FG_J0":"100.0","UNIXTIME":{}}
+            ]}
+            """;
+
+        EvdsInflationMapper.Map(json).Should().ContainSingle()
+            .Which.PeriodDate.Should().Be(new DateOnly(2003, 2, 1));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
@@ -196,6 +210,41 @@ public class EvdsInflationMapperTests
         var result = EvdsInflationMapper.Map(json);
 
         result[0].IndexValue.Should().Be(2819.65m);
+    }
+
+    [Fact]
+    public void Map_NumericJsonValue_IsAcceptedDefensively()
+    {
+        const string json =
+            """{"items":[{"Tarih":"2025-1","TP_FG_J0":2819.65}]}""";
+
+        EvdsInflationMapper.Map(json).Should().ContainSingle()
+            .Which.IndexValue.Should().Be(2819.65m);
+    }
+
+    [Theory]
+    [InlineData("2115,19")]
+    [InlineData("2.115,19")]
+    [InlineData("(30.5)")]
+    public void Map_LocaleOrThousandsFormattedValue_FailsClosed(string rawValue)
+    {
+        var json = $$"""
+            {"items":[{"Tarih":"2025-1","TP_FG_J0":"{{rawValue}}"}]}
+            """;
+
+        EvdsInflationMapper.Map(json).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Map_WrongValueKind_ThrowsStableContractCode()
+    {
+        const string json =
+            """{"items":[{"Tarih":"2025-1","TP_FG_J0":{"bad":true}}]}""";
+
+        var act = () => EvdsInflationMapper.Map(json);
+
+        act.Should().Throw<Saydin.PriceIngestion.Adapters.ProviderContractException>()
+            .Which.Code.Should().Be("contract_value_kind_invalid");
     }
 
     [Fact]

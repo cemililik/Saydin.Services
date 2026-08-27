@@ -12,6 +12,42 @@ namespace Saydin.PriceIngestion.IntegrationTests;
 public sealed class IngestionWindowRepositoryIntegrationTests(IngestionDatabaseFixture database)
 {
     [Theory]
+    [InlineData("2026-08-17")]
+    [InlineData("2026-08-16")]
+    public async Task TcmbTarget_IsLatestAuthoritativeExpectedDayAtOrBeforeCutoff(
+        string cutoffText)
+    {
+        var cutoff = DateOnly.ParseExact(cutoffText, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var expected = await database.ScalarAsync<DateOnly>("""
+            SELECT max(d.calendar_date)
+              FROM market_calendar_active_releases a
+              JOIN market_calendar_days d ON d.release_id=a.release_id
+             WHERE a.calendar_code='tcmb_indicative_fx'
+               AND d.calendar_date <= @cutoff
+               AND d.observation_expected
+            """, new NpgsqlParameter("cutoff", cutoff));
+
+        var target = await database.Repository().ResolveLatestExpectedObservationAsync(
+            "tcmb_indicative_fx", cutoff, default);
+
+        target.Ready.Should().BeTrue();
+        target.TargetDate.Should().Be(expected);
+        target.TargetDate.Should().BeOnOrBefore(cutoff);
+        target.ReleaseId.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task CalendarTarget_UnsupportedCodeFailsClosed()
+    {
+        var target = await database.Repository().ResolveLatestExpectedObservationAsync(
+            "untrusted_calendar", new DateOnly(2026, 8, 17), default);
+
+        target.Ready.Should().BeFalse();
+        target.TargetDate.Should().BeNull();
+        target.OutcomeCode.Should().Be("calendar_code_unsupported");
+    }
+
+    [Theory]
     [InlineData("tcmb", "tcmb_indicative_fx", "2026-08-17")]
     [InlineData("twelvedata", "bist_pay_xist", "2026-03-19")]
     public async Task NewAuthoritativeAsset_AutoBindsAndIsCalendarReady(
@@ -43,26 +79,39 @@ public sealed class IngestionWindowRepositoryIntegrationTests(IngestionDatabaseF
     }
 
     [Fact]
-    public async Task TwoReplicas_OnlyEarliestIsClaimed_AndLaterGapIsNotSkipped()
+    public async Task TwoReplicas_OverlapWhileFirstClaimTransactionIsOpen_AndLaterGapIsNotSkipped()
     {
         var assetId = await database.CreateAssetAsync("it-two-replica");
         try
         {
             var scope = Scope("it-two-replica", assetId);
-            var repositoryA = database.Repository();
+            var fault = new BlockingClaimFault();
+            var repositoryA = database.Repository(fault);
             var repositoryB = database.Repository();
             await repositoryA.EnsureWindowsAsync(scope,
                 [Range(1), Range(2)], default);
 
-            var results = await Task.WhenAll(
-                repositoryA.ClaimNextAsync(scope, "replica-a", TimeSpan.FromMinutes(1), default),
-                repositoryB.ClaimNextAsync(scope, "replica-b", TimeSpan.FromMinutes(1), default));
+            var first = repositoryA.ClaimNextAsync(
+                scope, "replica-a", TimeSpan.FromMinutes(1), default);
+            await fault.Entered.WaitAsync(TimeSpan.FromSeconds(5));
 
-            results.Count(result => result.Status == WindowClaimStatus.Claimed).Should().Be(1);
-            results.Single(result => result.Status == WindowClaimStatus.Claimed)
-                .Claim!.From.Should().Be(new DateOnly(2040, 1, 1));
-            results.Single(result => result.Status != WindowClaimStatus.Claimed)
-                .Status.Should().Be(WindowClaimStatus.Busy);
+            try
+            {
+                var overlapping = await repositoryB.ClaimNextAsync(
+                        scope, "replica-b", TimeSpan.FromMinutes(1), default)
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+                overlapping.Status.Should().Be(WindowClaimStatus.Busy,
+                    "the first transaction still owns the scope advisory lock");
+            }
+            finally
+            {
+                // Never strand the first transaction when an assertion or timeout fails.
+                fault.Release();
+            }
+
+            var claimed = await first.WaitAsync(TimeSpan.FromSeconds(5));
+            claimed.Status.Should().Be(WindowClaimStatus.Claimed);
+            claimed.Claim!.From.Should().Be(new DateOnly(2040, 1, 1));
         }
         finally { await database.CleanupAssetAsync(assetId); }
     }
@@ -567,9 +616,30 @@ public sealed class IngestionWindowRepositoryIntegrationTests(IngestionDatabaseF
     private sealed class ThrowingFault(bool beforeCommit = false, bool afterCommit = false)
         : IIngestionPersistenceFaultInjector
     {
+        public Task BeforeClaimCommitAsync(Guid windowId, CancellationToken ct) => Task.CompletedTask;
         public Task BeforeCommitAsync(Guid windowId, CancellationToken ct) =>
             beforeCommit ? Task.FromException(new InjectedFaultException()) : Task.CompletedTask;
         public Task AfterCommitAsync(Guid windowId, CancellationToken ct) =>
             afterCommit ? Task.FromException(new InjectedFaultException()) : Task.CompletedTask;
+    }
+
+    private sealed class BlockingClaimFault : IIngestionPersistenceFaultInjector
+    {
+        private readonly TaskCompletionSource _entered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Entered => _entered.Task;
+        public void Release() => _release.TrySetResult();
+
+        public async Task BeforeClaimCommitAsync(Guid windowId, CancellationToken ct)
+        {
+            _entered.TrySetResult();
+            await _release.Task.WaitAsync(ct);
+        }
+
+        public Task BeforeCommitAsync(Guid windowId, CancellationToken ct) => Task.CompletedTask;
+        public Task AfterCommitAsync(Guid windowId, CancellationToken ct) => Task.CompletedTask;
     }
 }

@@ -36,6 +36,8 @@ internal static partial class SignedRepairPlan
                 throw new RepairRejectedException(
                     "plan_signature_invalid", RepairExitCodes.SignatureFailure);
             var keyId = RepairCryptography.Sha256Hex(publicSpki);
+            if (!RepairCryptography.IsSha256(plan.KeyId))
+                throw Invalid("plan_contract_invalid");
             if (!RepairCryptography.FixedEquals(keyId, plan.KeyId))
                 throw new RepairRejectedException(
                     "plan_key_id_mismatch", RepairExitCodes.SignatureFailure);
@@ -58,11 +60,12 @@ internal static partial class SignedRepairPlan
 
     private static void Validate(RepairPlan plan, DateTimeOffset now)
     {
-        if (plan.SchemaVersion != 1 || !RepairCryptography.IsSha256(plan.KeyId) ||
+        if (plan.SchemaVersion is not (1 or 2) || !RepairCryptography.IsSha256(plan.KeyId) ||
             !RepairCryptography.IsSha256(plan.ReceiptKeyId) ||
             !RepairCryptography.IsSha256(plan.ApprovalTokenSha256) ||
             plan.Target is null || plan.Evidence is null || plan.MigrationTrust is null ||
-            plan.Operations is null)
+            plan.Operations is null || string.IsNullOrEmpty(plan.ChangeTicket) ||
+            string.IsNullOrEmpty(plan.Nonce))
             throw Invalid("plan_contract_invalid");
 
         if (!IsUtc(plan.IssuedAtUtc) || !IsUtc(plan.ExpiresAtUtc) ||
@@ -116,6 +119,8 @@ internal static partial class SignedRepairPlan
     private static void ValidateTarget(RepairTarget target)
     {
         if (target.Environment is not ("development" or "staging" or "production") ||
+            string.IsNullOrEmpty(target.Database) || string.IsNullOrEmpty(target.DeploymentId) ||
+            string.IsNullOrEmpty(target.RolePrefix) ||
             !RepairCryptography.IsSha256(target.SystemIdentifierSha256))
             throw Invalid("plan_target_invalid");
         try

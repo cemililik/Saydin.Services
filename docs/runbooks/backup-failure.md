@@ -30,6 +30,9 @@ and the `database-backup` scheduler must remain running; a verified base cycle m
 complete daily.
 
 1. Check `saydin_backup_last_success_timestamp_seconds` separately for `wal` and `base`.
+   Check `saydin_backup_wal_spool_free_bytes` against
+   `saydin_backup_wal_spool_capacity_floor_bytes`; never delete spool segments to clear
+   a capacity page before a verified replacement chain exists.
    Preserve the container logs and release manifest; do not print restic or database
    credentials while diagnosing.
 2. Confirm the workload-identity token file is current, the object-store role still has
@@ -46,6 +49,39 @@ complete daily.
    skipping WAL.
 5. Run the isolated restore workflow at a target before and after the gap. Escalate if
    either target fails or the observed recovery point exceeds 15 minutes.
+
+For a controlled isolated run, render the signed release environment exactly as the
+restore workflow does, then invoke the seven-argument primitive (all paths absolute):
+
+```sh
+python3 infrastructure/release/render-deployment-env.py \
+  --base "$SAYDIN_OPERATOR_ENV" --manifest "$SAYDIN_RELEASE_MANIFEST" \
+  --output "$SAYDIN_RESTORE_ENV"
+infrastructure/backup/restore-drill.sh "$SAYDIN_RUN_ID" "$SAYDIN_RUN_ATTEMPT" \
+  "$SAYDIN_RECOVERY_TARGET_UTC" "$SAYDIN_RELEASE_MANIFEST" \
+  "$SAYDIN_RESTORE_ENV" "$SAYDIN_RESTORE_CONTRACT" "$SAYDIN_EVIDENCE_DIR"
+```
+
+The primitive creates only `saydin-restore-<run>-<attempt>-*` resources and restores
+through the guarded `/restore-drill/work` leaf inside its disposable fetch container.
+It is not a production cutover command. Production recovery requires the incident
+owner's approved destination volume, DNS/cutover plan and separately reviewed command
+record; do not weaken `DISPOSABLE_RESTORE_ONLY` or point the drill at a production
+volume.
+
+Interpret the bounded runtime codes before restarting:
+
+- `backup_wal_highwater_probe_deferred`, `_unavailable`, or
+  `backup_wal_receiver_not_caught_up`: only unverified encrypted WAL snapshots may be
+  progressing; the verified freshness metric intentionally remains stale.
+- `backup_wal_spool_capacity_insufficient`: provision/expand the exact external WAL
+  volume; do not truncate the recovery chain.
+- `backup_physical_probe_lock_timeout` or `backup_base_staging_capacity_insufficient`:
+  preserve both lanes' logs and resolve the lock/disk boundary before retry.
+- `backup_repository_prune_deferred`: hot backup writes may remain valid, but record
+  repository growth and rerun prune only after a successful base cycle.
+- `restore_wal_recovery_point_stale`: the selected snapshot cannot prove the 15-minute
+  RPO; keep the incident open even if PostgreSQL starts.
 
 The production profile is admitted only after the managed HBA block verifies exact
 `hostssl replication` plus adjacent IPv4/IPv6 ordinary-SQL rejects, phase-aware

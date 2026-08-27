@@ -1,8 +1,6 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
-using Saydin.Shared.Entities;
-
 namespace Saydin.PriceIngestion.Adapters;
 
 internal sealed record ProviderPayload(byte[] Bytes, byte[] Sha256)
@@ -16,8 +14,8 @@ internal static class BoundedHttpContent
         HttpContent content,
         CancellationToken cancellationToken)
     {
-        if (content.Headers.ContentLength is > ObservationAuthorityLimits.SourceRawBytes)
-            throw new ProviderPayloadTooLargeException();
+        if (content.Headers.ContentLength is > ProviderTransportLimits.MaxResponseBytes)
+            throw new ProviderTransportPayloadTooLargeException();
 
         await using var input = await content.ReadAsStreamAsync(cancellationToken);
         using var output = new MemoryStream();
@@ -29,8 +27,8 @@ internal static class BoundedHttpContent
             {
                 var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
                 if (read == 0) break;
-                if (output.Length + read > ObservationAuthorityLimits.SourceRawBytes)
-                    throw new ProviderPayloadTooLargeException();
+                if (output.Length + read > ProviderTransportLimits.MaxResponseBytes)
+                    throw new ProviderTransportPayloadTooLargeException();
                 hash.AppendData(buffer, 0, read);
                 output.Write(buffer, 0, read);
             }
@@ -42,6 +40,17 @@ internal static class BoundedHttpContent
         }
     }
 }
+
+internal static class ProviderTransportLimits
+{
+    // This bounds one provider HTTP response, not one persisted observation's
+    // evidence JSON. Keeping the authorities separate prevents schema-limit
+    // changes from silently changing network behavior.
+    internal const int MaxResponseBytes = 256 * 1024;
+}
+
+public sealed class ProviderTransportPayloadTooLargeException()
+    : Exception("provider_transport_payload_too_large");
 
 public sealed class ProviderPayloadTooLargeException()
     : Exception("provider_payload_too_large");

@@ -16,8 +16,9 @@ ve cross-component belgeler **Saydın meta repo** `docs/`'unda yaşar (aşağıy
 | [`development-guide.md`](development-guide.md) | .NET geliştirme iş akışı: Docker, migration, test, config anahtarları, sorun giderme. |
 | [`high-traffic-checklist.md`](high-traffic-checklist.md) | MVP sonrası backend ölçeklendirme/ops kontrol listesi (eşik-tetikleyicili). |
 | [`deployment/`](deployment/README.md) | Production'a alma: hosting karar tarihçesi + kanonik digest-only manifest/release/runbook yolları. |
+| [`runbooks/`](runbooks/README.md) | Production alarm, release, restore ve operator-only DataRepair prosedürleri. |
 | [`architecture/`](architecture/) | Derin teknik referanslar (aşağıda). |
-| [`decisions/`](decisions/README.md) | Backend mimari karar kayıtları (ADR-001..010) + ADR organizasyon konvansiyonu. |
+| [`decisions/`](decisions/README.md) | Backend mimari karar kayıtları (ADR-001..011) + ADR organizasyon konvansiyonu. |
 
 ### `architecture/` — derin teknik referanslar
 

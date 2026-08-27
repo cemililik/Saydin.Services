@@ -291,6 +291,33 @@ public sealed class RoleBootstrapIntegrationTests
     }
 
     [Fact]
+    public async Task Managed_backup_validity_can_only_be_extended_and_remains_exactly_bound()
+    {
+        await using var harness = await RoleBootstrapPgHarness.CreateAsync();
+        (await harness.RunEnsureAsync()).AssertSuccess();
+        await harness.EnsureBackupRoleAsync(harness.BackupV1ValidUntilUtc);
+
+        var extended = harness.BackupV1ValidUntilUtc.AddDays(1);
+        await harness.EnsureBackupRoleAsync(extended);
+        await harness.EnsureBackupRoleAsync(extended);
+
+        var regression = await Assert.ThrowsAsync<BootstrapRejectedException>(() =>
+            harness.EnsureBackupRoleAsync(harness.BackupV1ValidUntilUtc));
+        Assert.Equal(BootstrapExitCodes.TopologyRejected, regression.ExitCode);
+        Assert.Equal("backup_valid_until_regression", regression.Code);
+
+        await using var admin = await harness.OpenAdminAsync();
+        var backup = harness.Contract.BackupLogin(1, extended);
+        await RoleBootstrapPgHarness.ExecuteAsync(admin,
+            $"ALTER ROLE {QuoteIdentifier(backup.Name)} VALID UNTIL " +
+            "'2099-01-01T00:00:00Z'");
+        var mismatch = await Assert.ThrowsAsync<BootstrapRejectedException>(() =>
+            harness.EnsureBackupRoleAsync(extended));
+        Assert.Equal(BootstrapExitCodes.TopologyRejected, mismatch.ExitCode);
+        Assert.Equal("managed_role_attribute_mismatch", mismatch.Code);
+    }
+
+    [Fact]
     public async Task Runtime_acl_and_control_plane_drift_are_fail_closed()
     {
         await using var harness = await RoleBootstrapPgHarness.CreateAsync();

@@ -2,7 +2,8 @@
 
 > **Doğruluk kaynağı (source of truth):** Bu dokümanın *kanonik* karşılığı
 > `infrastructure/postgres/migrations/` altındaki numaralandırılmış `.sql`/`.sh`
-> dosyalarıdır (`001_initial` … `019_privilege_separation`, `008b`/`012b` dahil).
+> dosyalarıdır (`001_initial` … `024_installation_credential_rehash`, `008b`/`012b` dahil;
+> toplam 27 kanonik artifact).
 > Burada anlatılan şema o migration zincirinin **uygulanmış son hâlini** özetler;
 > bir uyumsuzluk olursa migration dosyaları geçerlidir. EF Core entity/configuration
 > sınıfları (`src/Saydin.Shared/Entities/`, `src/Saydin.Shared/Data/Configurations/`)
@@ -45,7 +46,7 @@ ile bu adlara hizalanır.
 
 ```mermaid
 flowchart TD
-    SQL["Immutable SQL bytes<br/>001 … 019 (+ 008b, 012b.sh)"]
+    SQL["Immutable SQL bytes<br/>001 … 024 (+ 008b, 012b.sh)"]
     IMAGE["Digest-pinned migrator image<br/>binary + SQL manifest"]
     PG["PostgreSQL pg_isready<br/>yalnız bağlantı"]
     LOCK["Session advisory lock<br/>classify + checksum"]
@@ -60,7 +61,7 @@ flowchart TD
 ```
 
 - **Boş DB:** OID-10 bootstrap yöneticisi önce `Saydin.DatabaseRoleBootstrap ensure` ile global rol
-  grafiğini kurar; managed migrator login tam 21 version'ı sıralı uygular, iki hypertable'ı ve core
+  grafiğini kurar; managed migrator login tam 27 version'ı sıralı uygular, iki hypertable'ı ve core
   security/schema fingerprint'ini doğruladıktan sonra control state'i `ready` yapar.
 - **Var olan DB:** Yalnız complete-014 legacy biçimi otomatik baseline edilir. Partial/ambiguous,
   unknown/newer version, raw-byte checksum mismatch ve schema fingerprint drift fail-closed'dur;
@@ -102,6 +103,11 @@ flowchart TD
 | `017_authoritative_market_calendars.sql` | Immutable TCMB/BIST calendar release/source/day authority, sealed active pointer, asset binding ve contract-v2 window release binding'i |
 | `018_scenario_integrity.sql` | Scenario JSON/type/unit boyut bütünlüğü, per-user hard cap trigger'ı ve keyset sorgu index'i |
 | `019_privilege_separation.sql` | DB-local role-contract pin'i, object ownership/ACL ayrımı, üç dar SECURITY DEFINER calendar fonksiyonu ve Timescale scheduler ownership'i |
+| `020_price_authority_expand.sql` | Provider payload hash otoritesi, price/inflation attribution tabloları ve authority tuple/fence sözleşmesi |
+| `021_api_trust_expand.sql` | Server-issued installation credential lifecycle'ı, principal karantinası ve revision/hash bağlı asset catalog singleton'ı |
+| `022_principal_retention.sql` | Principal silinmeden önce activity evidence'i anonimleştiren scheduler-owned fail-closed retention sınırı |
+| `023_installation_lifecycle_admission.sql` | Pending rotation commit resolver, constant-time verifier ve yeni activity action'larını koruyan trigger allowlist'i |
+| `024_installation_credential_rehash.sql` | Başarılı active resolve sırasında eski verifier'ı aktif key sürümüne atomik/idempotent yükseltme |
 
 ---
 
@@ -167,6 +173,14 @@ CREATE TABLE price_points (
     source_raw    JSONB,
     -- Ham API yanıtı (veri kalitesi / yeniden işleme).
     ingested_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    -- 020 normalized authority tuple (legacy satırlarda topluca NULL):
+    provider_source VARCHAR(32),
+    source_observation_id VARCHAR(256),
+    as_of_at TIMESTAMPTZ,
+    price_kind VARCHAR(32),
+    is_final BOOLEAN,
+    observation_sha256 BYTEA,
+    authority_contract_version INTEGER,
 
     CONSTRAINT pk_price_points PRIMARY KEY (asset_id, price_date),
     -- 011: explicit ON DELETE RESTRICT (NOT VALID + VALIDATE pattern)
@@ -180,9 +194,8 @@ SELECT create_hypertable('price_points', 'price_date',
 CREATE INDEX idx_price_points_asset_date
     ON price_points (asset_id, price_date DESC);
 
--- NOT: price_points'te source/provenance kolonu YOKTUR. XAU/XAG goldapi→oxr geçişi
--- (003) ayrı bir DELETE gerektirmez: OXR satırları aynı (asset_id, price_date) için
--- eski GoldAPI değerlerini UPSERT ile doğal olarak üzerine yazar (bkz. 012 yorumu).
+-- `source_raw` legacy/raw compatibility kolonudur; API projection/cache sözleşmesine girmez.
+-- 020 sonrası otorite provider tuple + append-only attribution/payload hash zinciridir.
 
 -- ============================================================
 -- INGESTION_JOBS — Veri çekme takibi  (001; 011/012 ile genişler)
@@ -222,6 +235,11 @@ CREATE TABLE users (
     tier          VARCHAR(20)  NOT NULL DEFAULT 'free',
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     last_seen_at  TIMESTAMPTZ,
+    principal_status VARCHAR(32) NOT NULL DEFAULT 'legacy_quarantined',
+    principal_contract_version INTEGER NOT NULL DEFAULT 1,
+    principal_quarantined_at TIMESTAMPTZ,
+    principal_revoked_at TIMESTAMPTZ,
+    principal_expires_at TIMESTAMPTZ,
 
     CONSTRAINT chk_users_tier CHECK (tier IN ('free', 'premium'))
 );
@@ -256,10 +274,16 @@ CREATE TABLE saved_scenarios (
     CONSTRAINT chk_saved_scenarios_dates CHECK (sell_date IS NULL OR sell_date > buy_date),
     CONSTRAINT chk_saved_scenarios_unit  CHECK (quantity_unit IN ('try', 'units', 'grams')),
     -- 007/011: dca dahil
-    CONSTRAINT chk_saved_scenarios_type  CHECK (type IN ('what_if', 'comparison', 'portfolio', 'dca'))
+    CONSTRAINT chk_saved_scenarios_type  CHECK (type IN ('what_if', 'comparison', 'portfolio', 'dca')),
+    CONSTRAINT chk_saved_scenarios_extra_data_object
+        CHECK (extra_data IS NULL OR jsonb_typeof(extra_data) IN ('object', 'null')),
+    CONSTRAINT chk_saved_scenarios_extra_data_size
+        CHECK (extra_data IS NULL OR octet_length(extra_data::text) <= 8192),
+    CONSTRAINT chk_saved_scenarios_type_unit CHECK (type <> 'dca' OR quantity_unit = 'try')
 );
 
-CREATE INDEX idx_saved_scenarios_user ON saved_scenarios (user_id, created_at DESC);
+CREATE INDEX idx_saved_scenarios_user_created_id_desc
+    ON saved_scenarios (user_id, created_at DESC, id DESC);
 
 -- ============================================================
 -- INFLATION_RATES — Aylık TÜFE endeksi  (004; 011/012 ile genişler)
@@ -270,6 +294,14 @@ CREATE TABLE inflation_rates (
     source       VARCHAR(20)    NOT NULL DEFAULT 'tuik',
     created_at   TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+    provider_source VARCHAR(32),
+    source_observation_id VARCHAR(256),
+    as_of_at TIMESTAMPTZ,
+    price_kind VARCHAR(32),
+    is_final BOOLEAN,
+    observation_sha256 BYTEA,
+    authority_contract_version INTEGER,
+    source_raw JSONB,
 
     -- 012 (F2.7-5): composite PK — aynı ay için hem 'seed-approximation' hem 'tuik' satırı
     -- bir arada (audit trail). Okuma yolu 'tuik'i tercih eder.
@@ -279,6 +311,49 @@ CREATE TABLE inflation_rates (
 );
 
 CREATE INDEX idx_inflation_rates_period ON inflation_rates (period_date DESC);
+
+-- ============================================================
+-- OBSERVATION AUTHORITY — append-only payload/attribution (020)
+-- ============================================================
+CREATE TABLE provider_fetch_payloads (
+    provider_source VARCHAR(32) NOT NULL,
+    payload_sha256 BYTEA NOT NULL,
+    payload_byte_length INTEGER NOT NULL,
+    first_observed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (provider_source, payload_sha256)
+);
+
+CREATE TABLE price_observation_attributions (
+    asset_id UUID NOT NULL,
+    price_date DATE NOT NULL,
+    ingestion_window_id UUID NOT NULL REFERENCES ingestion_windows(id) ON DELETE RESTRICT,
+    provider_source VARCHAR(32) NOT NULL,
+    payload_sha256 BYTEA NOT NULL,
+    source_observation_id VARCHAR(256) NOT NULL,
+    observation_sha256 BYTEA NOT NULL,
+    authority_contract_version INTEGER NOT NULL,
+    attributed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (asset_id, price_date, ingestion_window_id, payload_sha256),
+    FOREIGN KEY (provider_source, payload_sha256)
+        REFERENCES provider_fetch_payloads(provider_source, payload_sha256) ON DELETE RESTRICT
+);
+
+CREATE TABLE inflation_observation_attributions (
+    period_date DATE NOT NULL,
+    source VARCHAR(20) NOT NULL,
+    ingestion_window_id UUID NOT NULL REFERENCES ingestion_windows(id) ON DELETE RESTRICT,
+    provider_source VARCHAR(32) NOT NULL,
+    payload_sha256 BYTEA NOT NULL,
+    source_observation_id VARCHAR(256) NOT NULL,
+    observation_sha256 BYTEA NOT NULL,
+    authority_contract_version INTEGER NOT NULL,
+    attributed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (period_date, source, ingestion_window_id, payload_sha256),
+    FOREIGN KEY (period_date, source)
+        REFERENCES inflation_rates(period_date, source) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_source, payload_sha256)
+        REFERENCES provider_fetch_payloads(provider_source, payload_sha256) ON DELETE RESTRICT
+);
 
 -- NOT: Bu tabloda 'id' UUID PK ve 'ingested_at' YOKTUR (stale doc'ta vardı).
 -- Kimlik (period_date, source) bileşik anahtarıdır; zaman damgaları created_at/updated_at'tir.
@@ -396,6 +471,33 @@ CREATE TABLE saydin_role_contract (
     audit_capability_role        varchar(63) NOT NULL,
     timescale_scheduler_role     varchar(63) NOT NULL
 );
+
+-- 021: hash-only, server-issued installation credential lifecycle.
+CREATE TABLE installation_credentials (
+    id UUID PRIMARY KEY,
+    principal_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    secret_hash BYTEA NOT NULL,
+    hash_key_version SMALLINT NOT NULL,
+    state VARCHAR(16) NOT NULL,
+    issued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    pending_expires_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    activated_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    rotation_parent_id UUID REFERENCES installation_credentials(id) ON DELETE RESTRICT,
+    rotation_id UUID,
+    UNIQUE (hash_key_version, secret_hash),
+    UNIQUE (principal_id, generation)
+);
+
+-- 021: API cache/catalog revision authority, trigger-refreshed from `assets`.
+CREATE TABLE asset_catalog_state (
+    singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    catalog_sha256 BYTEA NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
 ```
 
 ---
@@ -414,9 +516,14 @@ tabloları DbSet olarak modeller. `market_holidays`, `schema_migrations`,
 | `ingestion_jobs` | `IngestionJob` / `IngestionJobs` | `IngestionJobConfiguration` (`Source`, nullable `WindowId`, `OutcomeCode`, AssetId optional FK) |
 | `ingestion_windows` | `IngestionWindow` / `IngestionWindows` | `IngestionWindowConfiguration` (NULL-safe logical unique key, lease/state/completeness CHECK'leri) |
 | `users` | `User` / `Users` | `UserConfiguration` (partial unique `HasFilter`) |
+| `installation_credentials` | `InstallationCredential` / `InstallationCredentials` | `InstallationCredentialConfiguration` (hash-only lifecycle + partial active/pending indexes) |
+| `asset_catalog_state` | `AssetCatalogState` / `AssetCatalogStates` | `AssetCatalogStateConfiguration` (singleton revision/hash authority) |
 | `saved_scenarios` | `SavedScenario` / `SavedScenarios` | `SavedScenarioConfiguration` (`ExtraData` jsonb + ValueComparer) |
 | `inflation_rates` | `InflationRate` / `InflationRates` | `InflationRateConfiguration` (composite key `(PeriodDate, Source)`) |
 | `activity_logs` | `ActivityLog` / `ActivityLogs` | `ActivityLogConfiguration` (composite key `(Id, CreatedAt)`, GIN index) |
+| `market_calendars` / release/source/day/active tabloları | `MarketCalendar*` DbSet'leri | Calendar configuration sınıfları (sealed release ve active pointer) |
+| `asset_market_calendars` | `AssetMarketCalendar` / `AssetMarketCalendars` | `AssetMarketCalendarConfiguration` |
+| `provider_fetch_payloads` / attribution tabloları | — (yok) | Repository SQL + DB trigger authority; genel EF projection'ına açılmaz |
 | `market_holidays` | — (yok) | — |
 | `schema_migrations` | — (yok) | — |
 | `saydin_migration_control` | — (yok) | — |
@@ -513,13 +620,15 @@ compression policy kullanılır. TimescaleDB 2.16.1'de compression bayrağı **s
 `008b` (disable) ile `013` (re-enable) arasına sarmalanır. Yeni `ALTER COLUMN TYPE`
 eklenirken bu pencere korunmalıdır (CLAUDE.md notu).
 
-### Installation Principal ve Legacy Karantina — migrations 021/022
+### Installation Principal ve Legacy Karantina — migrations 021–024
 
 `users.device_id` yalnız migration öncesi legacy kimliklerin karantina işaretidir; aktif
 principal için `NULL` olmak zorundadır ve hiçbir API isteğini authorize etmez. Server-issued
 installation credential'ın yalnız HMAC hash'i `installation_credentials` tablosunda tutulur;
 ham token veritabanına, loga veya cache key'e girmez. Lifecycle/rotation yalnız pinned
-`SECURITY DEFINER` fonksiyonlarıyla yönetilir. Ayrıntı:
+`SECURITY DEFINER` fonksiyonlarıyla yönetilir. 023 pending commit admission'ını exact rotation
+id/verifier/expiry'ye bağlar; 024 başarılı active resolve sırasında eski key verifier'ını aktif
+key sürümüne atomik ve idempotent yükseltir. Ayrıntı:
 [`../decisions/ADR-010-installation-principal.md`](../decisions/ADR-010-installation-principal.md).
 
 Principal silinirken migration 022'nin scheduler-owned `BEFORE DELETE` trigger'ı retained

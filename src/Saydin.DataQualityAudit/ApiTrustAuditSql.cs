@@ -9,7 +9,7 @@ internal static class ApiTrustAuditSql
     internal const string Structure = """
         WITH role_contract AS (
           SELECT owner_role,api_capability_role,ingestion_capability_role,
-                 audit_capability_role
+                 audit_capability_role,timescale_scheduler_role
             FROM public.saydin_role_contract
            WHERE singleton=1 AND contract_schema_version=1
              AND database_name=current_database()),
@@ -195,12 +195,19 @@ internal static class ApiTrustAuditSql
           ('refresh_asset_catalog_state','','trigger','plpgsql','v',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'ab2a18e6003ef4cdffa109309bf9e43e0b05bd2184fd2e6198e92bf399c5fb1b'),
           ('register_installation','p_principal_id uuid, p_credential_id uuid, p_secret_hash bytea, p_key_version smallint','TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)','plpgsql','v',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'51c6b4e541e0748d89a3073494759e86b8db129b6d1da566304c1947941de1b4'),
           ('resolve_installation','p_secret_hash bytea, p_key_version smallint','TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)','sql','s',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'faf69e73b08925e06b6af5f3d70285de7be49caa032652eaa7de1bfea4ff1a0d'),
+          ('resolve_installation_and_rehash','p_secret_hash bytea, p_key_version smallint, p_active_secret_hash bytea, p_active_key_version smallint','TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)','plpgsql','v',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'b009448de892a425e191e649fbd942b6dd77777fa68d9b339b8010cadcbb3de2'),
           ('begin_installation_rotation','p_current_secret_hash bytea, p_current_key_version smallint, p_rotation_id uuid, p_new_credential_id uuid, p_new_secret_hash bytea, p_new_key_version smallint','TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)','plpgsql','v',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'87dca3d9934377fb2dbf6135ea4d0909b50c9821a4061c39820661ceadb20ebc'),
           ('commit_installation_rotation','p_rotation_id uuid, p_new_secret_hash bytea, p_new_key_version smallint','TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)','plpgsql','v',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'225d9fab5444eef40a37d368263ad84508a52dfa28727178e20960ec95a8b371'),
           ('revoke_installation','p_secret_hash bytea, p_key_version smallint','TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)','plpgsql','v',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'23632c1b5140a65b8c9aec4850bdc5612da2ff59eca3456a49e004dbf81c7380'),
-          ('get_asset_catalog_state','','TABLE(revision bigint, catalog_sha256 bytea, updated_at timestamp with time zone)','sql','s',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'1332bd64e33389696ebed64ec1ca9fd96464fdc28693a3efbae0c6068f949c29')),
+          ('get_asset_catalog_state','','TABLE(revision bigint, catalog_sha256 bytea, updated_at timestamp with time zone)','sql','s',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'1332bd64e33389696ebed64ec1ca9fd96464fdc28693a3efbae0c6068f949c29'),
+          ('installation_verifier_matches','p_expected bytea, p_candidate bytea','boolean','plpgsql','i',true,false,'s','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'0fd89e2c59f51af516bc0a028699f24e454dba6c9b37c2e1dd0ab23e82fa1c09'),
+          ('resolve_installation_rotation_commit','p_rotation_id uuid, p_secret_hash bytea, p_key_version smallint','TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)','sql','s',false,true,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'00da525d7b48949f14d10ffee3b21989d9cbf6f47d201b59043c83b13c8386b1'),
+          ('enforce_activity_action_allowlist','','trigger','plpgsql','v',false,false,'u','f',false,ARRAY['search_path=pg_catalog, pg_temp']::text[],'e3bef3c7edc15170f84e99e69683b0ac32e87e023e3416eac2cbafbbd70d3fcc')),
         expected_function_contract AS (
-          SELECT expected.*,role_contract.owner_role
+          SELECT expected.*,
+                 CASE WHEN expected.name='enforce_activity_action_allowlist'
+                      THEN role_contract.timescale_scheduler_role
+                      ELSE role_contract.owner_role END
             FROM expected_functions expected CROSS JOIN role_contract),
         actual_function_contract AS (
           SELECT function.proname,
@@ -228,8 +235,10 @@ internal static class ApiTrustAuditSql
                  role_contract.owner_role,'EXECUTE',false
             FROM expected_functions expected CROSS JOIN role_contract
            WHERE expected.name IN ('register_installation','resolve_installation',
+             'resolve_installation_and_rehash',
              'begin_installation_rotation','commit_installation_rotation',
-             'revoke_installation','get_asset_catalog_state')),
+             'revoke_installation','get_asset_catalog_state',
+             'resolve_installation_rotation_commit')),
         actual_function_acl AS (
           SELECT function.proname,
                  pg_catalog.pg_get_function_identity_arguments(function.oid),
@@ -247,23 +256,28 @@ internal static class ApiTrustAuditSql
           UNION ALL
           (SELECT * FROM actual_function_acl EXCEPT ALL SELECT * FROM expected_function_acl)),
         expected_triggers(
-          relation_name,trigger_name,function_schema,function_name,trigger_type,enabled,internal) AS (VALUES
-          ('assets','trg_asset_catalog_revision_insert','public','refresh_asset_catalog_state',4,'O',false),
-          ('assets','trg_asset_catalog_revision_update','public','refresh_asset_catalog_state',16,'O',false),
-          ('assets','trg_asset_catalog_revision_delete','public','refresh_asset_catalog_state',8,'O',false),
-          ('assets','trg_asset_catalog_revision_truncate','public','refresh_asset_catalog_state',32,'O',false)),
+          relation_name,trigger_name,function_schema,function_name,trigger_type,
+          attribute_numbers,enabled,internal) AS (VALUES
+          ('assets','trg_asset_catalog_revision_insert','public','refresh_asset_catalog_state',4,'','O',false),
+          ('assets','trg_asset_catalog_revision_update','public','refresh_asset_catalog_state',16,'','O',false),
+          ('assets','trg_asset_catalog_revision_delete','public','refresh_asset_catalog_state',8,'','O',false),
+          ('assets','trg_asset_catalog_revision_truncate','public','refresh_asset_catalog_state',32,'','O',false),
+          ('activity_logs','trg_activity_action_allowlist','public','enforce_activity_action_allowlist',23,'4','O',false)),
         actual_triggers AS (
           SELECT relation.relname,trigger.tgname,function_namespace.nspname,function.proname,
-                 trigger.tgtype::integer,trigger.tgenabled::text,trigger.tgisinternal
+                 trigger.tgtype::integer,trigger.tgattr::text,
+                 trigger.tgenabled::text,trigger.tgisinternal
             FROM pg_catalog.pg_trigger trigger
             JOIN pg_catalog.pg_class relation ON relation.oid=trigger.tgrelid
             JOIN pg_catalog.pg_proc function ON function.oid=trigger.tgfoid
             JOIN pg_catalog.pg_namespace function_namespace
               ON function_namespace.oid=function.pronamespace
            WHERE relation.relnamespace='public'::pg_catalog.regnamespace
-             AND relation.relname='assets'
+             AND relation.relname IN ('assets','activity_logs')
              AND (trigger.tgname LIKE 'trg\_asset\_catalog\_revision\_%' ESCAPE '\'
-                  OR function.proname='refresh_asset_catalog_state')),
+                  OR function.proname='refresh_asset_catalog_state'
+                  OR trigger.tgname='trg_activity_action_allowlist'
+                  OR function.proname='enforce_activity_action_allowlist')),
         trigger_drift AS (
           (SELECT * FROM expected_triggers EXCEPT ALL SELECT * FROM actual_triggers)
           UNION ALL

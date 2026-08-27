@@ -58,7 +58,7 @@ public sealed class NormalizedCalendarReplayTests
 
         var bist = first.Single(item => item.CalendarCode == CalendarDataGenerator.BistCode);
         Assert.Equal(1_096, bist.RowCount);
-        Assert.Equal("82c463fec5abf9663b689d863da9e7efcd93b976747e869c5aaeccfe7a4feed0", bist.NormalizedSha256);
+        Assert.Equal("6e67ff85fd9a2c54e9c4bf733640c744b6792a39cfa51c621473f7dde39986b1", bist.NormalizedSha256);
         Assert.Equal(bist.NormalizedSha256, Convert.ToHexStringLower(SHA256.HashData(bist.Content)));
     }
 
@@ -93,10 +93,38 @@ public sealed class NormalizedCalendarReplayTests
     {
         var calendar = CalendarDataGenerator.Generate(CalendarDataTestRoot.DataRoot)
             .Single(item => item.CalendarCode == calendarCode);
-        var row = ReadRows(calendar).Single(item => item.Date == DateOnly.Parse(date));
+        var row = ReadRows(calendar).Single(item => item.Date == DateOnly.ParseExact(
+            date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture));
 
         Assert.Equal(expectedObservation, row.ObservationExpected);
         Assert.Equal(expectedState, row.MarketState);
+    }
+
+    [Fact]
+    public void BistWeekdayOpenSessions_AreExplicitlyMarkedAsClosureScheduleInferences()
+    {
+        var calendar = CalendarDataGenerator.Generate(CalendarDataTestRoot.DataRoot)
+            .Single(item => item.CalendarCode == CalendarDataGenerator.BistCode);
+        var authorityHashes = CalendarDataTestRoot.ReadManifest().Sources
+            .Where(source => source.Kind == "bistPayHolidayPdf")
+            .Select(source => source.RawSha256)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var rows = ReadRows(calendar);
+        var inferred = rows
+            .Where(row => row.ReasonCode == "inferred_open_from_official_closure_schedule")
+            .ToArray();
+
+        Assert.NotEmpty(inferred);
+        Assert.All(inferred, row =>
+        {
+            Assert.True(row.ObservationExpected);
+            Assert.Equal("full_session", row.MarketState);
+            Assert.NotEqual(DayOfWeek.Saturday, row.Date.DayOfWeek);
+            Assert.NotEqual(DayOfWeek.Sunday, row.Date.DayOfWeek);
+            Assert.Contains(row.EvidenceRawSha256, authorityHashes);
+        });
+        Assert.DoesNotContain(rows, row => row.ReasonCode == "regular_weekday");
     }
 
     private static void AssertCoverage(NormalizedCalendar calendar, DateOnly from, DateOnly through)
@@ -120,10 +148,17 @@ public sealed class NormalizedCalendarReplayTests
             Assert.Equal(6, columns.Length);
             Assert.Equal(calendar.CalendarCode, columns[0]);
             Assert.Equal(64, columns[5].Length);
-            rows.Add(new Row(DateOnly.Parse(columns[1]), bool.Parse(columns[2]), columns[3]));
+            rows.Add(new Row(DateOnly.ParseExact(columns[1], "yyyy-MM-dd",
+                System.Globalization.CultureInfo.InvariantCulture),
+                bool.Parse(columns[2]), columns[3], columns[4], columns[5]));
         }
         return rows;
     }
 
-    private sealed record Row(DateOnly Date, bool ObservationExpected, string MarketState);
+    private sealed record Row(
+        DateOnly Date,
+        bool ObservationExpected,
+        string MarketState,
+        string ReasonCode,
+        string EvidenceRawSha256);
 }

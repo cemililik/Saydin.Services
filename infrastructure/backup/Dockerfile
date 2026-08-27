@@ -10,11 +10,15 @@ COPY --from=restic /usr/bin/restic /usr/local/bin/restic
 COPY backup-entrypoint.sh /usr/local/bin/saydin-backup
 COPY prepare-recovery.sh /usr/local/bin/saydin-prepare-recovery
 COPY select-base-snapshot.py /usr/local/bin/saydin-select-base-snapshot
+COPY wal-recovery-evidence.py /usr/local/bin/saydin-wal-recovery-evidence
+COPY wal-highwater.py /usr/local/bin/saydin-wal-highwater
 COPY restore_target_guard.py /usr/local/bin/saydin-validate-restore-target
 RUN adduser -D -H -u 1001 backup \
     && install -d -o backup -g backup -m 0700 /work /run/saydin-secrets \
     && chmod 0555 /usr/local/bin/saydin-backup /usr/local/bin/saydin-prepare-recovery \
-      /usr/local/bin/saydin-select-base-snapshot /usr/local/bin/saydin-validate-restore-target \
+      /usr/local/bin/saydin-select-base-snapshot /usr/local/bin/saydin-wal-recovery-evidence \
+      /usr/local/bin/saydin-wal-highwater \
+      /usr/local/bin/saydin-validate-restore-target \
       /usr/local/bin/restic
 USER backup
 WORKDIR /work

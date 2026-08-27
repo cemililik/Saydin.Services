@@ -122,6 +122,32 @@ public sealed class FailClosedParserTests
         Assert.Contains(error.Code, new[] { "source_uri_invalid", "source_uri_not_allowlisted" });
     }
 
+    [Theory]
+    [InlineData("https://www.tcmb.gov.tr/wps/wcm/connect/TR/TCMB+TR/Main+Menu/Banka+Hakkinda/Sikca%2FSorulan+Sorular")]
+    [InlineData("https://www.tcmb.gov.tr/wps/wcm/connect/TR/TCMB+TR/Main+Menu/Banka+Hakkinda/Sikca%252FSorulan+Sorular")]
+    public void SnapshotStore_RejectsEncodedSeparatorsInExactPathAllowlist(string uri)
+    {
+        var raw = "fixture"u8.ToArray();
+        var hash = Convert.ToHexStringLower(SHA256.HashData(raw));
+        var source = new SourceDefinition
+        {
+            Id = "tcmb-policy-faq",
+            CalendarCode = CalendarDataGenerator.TcmbCode,
+            Kind = "tcmbPolicyFaq",
+            Role = "policy",
+            Uri = uri,
+            MediaType = "text/html",
+            RetrievedAt = "2026-08-18T14:08:37Z",
+            RawSha256 = hash,
+            SnapshotPath = $"snapshots/sha256/{hash}.html",
+        };
+
+        var error = Assert.Throws<CalendarDataException>(() =>
+            new SourceSnapshotStore(".", Manifest(source)));
+
+        Assert.Equal("source_uri_not_allowlisted", error.Code);
+    }
+
     private static SourceManifest Manifest(SourceDefinition source) => new()
     {
         SchemaVersion = 1,

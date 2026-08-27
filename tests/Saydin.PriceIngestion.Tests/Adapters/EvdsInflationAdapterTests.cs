@@ -86,6 +86,44 @@ public class EvdsInflationAdapterTests
             .Should().Be(AdapterOutcomeKind.PermanentFailure);
     }
 
+    [Fact]
+    public async Task OversizedTransportPayload_IsTypedRetryable()
+    {
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new string('x', ProviderTransportLimits.MaxResponseBytes + 1)),
+        });
+
+        var result = await adapter.FetchRangeAsync(new(2020, 1, 1), new(2020, 1, 1), default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        result.Code.Should().Be("transport_payload_too_large");
+    }
+
+    [Fact]
+    public async Task MapperContractAndWrongValueKind_AreTypedPermanent()
+    {
+        var (invalidValue, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"items":[{"Tarih":"2020-1","TP_FG_J0":"0"}]}"""),
+        });
+        var contract = await invalidValue.FetchRangeAsync(
+            new(2020, 1, 1), new(2020, 1, 1), default);
+        contract.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        contract.Code.Should().Be("contract_index_value_invalid");
+
+        var (wrongKind, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"items":[{"Tarih":"2020-1","TP_FG_J0":{"bad":true}}]}"""),
+        });
+        var kind = await wrongKind.FetchRangeAsync(
+            new(2020, 1, 1), new(2020, 1, 1), default);
+        kind.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        kind.Code.Should().Be("contract_value_kind_invalid");
+    }
+
     private static (EvdsInflationAdapter, StubHttpMessageHandler) Build(
         Func<HttpRequestMessage, HttpResponseMessage> responder, string? key = "test-key")
     {

@@ -19,21 +19,22 @@ internal sealed record IntegrationEnvironment(
     private static readonly Regex RunIdPattern = new(
         "^[0-9a-f]{32}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-    public static IntegrationEnvironment Require()
+    public static IntegrationEnvironment Require(Func<string, string?>? environment = null)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SAYDIN_AUDIT_TEST_REQUIRED"),
+        environment ??= Environment.GetEnvironmentVariable;
+        if (!string.Equals(environment("SAYDIN_AUDIT_TEST_REQUIRED"),
                 "true", StringComparison.Ordinal))
             throw new InvalidOperationException("SAYDIN_AUDIT_TEST_REQUIRED=true is required; suite never skips.");
         var connection = SecureSecretFile.ReadConnectionString(
-            RequireValue("SAYDIN_AUDIT_TEST_ADMIN_CONNECTION_FILE"));
-        var runId = RequireValue("SAYDIN_AUDIT_TEST_RUN_ID");
-        var expectedHost = RequireValue("SAYDIN_AUDIT_TEST_EXPECTED_HOST");
-        var deploymentId = RequireValue("SAYDIN_AUDIT_TEST_DEPLOYMENT_ID");
-        var systemHash = RequireValue("SAYDIN_AUDIT_TEST_SYSTEM_IDENTIFIER_SHA256");
-        var rolePrefix = RequireValue("SAYDIN_AUDIT_TEST_ROLE_PREFIX");
-        var auditLogin = RequireValue("SAYDIN_AUDIT_TEST_LOGIN");
-        var auditPasswordFile = RequireValue("SAYDIN_AUDIT_TEST_PASSWORD_FILE");
-        var backupValidUntilText = RequireValue("SAYDIN_BACKUP_V1_VALID_UNTIL");
+            RequireValue("SAYDIN_AUDIT_TEST_ADMIN_CONNECTION_FILE", environment));
+        var runId = RequireValue("SAYDIN_AUDIT_TEST_RUN_ID", environment);
+        var expectedHost = RequireValue("SAYDIN_AUDIT_TEST_EXPECTED_HOST", environment);
+        var deploymentId = RequireValue("SAYDIN_AUDIT_TEST_DEPLOYMENT_ID", environment);
+        var systemHash = RequireValue("SAYDIN_AUDIT_TEST_SYSTEM_IDENTIFIER_SHA256", environment);
+        var rolePrefix = RequireValue("SAYDIN_AUDIT_TEST_ROLE_PREFIX", environment);
+        var auditLogin = RequireValue("SAYDIN_AUDIT_TEST_LOGIN", environment);
+        var auditPasswordFile = RequireValue("SAYDIN_AUDIT_TEST_PASSWORD_FILE", environment);
+        var backupValidUntilText = RequireValue("SAYDIN_BACKUP_V1_VALID_UNTIL", environment);
         if (!RoleContract.TryParseBackupValidUntil(
                 backupValidUntilText, out var backupV1ValidUntilUtc))
             throw new InvalidOperationException("Audit backup v1 validity must be canonical UTC seconds.");
@@ -56,8 +57,8 @@ internal sealed record IntegrationEnvironment(
             rolePrefix, auditLogin, auditPasswordFile, backupV1ValidUntilUtc);
     }
 
-    private static string RequireValue(string name) =>
-        Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
+    private static string RequireValue(string name, Func<string, string?> environment) =>
+        environment(name) is { Length: > 0 } value
             ? value
             : throw new InvalidOperationException($"{name} is required; suite never skips.");
 }

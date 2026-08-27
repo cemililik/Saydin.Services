@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 
 namespace Saydin.Shared.Diagnostics;
@@ -13,6 +14,25 @@ public static class SaydinMetrics
     public const string MeterName = "Saydin";
 
     private static readonly Meter Meter = new(MeterName, "1.0.0");
+    private static readonly long ProcessStartTimeUnixSeconds = GetProcessStartTimeUnixSeconds();
+
+    private static long GetProcessStartTimeUnixSeconds()
+    {
+        using var process = Process.GetCurrentProcess();
+        return new DateTimeOffset(process.StartTime.ToUniversalTime()).ToUnixTimeSeconds();
+    }
+
+    /// <summary>
+    /// Süreç restart'ını aynı Prometheus target label seti üzerinde gözlenebilir kılan
+    /// sabit başlangıç zamanı. Gauge process boyunca değişmez; restart sonrası yeni
+    /// değer yayınlanır ve alert <c>changes()</c> ile reset'i yakalar.
+    /// </summary>
+    public static readonly ObservableGauge<long> ProcessStartTime =
+        Meter.CreateObservableGauge(
+            "saydin.process.start_time.seconds",
+            () => ProcessStartTimeUnixSeconds,
+            unit: "s",
+            description: "Process start timestamp as Unix seconds");
 
     /// <summary>Toplam WhatIf çağrısı (bounded operation/outcome tag'leri ile)</summary>
     public static readonly Counter<long> WhatIfCalculations =
@@ -26,6 +46,19 @@ public static class SaydinMetrics
             "saydin.whatif.calculation.duration.ms",
             unit: "ms",
             description: "Ya-alsaydım hesaplama süresi");
+
+    /// <summary>Toplam DCA çağrısı (bounded operation/outcome tag'leri ile)</summary>
+    public static readonly Counter<long> DcaCalculations =
+        Meter.CreateCounter<long>(
+            "saydin.dca.calculations.total",
+            description: "Toplam DCA hesaplama sayısı");
+
+    /// <summary>DCA hesaplama süresi (ms cinsinden histogram)</summary>
+    public static readonly Histogram<double> DcaCalculationDuration =
+        Meter.CreateHistogram<double>(
+            "saydin.dca.calculation.duration.ms",
+            unit: "ms",
+            description: "DCA hesaplama süresi");
 
     /// <summary>Fiyat bulunamayan sorgu sayısı</summary>
     public static readonly Counter<long> PriceNotFoundCount =
@@ -97,8 +130,9 @@ public static class SaydinMetrics
 
     /// <summary>
     /// F2.3-4 ([C-C-22]): Activity log batch yazımının başarısız satır sayısı.
-    /// Tag: outcome="retry_exhausted|cancelled". Operasyon ekibi observability
-    /// boşluğu için bu sayaca dayanır — sessizce drop edilen log sayısı bilinir.
+    /// Tag: outcome="retry_exhausted|cancelled|toxic_row|fatal_contract".
+    /// Operasyon ekibi observability boşluğu için bu sayaca dayanır — kaybedilen
+    /// veya fail-fast öncesi yazılamayan log sayısı görünür kalır.
     /// </summary>
     public static readonly Counter<long> ActivityLogWriteFailures =
         Meter.CreateCounter<long>(
@@ -134,4 +168,29 @@ public static class SaydinMetrics
         Meter.CreateCounter<long>(
             "saydin.activity_log.data.truncations.total",
             description: "Pre-validation aşamasında byte limit aşıldığı için truncate edilen data sayısı");
+
+    /// <summary>
+    /// Security admission kararları. Tag'ler yalnız sabit allowlist değerleridir:
+    /// bucket, outcome ve reason. IP, ağ pseudonym'i, principal veya Redis key taşınmaz.
+    /// </summary>
+    public static readonly Counter<long> SecurityAdmissionDecisions =
+        Meter.CreateCounter<long>(
+            "saydin.security.admission.decisions.total",
+            description: "Dağıtık güvenlik admission kararları (düşük kardinaliteli nedenlerle)");
+
+    /// <summary>
+    /// Prometheus sözleşmesindeki kayıp sayaçlarını provider başladıktan sonra sıfır
+    /// değerle materyalize eder. Böylece canlı scrape admission'ı metric adını ve
+    /// bounded label şemasını ilk gerçek kaybı beklemeden doğrulayabilir.
+    /// </summary>
+    public static void InitializeActivityLogContractSeries()
+    {
+        ActivityLogWriteFailures.Add(0,
+            new KeyValuePair<string, object?>("outcome", "retry_exhausted"));
+        ActivityLogQueueDrops.Add(0,
+            new KeyValuePair<string, object?>("action", "other"));
+        ActivityLogQueueRejectedWrites.Add(0,
+            new KeyValuePair<string, object?>("action", "other"),
+            new KeyValuePair<string, object?>("reason", "writer_completed"));
+    }
 }

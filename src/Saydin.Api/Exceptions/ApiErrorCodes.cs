@@ -29,7 +29,12 @@ internal static class ApiErrorCodes
     public const string ExternalApi           = "external_api";
     public const string InternalError         = "internal_error";
     public const string RateLimited           = "rate_limited";
+    public const string SecurityRateLimited   = "security_rate_limited";
+    public const string SecurityLimiterUnavailable = "security_limiter_unavailable";
+    public const string SecurityClientAddressUntrusted = "security_client_address_untrusted";
+    public const string QuotaUnavailable      = "quota_unavailable";
     public const string PayloadTooLarge       = "payload_too_large";
     public const string UnsupportedMediaType  = "unsupported_media_type";
     public const string InvalidInstallationCredential = "invalid_installation_credential";
+    public const string RouteNotFound          = "route_not_found";
 }

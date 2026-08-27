@@ -8,8 +8,9 @@ public sealed class SaydinDbContext(DbContextOptions<SaydinDbContext> options) :
     public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<PricePoint> PricePoints => Set<PricePoint>();
     public DbSet<User> Users => Set<User>();
-    public DbSet<InstallationCredential> InstallationCredentials => Set<InstallationCredential>();
-    public DbSet<AssetCatalogState> AssetCatalogStates => Set<AssetCatalogState>();
+    // These two types remain in the compiled model for relationships and schema
+    // verification, but the managed API role has no table privileges on them.
+    // Omitting public DbSet properties prevents accidental API query usage.
     public DbSet<SavedScenario> SavedScenarios => Set<SavedScenario>();
     public DbSet<InflationRate> InflationRates => Set<InflationRate>();
     public DbSet<ActivityLog> ActivityLogs => Set<ActivityLog>();

@@ -6,6 +6,7 @@
   "changed_line": 80.0,
   "critical_namespaces": {
     "Saydin.Api.Security": {"line": 80.0, "branch": 75.0},
+    "Saydin.Api.Services": {"line": 75.0, "branch": 60.0},
     "Saydin.DatabaseSecurity": {"line": 90.0, "branch": 75.0},
     "Saydin.PriceIngestion.Adapters": {"line": 85.0, "branch": 70.0},
     "Saydin.DatabaseMigrator": {"line": 65.0, "branch": 60.0},

@@ -6,6 +6,7 @@ on:
       release_tag: {description: Exact staged release tag, required: true, type: string}
       staging_run_id: {description: Successful staging workflow run id, required: true, type: string}
       restore_drill_run_id: {description: Successful signed restore drill run id, required: true, type: string}
+      restore_drill_run_attempt: {description: Successful signed restore drill run attempt, required: true, type: string}
 
 permissions: {}
 concurrency: {group: saydin-production, cancel-in-progress: false}
@@ -30,6 +31,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           STAGING_RUN_ID: ${{ inputs.staging_run_id }}
           RESTORE_RUN_ID: ${{ inputs.restore_drill_run_id }}
+          RESTORE_RUN_ATTEMPT: ${{ inputs.restore_drill_run_attempt }}
         run: |
           set -euo pipefail
           test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/promote-production.yml@refs/heads/main"
@@ -37,6 +39,7 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
           [[ "$STAGING_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$RESTORE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RESTORE_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
           release_commit=$(git rev-list -n1 "$RELEASE_TAG")
           release_dir="$RUNNER_TEMP/saydin-release"
           test ! -e "$release_dir"
@@ -64,24 +67,53 @@ jobs:
           age=datetime.datetime.now(datetime.timezone.utc)-completed
           assert datetime.timedelta() <= age <= datetime.timedelta(days=7)
           PY
-          restore_receipt="$release_dir/restore-receipt-$RESTORE_RUN_ID.json"
+          restore_receipt="$release_dir/restore-receipt-$RESTORE_RUN_ID-$RESTORE_RUN_ATTEMPT.json"
           test -f "$restore_receipt"
           cosign verify-blob \
-            --certificate "$release_dir/restore-receipt-$RESTORE_RUN_ID.pem" \
-            --signature "$release_dir/restore-receipt-$RESTORE_RUN_ID.sig" \
+            --certificate "$release_dir/restore-receipt-$RESTORE_RUN_ID-$RESTORE_RUN_ATTEMPT.pem" \
+            --signature "$release_dir/restore-receipt-$RESTORE_RUN_ID-$RESTORE_RUN_ATTEMPT.sig" \
             --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/restore-drill\.yml@refs/heads/main$' \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$restore_receipt" >/dev/null
-          python3 - "$release_dir/release-manifest.json" "$restore_receipt" "$RESTORE_RUN_ID" <<'PY'
+          python3 - "$release_dir/release-manifest.json" "$restore_receipt" \
+            "$RESTORE_RUN_ID" "$RESTORE_RUN_ATTEMPT" <<'PY'
           import datetime, hashlib, json, sys
           manifest=open(sys.argv[1],"rb").read(); receipt=json.load(open(sys.argv[2],encoding="utf-8"))
-          expected={"schemaVersion","runId","targetTime","manifestSha256","recoveredAt","recoveryLagSeconds",
-                    "completedAt","roleBootstrap","migrationTrust","dqa","apiSmoke"}
-          assert set(receipt)==expected and receipt["schemaVersion"]==1
+          expected={"schemaVersion","runId","runAttempt","targetTime","manifestSha256","walSegment",
+                    "walSegmentSourceAt","walCoverageObservedAt","walSnapshotReceivedAt",
+                    "walReceiverCaughtUpAt","walServerLsn","walServerHighwaterSegment",
+                    "walServerPreviousSegment",
+                    "guaranteedRecoveryPointAt","walEvidenceEvaluatedAt","currentRecoveryPointAgeSeconds",
+                    "recoveryTargetReached","lastReplayedTransactionAt",
+                    "lastReplayedTransactionLagSeconds","completedAt","roleBootstrap",
+                    "migrationTrust","dqa","apiSmoke"}
+          assert set(receipt)==expected and receipt["schemaVersion"]==2
           assert receipt["runId"]==sys.argv[3]
+          assert receipt["runAttempt"]==sys.argv[4]
           assert receipt["manifestSha256"]==hashlib.sha256(manifest).hexdigest()
-          assert 0 <= receipt["recoveryLagSeconds"] <= 900
+          parse=lambda value: datetime.datetime.strptime(value,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+          target=parse(receipt["targetTime"]); source=parse(receipt["walSegmentSourceAt"])
+          observed=parse(receipt["walCoverageObservedAt"]); received=parse(receipt["walSnapshotReceivedAt"])
+          caught_up=parse(receipt["walReceiverCaughtUpAt"])
+          guaranteed=parse(receipt["guaranteedRecoveryPointAt"])
+          evaluated=parse(receipt["walEvidenceEvaluatedAt"])
+          now=datetime.datetime.now(datetime.timezone.utc)
+          drill_completed=datetime.datetime.fromisoformat(receipt["completedAt"].replace("Z","+00:00"))
+          assert source <= observed <= received <= evaluated <= drill_completed <= now
+          assert caught_up==observed
+          assert receipt["walSegment"] in (receipt["walServerHighwaterSegment"],receipt["walServerPreviousSegment"])
+          assert received-observed <= datetime.timedelta(minutes=15)
+          assert guaranteed==max(source,observed-datetime.timedelta(seconds=300))
+          age=int((evaluated-guaranteed).total_seconds())
+          assert 0 <= receipt["currentRecoveryPointAgeSeconds"] <= 900
+          assert abs(age-receipt["currentRecoveryPointAgeSeconds"]) <= 1
+          assert receipt["recoveryTargetReached"] is True
+          transaction=receipt["lastReplayedTransactionAt"]
+          transaction_lag=receipt["lastReplayedTransactionLagSeconds"]
+          assert (transaction is None)==(transaction_lag is None)
+          if transaction is not None:
+            assert transaction_lag==max(0,int((target-parse(transaction)).total_seconds()))
           assert all(receipt[key]=="passed" for key in ("roleBootstrap","migrationTrust","dqa","apiSmoke"))
-          completed=datetime.datetime.fromisoformat(receipt["completedAt"].replace("Z","+00:00"))
+          completed=drill_completed
           age=datetime.datetime.now(datetime.timezone.utc)-completed
           assert datetime.timedelta() <= age <= datetime.timedelta(days=31)
           PY

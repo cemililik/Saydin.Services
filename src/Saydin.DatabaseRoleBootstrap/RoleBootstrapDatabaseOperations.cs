@@ -108,19 +108,23 @@ internal sealed partial class RoleBootstrapRunner
         await create.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private async Task EnsureRoleAsync(
+    internal async Task EnsureRoleAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         ManagedRole role,
-        string? password,
-        CancellationToken cancellationToken)
+        string? passwordVerifier,
+        CancellationToken cancellationToken,
+        bool allowBackupValidityExtension = false)
     {
         var existing = await ReadRoleAsync(connection, transaction, role.Name, cancellationToken);
         var isPasswordlessScheduler =
             string.Equals(role.Name, options.Contract.TimescaleScheduler.Name, StringComparison.Ordinal);
+        if (role.Kind == ManagedRoleKind.Login && !isPasswordlessScheduler &&
+            !PostgresScramSha256Verifier.IsCanonical(passwordVerifier))
+            throw TopologyRejected("password_verifier_invalid");
         if (existing is null)
         {
-            if (role.Kind == ManagedRoleKind.Login && password is null && !isPasswordlessScheduler)
+            if (role.Kind == ManagedRoleKind.Login && passwordVerifier is null && !isPasswordlessScheduler)
                 throw TopologyRejected("login_password_missing");
             var createSql = isPasswordlessScheduler
                 ? $"CREATE ROLE {QuoteIdentifier(role.Name)} LOGIN NOSUPERUSER NOCREATEDB " +
@@ -129,11 +133,11 @@ internal sealed partial class RoleBootstrapRunner
                 ? await FormatSqlAsync(connection, transaction,
                     "SELECT pg_catalog.format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT REPLICATION NOBYPASSRLS CONNECTION LIMIT 2 VALID UNTIL %L PASSWORD %L', $1, $2, $3)",
                     cancellationToken, role.Name,
-                    RoleContract.FormatBackupValidUntil(role.ValidUntilUtc!.Value), password!)
+                    RoleContract.FormatBackupValidUntil(role.ValidUntilUtc!.Value), passwordVerifier!)
                 : role.Kind == ManagedRoleKind.Login
                 ? await FormatSqlAsync(connection, transaction,
                     "SELECT pg_catalog.format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 PASSWORD %L', $1, $2)",
-                    cancellationToken, role.Name, password!)
+                    cancellationToken, role.Name, passwordVerifier!)
                 : $"CREATE ROLE {QuoteIdentifier(role.Name)} NOLOGIN NOSUPERUSER NOCREATEDB " +
                   "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1";
             await ExecuteSqlAsync(connection, transaction, createSql, cancellationToken);
@@ -141,12 +145,89 @@ internal sealed partial class RoleBootstrapRunner
         }
         else if (!string.Equals(existing.Marker, role.Marker, StringComparison.Ordinal))
         {
-            throw RoleCollision();
+            if (!allowBackupValidityExtension ||
+                !TryResolveSameManagedBackupRole(role, existing.Marker, out var currentBackup))
+                throw RoleCollision();
+
+            await ExtendManagedBackupValidityAsync(
+                connection, transaction, existing, currentBackup, role, cancellationToken);
         }
 
         var updated = await ReadRoleAsync(connection, transaction, role.Name, cancellationToken) ??
                       throw TopologyRejected("managed_role_missing_after_ensure");
         VerifyRoleAttributes(updated, role);
+    }
+
+    private async Task AlterRolePasswordAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ManagedRole role,
+        string passwordVerifier,
+        CancellationToken cancellationToken)
+    {
+        if (role.Kind != ManagedRoleKind.Login || role.Purpose == "timescale_scheduler" ||
+            !PostgresScramSha256Verifier.IsCanonical(passwordVerifier))
+            throw TopologyRejected("password_verifier_invalid");
+        var existing = await ReadRoleAsync(
+            connection, transaction, role.Name, cancellationToken) ??
+            throw TopologyRejected("managed_role_missing");
+        if (!string.Equals(existing.Marker, role.Marker, StringComparison.Ordinal))
+            throw RoleCollision();
+        VerifyRoleAttributes(existing, role);
+        var sql = await FormatSqlAsync(connection, transaction,
+            "SELECT pg_catalog.format('ALTER ROLE %I PASSWORD %L', $1, $2)",
+            cancellationToken, role.Name, passwordVerifier);
+        await ExecuteSqlAsync(connection, transaction, sql, cancellationToken);
+        var updated = await ReadRoleAsync(
+            connection, transaction, role.Name, cancellationToken) ??
+            throw TopologyRejected("managed_role_missing_after_password_reset");
+        VerifyRoleAttributes(updated, role);
+        if (!CryptographicEquals(updated.Password ?? string.Empty, passwordVerifier))
+            throw TopologyRejected("password_verifier_postcondition_failed");
+    }
+
+    private bool TryResolveSameManagedBackupRole(
+        ManagedRole expected,
+        string? marker,
+        out ManagedRole current)
+    {
+        current = null!;
+        if (expected.Purpose != "backup" || marker is null ||
+            !options.Contract.TryResolveManagedMarker(marker, out var resolved) ||
+            resolved.Purpose != "backup" || resolved.Kind != ManagedRoleKind.Login ||
+            !string.Equals(resolved.Name, expected.Name, StringComparison.Ordinal) ||
+            resolved.LoginVersion != expected.LoginVersion)
+            return false;
+        current = resolved;
+        return true;
+    }
+
+    private async Task ExtendManagedBackupValidityAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ExistingRole existing,
+        ManagedRole current,
+        ManagedRole expected,
+        CancellationToken cancellationToken)
+    {
+        if (current.ValidUntilUtc is null || expected.ValidUntilUtc is null ||
+            existing.ValidUntilUtc is null ||
+            !string.Equals(existing.ValidUntilUtc,
+                RoleContract.FormatBackupValidUntil(current.ValidUntilUtc.Value),
+                StringComparison.Ordinal))
+            throw TopologyRejected("managed_role_attribute_mismatch");
+        if (expected.ValidUntilUtc.Value <= current.ValidUntilUtc.Value)
+            throw TopologyRejected("backup_valid_until_regression");
+
+        await ValidateNewBackupValidityAsync(
+            connection, transaction, expected.ValidUntilUtc.Value,
+            requireV1Overlap: false, cancellationToken);
+        var sql = await FormatSqlAsync(connection, transaction,
+            "SELECT pg_catalog.format('ALTER ROLE %I VALID UNTIL %L', $1, $2)",
+            cancellationToken, expected.Name,
+            RoleContract.FormatBackupValidUntil(expected.ValidUntilUtc.Value));
+        await ExecuteSqlAsync(connection, transaction, sql, cancellationToken);
+        await SetRoleMarkerAsync(connection, transaction, expected, cancellationToken);
     }
 
     private async Task SetRoleMarkerAsync(
@@ -167,8 +248,15 @@ internal sealed partial class RoleBootstrapRunner
         CancellationToken cancellationToken)
     {
         foreach (var purpose in Enum.GetValues<LoginPurpose>())
-            await EnsureMembershipForLoginAsync(
-                connection, transaction, purpose, options.Contract.Login(purpose, 1), cancellationToken);
+        {
+            var logins = await ReadManagedLoginRolesAsync(
+                connection, transaction, purpose, cancellationToken);
+            if (logins.Count == 0)
+                throw TopologyRejected("managed_login_current_missing");
+            foreach (var login in logins)
+                await EnsureMembershipForLoginAsync(
+                    connection, transaction, purpose, login, cancellationToken);
+        }
 
         var adminRole = await CurrentUserAsync(connection, transaction, cancellationToken);
         await EnsureMembershipAsync(connection, transaction,
@@ -264,7 +352,7 @@ internal sealed partial class RoleBootstrapRunner
         };
         foreach (var purpose in Enum.GetValues<LoginPurpose>())
         {
-            for (var version = 1; version <= 2; version++)
+            foreach (var version in RoleContract.AllowedLoginVersions)
             {
                 var login = options.Contract.Login(purpose, version);
                 if (!managedRoles.Contains(login.Name)) continue;
@@ -392,21 +480,34 @@ internal sealed partial class RoleBootstrapRunner
         NpgsqlTransaction transaction,
         string adminRole,
         bool requireBackup,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? allowedNoLoginRole = null)
     {
         await VerifyExtensionsAsync(connection, transaction, adminRole, cancellationToken);
         var managedRoles = await ReadManagedRolesAsync(connection, transaction, cancellationToken);
+        var currentLoginVersions = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var purpose in Enum.GetValues<LoginPurpose>())
+        {
+            var candidates = await ReadManagedLoginRolesAsync(
+                connection, transaction, purpose, cancellationToken);
+            if (candidates.Count == 0)
+                throw TopologyRejected("managed_login_current_missing");
+            currentLoginVersions[RoleContract.PurposeName(purpose)] =
+                candidates.Max(role => role.LoginVersion) ?? throw InvalidState();
+        }
         var requiredRoles = requireBackup
-            ? options.Contract.AllRolesForVersion(1).Append(
+            ? options.Contract.StableRoles.Append(
                 options.Contract.BackupLogin(1, options.BackupV1ValidUntilUtc))
-            : options.Contract.AllRolesForVersion(1);
+            : options.Contract.StableRoles;
         foreach (var expected in requiredRoles)
         {
             var actual = await ReadRoleAsync(connection, transaction, expected.Name, cancellationToken) ??
                          throw TopologyRejected("managed_role_missing");
             if (!string.Equals(actual.Marker, expected.Marker, StringComparison.Ordinal))
                 throw RoleCollision();
-            VerifyRoleAttributes(actual, expected);
+            VerifyRoleAttributes(
+                actual, expected,
+                allowNoLogin: string.Equals(expected.Name, allowedNoLoginRole, StringComparison.Ordinal));
         }
         foreach (var name in managedRoles)
         {
@@ -420,7 +521,13 @@ internal sealed partial class RoleBootstrapRunner
             if (!string.Equals(name, expected.Name, StringComparison.Ordinal) ||
                 !options.Contract.IsExactMarker(expected, role.Marker))
                 throw RoleCollision();
-            VerifyRoleAttributes(role, expected);
+            VerifyRoleAttributes(
+                role, expected,
+                allowNoLogin:
+                    string.Equals(expected.Name, allowedNoLoginRole, StringComparison.Ordinal)
+                    || expected.LoginVersion is { } version
+                    && currentLoginVersions.TryGetValue(expected.Purpose, out var currentVersion)
+                    && version < currentVersion);
         }
         await RejectUnexpectedMembershipsAsync(connection, transaction, adminRole, cancellationToken);
         await VerifyDatabaseControlPlaneAsync(
@@ -827,20 +934,25 @@ internal sealed partial class RoleBootstrapRunner
         IReadOnlyCollection<AclEntry> expected) =>
         actual.Count == expected.Count && actual.ToHashSet().SetEquals(expected);
 
-    private static void VerifyRoleAttributes(ExistingRole actual, ManagedRole expected)
+    private static void VerifyRoleAttributes(
+        ExistingRole actual,
+        ManagedRole expected,
+        bool allowNoLogin = false)
     {
         var shouldLogin = expected.Kind == ManagedRoleKind.Login;
         var shouldBePasswordless = expected.Purpose == "timescale_scheduler";
         var expectedValidUntil = expected.ValidUntilUtc is null
             ? null
             : RoleContract.FormatBackupValidUntil(expected.ValidUntilUtc.Value);
-        if (actual.CanLogin != shouldLogin || actual.Superuser || actual.CreateRole || actual.CreateDatabase ||
+        if ((actual.CanLogin != shouldLogin &&
+             !(allowNoLogin && shouldLogin && !actual.CanLogin)) ||
+            actual.Superuser || actual.CreateRole || actual.CreateDatabase ||
             actual.Inherit || actual.Replication != expected.Replication || actual.BypassRls ||
             actual.ConnectionLimit != expected.ConnectionLimit ||
             !string.Equals(actual.ValidUntilUtc, expectedValidUntil, StringComparison.Ordinal) ||
             !actual.ConfigIsNull ||
-            (shouldLogin && !shouldBePasswordless && (actual.Password is null ||
-                             !actual.Password.StartsWith("SCRAM-SHA-256$", StringComparison.Ordinal))) ||
+            (shouldLogin && !shouldBePasswordless &&
+             !PostgresScramSha256Verifier.IsCanonical(actual.Password)) ||
             ((!shouldLogin || shouldBePasswordless) && actual.Password is not null))
             throw TopologyRejected("managed_role_attribute_mismatch");
     }
@@ -877,6 +989,35 @@ internal sealed partial class RoleBootstrapRunner
             reader.IsDBNull(12) ? null : reader.GetString(12));
         if (await reader.ReadAsync(cancellationToken))
             throw TopologyRejected("managed_role_ambiguous");
+        return result;
+    }
+
+    private async Task<IReadOnlyList<ManagedRole>> ReadManagedLoginRolesAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        LoginPurpose purpose,
+        CancellationToken cancellationToken)
+    {
+        var result = new List<ManagedRole>();
+        await using var command = new NpgsqlCommand("""
+            SELECT role.rolname,pg_catalog.shobj_description(role.oid,'pg_authid')
+              FROM pg_catalog.pg_roles role
+             WHERE pg_catalog.left(role.rolname,pg_catalog.length($1)+1)=$1||'_'
+             ORDER BY role.rolname COLLATE "C"
+            """, connection, transaction);
+        command.Parameters.AddWithValue(options.Contract.Prefix);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.IsDBNull(1) ||
+                !options.Contract.TryResolveManagedMarker(reader.GetString(1), out var role) ||
+                role.Kind != ManagedRoleKind.Login || role.Purpose == "backup" ||
+                role.Purpose == "timescale_scheduler" ||
+                !string.Equals(role.Name, reader.GetString(0), StringComparison.Ordinal))
+                continue;
+            if (ParsePurpose(role.Purpose) == purpose)
+                result.Add(role);
+        }
         return result;
     }
 
@@ -943,16 +1084,17 @@ internal sealed partial class RoleBootstrapRunner
 
     private async Task AuthenticateAsync(
         NpgsqlConnectionStringBuilder adminBuilder,
-        IReadOnlyDictionary<ManagedRole, string> logins,
+        IReadOnlyDictionary<ManagedRole, SensitivePassword> logins,
         VerifiedAdminTarget adminTarget,
         CancellationToken cancellationToken)
     {
         foreach (var (login, password) in logins)
         {
+            var authenticationPassword = password.RevealForAuthentication();
             var builder = new NpgsqlConnectionStringBuilder(adminBuilder.ConnectionString)
             {
                 Username = login.Name,
-                Password = password,
+                Password = authenticationPassword,
                 ApplicationName = "saydin-role-bootstrap-auth-probe",
                 Pooling = false,
                 IncludeErrorDetail = false,
@@ -1013,7 +1155,7 @@ internal sealed partial class RoleBootstrapRunner
     private async Task AuthenticateBackupAsync(
         NpgsqlConnectionStringBuilder adminBuilder,
         ManagedRole login,
-        string password,
+        SensitivePassword password,
         CancellationToken cancellationToken)
     {
         var builder = new NpgsqlConnectionStringBuilder
@@ -1021,7 +1163,7 @@ internal sealed partial class RoleBootstrapRunner
             Host = adminBuilder.Host,
             Port = adminBuilder.Port,
             Username = login.Name,
-            Password = password,
+            Password = password.RevealForAuthentication(),
             SslMode = adminBuilder.SslMode,
             RootCertificate = adminBuilder.RootCertificate,
             SslCertificate = adminBuilder.SslCertificate,

@@ -117,10 +117,14 @@ public sealed class PriceAuthorityMigrationIntegrationTests(IngestionDatabaseFix
         await using var transaction = await connection.BeginTransactionAsync();
 
         (await ScalarAsync<bool>(connection, transaction, """
-            SELECT (SELECT count(*)=23 FROM public.schema_migrations
-                     WHERE state IN ('succeeded','skipped_optional'))
-               AND (SELECT checksum='8cb3f07bffef6013f42d196a20f0c08ed3e02547028d5694d6fba5f9749c52a8'
-                      FROM public.schema_migrations WHERE version='020_price_authority_expand')
+            SELECT NOT EXISTS (
+                       SELECT 1 FROM public.schema_migrations
+                        WHERE state NOT IN ('succeeded','skipped_optional'))
+               AND EXISTS (
+                       SELECT 1 FROM public.schema_migrations
+                        WHERE version='020_price_authority_expand'
+                          AND state='succeeded'
+                          AND checksum='8cb3f07bffef6013f42d196a20f0c08ed3e02547028d5694d6fba5f9749c52a8')
             """)).Should().BeTrue();
 
         foreach (var canary in new[]

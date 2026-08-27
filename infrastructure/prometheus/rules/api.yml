@@ -39,10 +39,22 @@ groups:
 
       - alert: SaydinActivityLogLoss
         expr: |
-          increase(saydin_activity_log_write_failures_total[10m])
-          + increase(saydin_activity_log_queue_drops_total[10m])
-          + increase(saydin_activity_log_queue_rejected_writes_total[10m]) > 0
+          sum(increase({__name__=~"saydin_activity_log_(write_failures|queue_drops|queue_rejected_writes)_total",job="saydin-api"}[10m])) > 0
         labels: {severity: critical, service: saydin-api}
         annotations:
           summary: Activity log writes were lost or rejected
           runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-errors.md
+
+      - alert: SaydinActivityLogDataTruncated
+        expr: increase(saydin_activity_log_data_truncations_total{job="saydin-api"}[10m]) > 0
+        labels: {severity: warning, service: saydin-api}
+        annotations:
+          summary: Activity log structured data exceeded its integrity bound
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-errors.md
+
+      - alert: SaydinSecurityAdmissionUnavailable
+        expr: increase(saydin_security_admission_decisions_total{job="saydin-api",outcome="unavailable"}[10m]) > 0
+        labels: {severity: critical, service: saydin-api}
+        annotations:
+          summary: Security admission failed closed because its authority was unavailable
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md

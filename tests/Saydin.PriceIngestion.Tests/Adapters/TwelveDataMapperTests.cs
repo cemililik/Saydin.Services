@@ -117,16 +117,14 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_MissingValuesProperty_ReturnsEmptyList()
     {
-        const string json = """{"status": "ok"}""";
-        var result = TwelveDataMapper.MapContractlessFixture(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(valuesJson: null), AssetId, "AKBNK:BIST");
         result.Should().BeEmpty();
     }
 
     [Fact]
     public void Map_EmptyValuesArray_ReturnsEmptyList()
     {
-        const string json = """{"status": "ok", "values": []}""";
-        var result = TwelveDataMapper.MapContractlessFixture(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope("[]"), AssetId, "AKBNK:BIST");
         result.Should().BeEmpty();
     }
 
@@ -135,17 +133,14 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_InvalidDatetime_SkipsEntry()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
+        const string values = """
+            [
                 {"datetime": "BOZUK", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"},
                 {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"}
-              ]
-            }
+            ]
             """;
 
-        var result = TwelveDataMapper.MapContractlessFixture(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
         result.Should().HaveCount(1);
         result[0].PriceDate.Should().Be(new DateOnly(2024, 3, 15));
     }
@@ -153,17 +148,14 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_InvalidClose_SkipsEntry()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
+        const string values = """
+            [
                 {"datetime": "2024-03-14", "close": "N/A", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"},
                 {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"}
-              ]
-            }
+            ]
             """;
 
-        var result = TwelveDataMapper.MapContractlessFixture(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
         result.Should().HaveCount(1);
         result[0].PriceDate.Should().Be(new DateOnly(2024, 3, 15));
     }
@@ -173,33 +165,37 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_MissingVolume_RejectsIncompleteDailyBar()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
+        const string values = """
+            [
                 {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00"}
-              ]
-            }
+            ]
             """;
 
-        var result = TwelveDataMapper.MapContractlessFixture(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
         result.Should().BeEmpty();
     }
 
     [Fact]
     public void Map_MissingOpenHighLow_RejectsNonOhlcDailyClose()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
+        const string values = """
+            [
                 {"datetime": "2024-03-15", "close": "48.10"}
-              ]
-            }
+            ]
             """;
 
-        var result = TwelveDataMapper.MapContractlessFixture(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
         result.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Map_JsonNullVolume_SkipsUnpublishedBar()
+    {
+        const string values = """
+            [{"datetime":"2024-03-15","close":"48.10","open":"47.00","high":"49.00","low":"46.00","volume":null}]
+            """;
+
+        TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST").Should().BeEmpty();
     }
 
     // ── Status yok ama values var (toleranslı) ───────────────────────────────
@@ -207,15 +203,66 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_NoStatusField_ParsesSuccessfully()
     {
-        const string json = """
-            {
-              "values": [
+        const string values = """
+            [
                 {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"}
-              ]
-            }
+            ]
             """;
 
-        var result = TwelveDataMapper.MapContractlessFixture(json, AssetId);
+        var result = TwelveDataMapper.Map(
+            Envelope(values, includeStatus: false), AssetId, "AKBNK:BIST");
         result.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public void Map_NumericJsonOhlcv_IsAcceptedDefensively()
+    {
+        const string values = """
+            [{"datetime":"2024-03-15","close":48.10,"open":47.00,"high":49.00,"low":46.00,"volume":1}]
+            """;
+
+        TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST")
+            .Should().ContainSingle().Which.Close.Should().Be(48.10m);
+    }
+
+    [Theory]
+    [InlineData("2115,19")]
+    [InlineData("2.115,19")]
+    [InlineData("(30.5)")]
+    public void Map_LocaleOrThousandsFormattedClose_FailsClosed(string rawClose)
+    {
+        var values = $$"""
+            [{"datetime":"2024-03-15","close":"{{rawClose}}","open":"47","high":"2200","low":"46","volume":"1"}]
+            """;
+
+        TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST")
+            .Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Map_WrongCloseValueKind_ThrowsStableContractCode()
+    {
+        const string values = """
+            [{"datetime":"2024-03-15","close":{"bad":true},"open":"47","high":"49","low":"46","volume":"1"}]
+            """;
+
+        var act = () => TwelveDataMapper.Map(
+            Envelope(values), AssetId, "AKBNK:BIST");
+
+        act.Should().Throw<ProviderContractException>()
+            .Which.Code.Should().Be("contract_value_kind_invalid");
+    }
+
+    private static string Envelope(string? valuesJson, bool includeStatus = true)
+    {
+        var status = includeStatus ? "\"status\":\"ok\"," : string.Empty;
+        var values = valuesJson is null ? string.Empty : $",\"values\":{valuesJson}";
+        return $$"""
+            {
+              {{status}}
+              "meta":{"symbol":"AKBNK","interval":"1day","currency":"TRY","exchange":"BIST","mic_code":"XIST","exchange_timezone":"Europe/Istanbul","type":"Common Stock"}
+              {{values}}
+            }
+            """;
     }
 }

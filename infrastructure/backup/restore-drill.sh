@@ -5,14 +5,18 @@ set -eu
 umask 077
 
 die() { printf '%s\n' "$1" >&2; exit "${2:-70}"; }
-[ "$#" -eq 6 ] || die "restore_drill_usage" 64
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+repo_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P) || exit 70
+[ "$#" -eq 7 ] || die "restore_drill_usage" 64
 run_id=$1
-target_time=$2
-manifest=$3
-deployment_env=$4
-contract_env=$5
-evidence_dir=$6
+run_attempt=$2
+target_time=$3
+manifest=$4
+deployment_env=$5
+contract_env=$6
+evidence_dir=$7
 case "$run_id" in ""|*[!0-9]*) die "restore_run_id_invalid" 64 ;; esac
+case "$run_attempt" in ""|*[!0-9]*) die "restore_run_attempt_invalid" 64 ;; esac
 python3 - "$target_time" <<'PY' || die "restore_target_time_invalid" 64
 import datetime, sys
 datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
@@ -42,7 +46,7 @@ print(value)
 PY
 }
 
-python3 infrastructure/release/release_manifest.py verify --manifest "$manifest" >/dev/null
+python3 "$repo_root/infrastructure/release/release_manifest.py" verify --manifest "$manifest" >/dev/null
 backup_image=$(env_value "$deployment_env" SAYDIN_BACKUP_IMAGE)
 control_image=$(env_value "$deployment_env" SAYDIN_CONTROL_IMAGE)
 dqa_image=$(env_value "$deployment_env" SAYDIN_DQA_IMAGE)
@@ -89,7 +93,21 @@ api_config=$(env_value "$contract_env" SAYDIN_RESTORE_API_CONFIG_FILE)
 redis_secret=$(env_value "$contract_env" SAYDIN_RESTORE_REDIS_SECRET_DIR)
 geoip=$(env_value "$contract_env" SAYDIN_RESTORE_GEOIP_DIR)
 
-prefix_name="saydin-restore-$run_id"
+[ -d "$audit_output" ] && [ ! -L "$audit_output" ] || die "restore_audit_output_invalid" 78
+audit_owner=$(stat -c %u "$audit_output" 2>/dev/null || stat -f %u "$audit_output")
+audit_group=$(stat -c %g "$audit_output" 2>/dev/null || stat -f %g "$audit_output")
+audit_mode=$(stat -c %a "$audit_output" 2>/dev/null || stat -f %Lp "$audit_output")
+[ "$audit_owner:$audit_group:$audit_mode" = 1001:1001:700 ] || die "restore_audit_output_permissions_invalid" 78
+audit_run_output="$audit_output/$run_id-$run_attempt"
+case "$audit_run_output" in "$audit_output"/[0-9]*-[0-9]*) ;; *) die "restore_audit_output_guard_failed" 78 ;; esac
+[ ! -e "$audit_run_output" ] || die "restore_audit_run_exists" 73
+mkdir -m 0700 "$audit_run_output" || die "restore_audit_run_create_failed" 73
+run_owner=$(stat -c %u "$audit_run_output" 2>/dev/null || stat -f %u "$audit_run_output")
+run_group=$(stat -c %g "$audit_run_output" 2>/dev/null || stat -f %g "$audit_run_output")
+run_mode=$(stat -c %a "$audit_run_output" 2>/dev/null || stat -f %Lp "$audit_run_output")
+[ "$run_owner:$run_group:$run_mode" = 1001:1001:700 ] || die "restore_audit_run_permissions_invalid" 78
+
+prefix_name="saydin-restore-$run_id-$run_attempt"
 network="$prefix_name-net"
 egress_network="$prefix_name-egress"
 volume="$prefix_name-data"
@@ -97,24 +115,117 @@ database_container="$prefix_name-db"
 redis_container="$prefix_name-redis"
 api_container="$prefix_name-api"
 dqa_container="$prefix_name-dqa"
+init_container="$prefix_name-init"
+fetch_container="$prefix_name-fetch"
+evidence_copy_container="$prefix_name-evidence-copy"
+prepare_container="$prefix_name-prepare"
+transaction_container="$prefix_name-transaction"
+recovery_state_container="$prefix_name-recovery-state"
+role_container="$prefix_name-role"
+migrator_container="$prefix_name-migrator"
+evidence_verify_container="$prefix_name-evidence-verify"
 case "$prefix_name" in saydin-restore-*) ;; *) die "restore_resource_guard_failed" 78 ;; esac
 
-cleanup() {
-  docker rm -f "$dqa_container" "$api_container" "$redis_container" "$database_container" >/dev/null 2>&1 || true
-  docker volume rm "$volume" >/dev/null 2>&1 || true
-  docker network rm "$network" >/dev/null 2>&1 || true
-  docker network rm "$egress_network" >/dev/null 2>&1 || true
+resources_admitted=false
+
+docker_reachable() { docker info >/dev/null 2>&1; }
+container_exists() {
+  docker container inspect "$1" >/dev/null 2>&1 && return 0
+  docker_reachable || return 2
+  return 1
 }
-trap cleanup EXIT HUP INT TERM
+volume_exists() {
+  docker volume inspect "$1" >/dev/null 2>&1 && return 0
+  docker_reachable || return 2
+  return 1
+}
+network_exists() {
+  docker network inspect "$1" >/dev/null 2>&1 && return 0
+  docker_reachable || return 2
+  return 1
+}
+
+docker_reachable || die "restore_docker_unavailable" 75
+for resource in "$database_container" "$redis_container" "$api_container" "$dqa_container" \
+  "$init_container" "$fetch_container" "$evidence_copy_container" "$prepare_container" \
+  "$transaction_container" "$recovery_state_container" "$role_container" \
+  "$migrator_container" "$evidence_verify_container"; do
+  if container_exists "$resource"; then die "restore_resource_preexists:$resource" 73
+  else [ "$?" -eq 1 ] || die "restore_docker_unavailable" 75; fi
+done
+if volume_exists "$volume"; then die "restore_resource_preexists:$volume" 73
+else [ "$?" -eq 1 ] || die "restore_docker_unavailable" 75; fi
+if network_exists "$network"; then die "restore_resource_preexists:$network" 73
+else [ "$?" -eq 1 ] || die "restore_docker_unavailable" 75; fi
+if network_exists "$egress_network"; then die "restore_resource_preexists:$egress_network" 73
+else [ "$?" -eq 1 ] || die "restore_docker_unavailable" 75; fi
+resources_admitted=true
+
+remove_owned_resource() {
+  kind=$1
+  name=$2
+  attempt=0
+  while [ "$attempt" -lt 10 ]; do
+    case "$kind" in
+      container)
+        if container_exists "$name"; then docker rm -f "$name" >/dev/null 2>&1 || true
+        else state=$?; [ "$state" -eq 1 ] && return 0; return 1; fi ;;
+      volume)
+        if volume_exists "$name"; then docker volume rm "$name" >/dev/null 2>&1 || true
+        else state=$?; [ "$state" -eq 1 ] && return 0; return 1; fi ;;
+      network)
+        if network_exists "$name"; then docker network rm "$name" >/dev/null 2>&1 || true
+        else state=$?; [ "$state" -eq 1 ] && return 0; return 1; fi ;;
+      *) return 1 ;;
+    esac
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+cleanup() {
+  original_status=$1
+  trap - EXIT HUP INT TERM
+  cleanup_failed=false
+  if [ "$resources_admitted" = true ]; then
+    remove_owned_resource container "$dqa_container" || cleanup_failed=true
+    remove_owned_resource container "$api_container" || cleanup_failed=true
+    remove_owned_resource container "$redis_container" || cleanup_failed=true
+    remove_owned_resource container "$database_container" || cleanup_failed=true
+    remove_owned_resource container "$init_container" || cleanup_failed=true
+    remove_owned_resource container "$fetch_container" || cleanup_failed=true
+    remove_owned_resource container "$evidence_copy_container" || cleanup_failed=true
+    remove_owned_resource container "$prepare_container" || cleanup_failed=true
+    remove_owned_resource container "$transaction_container" || cleanup_failed=true
+    remove_owned_resource container "$recovery_state_container" || cleanup_failed=true
+    remove_owned_resource container "$role_container" || cleanup_failed=true
+    remove_owned_resource container "$migrator_container" || cleanup_failed=true
+    remove_owned_resource container "$evidence_verify_container" || cleanup_failed=true
+    remove_owned_resource volume "$volume" || cleanup_failed=true
+    remove_owned_resource network "$network" || cleanup_failed=true
+    remove_owned_resource network "$egress_network" || cleanup_failed=true
+  fi
+  if [ "$cleanup_failed" = true ]; then
+    printf '%s\n' restore_cleanup_residual >&2
+    [ "$original_status" -ne 0 ] || original_status=70
+  fi
+  [ "$original_status" -ne 0 ] || printf '%s\n' restore_drill_passed
+  exit "$original_status"
+}
+trap 'cleanup $?' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 docker network create --internal "$network" >/dev/null
 docker network create "$egress_network" >/dev/null
 docker volume create "$volume" >/dev/null
-docker run --rm --user 0:0 --read-only --cap-drop ALL --security-opt no-new-privileges \
+docker run --rm --name "$init_container" --user 0:0 --read-only --cap-drop ALL --cap-add CHOWN --security-opt no-new-privileges \
   -v "$volume:/restore-drill" --entrypoint /bin/sh "$backup_image" \
-  -c 'chown 1001:1001 /restore-drill && chmod 0700 /restore-drill'
+  -c 'chmod 0700 /restore-drill && chown 1001:1001 /restore-drill'
 
-docker run --rm --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+docker run --rm --name "$fetch_container" --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
   --network "$egress_network" -v "$volume:/restore-drill" -v "$backup_secret:/run/saydin-secrets/private:ro" \
   --tmpfs /tmp:uid=1001,gid=1001,mode=0700,size=512m \
   -e RESTIC_REPOSITORY="$repository" -e RESTIC_PASSWORD_FILE=/run/saydin-secrets/private/repository-password \
@@ -125,7 +236,11 @@ docker run --rm --user 1001:1001 --read-only --cap-drop ALL --security-opt no-ne
   -e SAYDIN_BACKUP_RPO_MINUTES=15 -e SAYDIN_BACKUP_RTO_MINUTES=120 \
   -e SAYDIN_RESTORE_TARGET=/restore-drill/work -e SAYDIN_RESTORE_CONFIRM=DISPOSABLE_RESTORE_ONLY \
   -e SAYDIN_RESTORE_TARGET_TIME="$target_time" "$backup_image" restore >/dev/null
-docker run --rm --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+docker run --rm --name "$evidence_copy_container" --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+  -v "$volume:/restore-drill:ro" --entrypoint /bin/sh "$backup_image" \
+  -c 'exec cat /restore-drill/wal-recovery-evidence.json' \
+  > "$evidence_dir/wal-recovery-evidence.json"
+docker run --rm --name "$prepare_container" --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$volume:/restore-drill" --entrypoint /usr/local/bin/saydin-prepare-recovery \
   "$backup_image" /restore-drill/pgdata "$target_time" >/dev/null
 
@@ -138,30 +253,40 @@ attempt=0
 until docker exec "$database_container" pg_isready -h 127.0.0.1 -d "$database" >/dev/null 2>&1; do
   attempt=$((attempt + 1)); [ "$attempt" -lt 90 ] || die "restore_database_start_failed"; sleep 2
 done
+attempt=0
+while :; do
+  recovery_state=$(docker run --rm --name "$recovery_state_container" --network "$network" \
+    --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+    -v "$bootstrap_secret:/run/private:ro" -e PGPASSFILE=/run/private/admin-pgpass \
+    --entrypoint psql "$backup_image" -X -A -t -v ON_ERROR_STOP=1 \
+    -h restored-db -p 5432 -U saydin_admin -d "$database" \
+    -c 'SELECT NOT pg_is_in_recovery();' 2>/dev/null || true)
+  [ "$recovery_state" != t ] || break
+  if [ "$recovery_state" != f ]; then
+    database_running=$(docker container inspect --format '{{.State.Running}}' "$database_container" 2>/dev/null) \
+      || die "restore_recovery_target_unreachable" 78
+    [ "$database_running" = true ] || die "restore_recovery_target_unreachable" 78
+  fi
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 720 ] || die "restore_recovery_target_timeout" 75
+  sleep 5
+done
 
-recovered_at=$(docker run --rm --network "$network" --user 1001:1001 --read-only --cap-drop ALL \
+last_replayed_transaction_at=$(docker run --rm --name "$transaction_container" --network "$network" --user 1001:1001 --read-only --cap-drop ALL \
   --security-opt no-new-privileges -v "$bootstrap_secret:/run/private:ro" \
   -e PGPASSFILE=/run/private/admin-pgpass --entrypoint psql "$backup_image" \
   -X -A -t -v ON_ERROR_STOP=1 -h restored-db -p 5432 -U saydin_admin -d "$database" \
   -c "SELECT to_char(pg_last_xact_replay_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"');")
-[ -n "$recovered_at" ] || die "restore_recovery_timestamp_missing"
-lag_seconds=$(python3 - "$target_time" "$recovered_at" <<'PY'
-import datetime, sys
-parse=lambda value: datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-lag=int((parse(sys.argv[1])-parse(sys.argv[2])).total_seconds())
-if lag < 0 or lag > 900: raise SystemExit("restore_rpo_exceeded")
-print(lag)
-PY
-) || die "restore_rpo_exceeded"
+case "$last_replayed_transaction_at" in ""|????-??-??T??:??:??Z) ;; *) die "restore_transaction_timestamp_invalid" 78 ;; esac
 
-docker run --rm --network "$network" --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+docker run --rm --name "$role_container" --network "$network" --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$bootstrap_secret:/run/private:ro" --entrypoint dotnet "$control_image" \
   Saydin.DatabaseRoleBootstrap.dll verify --admin-connection-file /run/private/admin-connection \
   --deployment-id "$deployment" --target-database "$database" --system-identifier-sha256 "$system_id" \
   --role-prefix "$prefix" --timescaledb-version 2.16.1 --uuid-ossp-version 1.1 \
   --backup-v1-valid-until "$backup_v1_valid_until" >/dev/null
 
-docker run --rm --network "$network" --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+docker run --rm --name "$migrator_container" --network "$network" --user 1001:1001 --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$migrator_secret:/run/saydin-secrets/private:ro" \
   -e PGHOST=restored-db -e PGPORT=5432 -e PGDATABASE="$database" -e PGUSER="$migrator_login" -e PGSSLMODE=Disable \
   -e SAYDIN_MIGRATOR_PASSWORD_FILE=/run/saydin-secrets/private/password \
@@ -184,14 +309,14 @@ docker create --name "$dqa_container" --network "$network" --user 1001:1001 --re
   --kms-crypto-endpoint "$dqa_kms_crypto_endpoint" --oci-region "$dqa_oci_region" \
   --evidence-public-key /run/private/evidence-public.pem \
   --allowed-evidence-key-ids "$dqa_allowed_evidence_key_ids" --kms-timeout-seconds 10 \
-  --hmac-key-file /run/private/evidence-hmac --output /run/output/evidence >/dev/null
+  --hmac-key-file /run/private/evidence-hmac --output "/run/output/$run_id-$run_attempt/evidence" >/dev/null
 docker network connect "$egress_network" "$dqa_container"
 docker start -a "$dqa_container" >/dev/null || die "restore_dqa_failed"
 docker rm "$dqa_container" >/dev/null
-docker run --rm --network none --user 1001:1001 --read-only --cap-drop ALL \
+docker run --rm --name "$evidence_verify_container" --network none --user 1001:1001 --read-only --cap-drop ALL \
   --security-opt no-new-privileges -v "$audit_secret:/run/private:ro" \
   -v "$audit_output:/run/output:ro" "$dqa_image" verify-evidence \
-  --bundle /run/output/evidence --public-key /run/private/evidence-public.pem >/dev/null \
+  --bundle "/run/output/$run_id-$run_attempt/evidence" --public-key /run/private/evidence-public.pem >/dev/null \
   || die "restore_dqa_evidence_verify_failed"
 
 docker run -d --name "$redis_container" --network "$network" --network-alias redis \
@@ -220,13 +345,21 @@ until docker exec "$api_container" curl -fsS -H "Host: $public_host" \
 done
 
 manifest_sha=$(sha256sum "$manifest" | cut -d' ' -f1)
-python3 - "$evidence_dir/restore-receipt.json" "$run_id" "$target_time" "$recovered_at" "$lag_seconds" "$manifest_sha" <<'PY'
+python3 - "$evidence_dir/restore-receipt.json" "$evidence_dir/wal-recovery-evidence.json" \
+  "$run_id" "$run_attempt" "$target_time" "$last_replayed_transaction_at" "$manifest_sha" <<'PY'
 import datetime, json, sys
-path, run_id, target, recovered, lag, digest = sys.argv[1:]
-value = {"schemaVersion":1,"runId":run_id,"targetTime":target,"manifestSha256":digest,
-         "recoveredAt":recovered,"recoveryLagSeconds":int(lag),
-         "completedAt":datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
+path, wal_path, run_id, run_attempt, target, transaction, digest = sys.argv[1:]
+parse=lambda value: datetime.datetime.strptime(value,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+wal=json.load(open(wal_path,encoding="utf-8"))
+assert set(wal)=={"walSegment","walSegmentSourceAt","walCoverageObservedAt","walReceiverCaughtUpAt","walServerLsn","walServerHighwaterSegment","walServerPreviousSegment","walSnapshotReceivedAt","guaranteedRecoveryPointAt","walEvidenceEvaluatedAt","currentRecoveryPointAgeSeconds"}
+transaction_lag=max(0,int((parse(target)-parse(transaction)).total_seconds())) if transaction else None
+completed=datetime.datetime.now(datetime.timezone.utc)
+value = {"schemaVersion":2,"runId":run_id,"runAttempt":run_attempt,
+         "targetTime":target,"manifestSha256":digest,**wal,
+         "lastReplayedTransactionAt":transaction or None,
+         "lastReplayedTransactionLagSeconds":transaction_lag,
+         "recoveryTargetReached":True,
+         "completedAt":completed.isoformat().replace("+00:00","Z"),
          "roleBootstrap":"passed","migrationTrust":"passed","dqa":"passed","apiSmoke":"passed"}
 open(path,"w",encoding="utf-8").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
 PY
-printf '%s\n' restore_drill_passed

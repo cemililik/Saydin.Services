@@ -10,7 +10,8 @@ public sealed class ActivityLogWriter(
     ILogger<ActivityLogWriter> logger) : BackgroundService
 {
     private const int BatchSize = 50;
-    private static readonly TimeSpan ShutdownDrainTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ShutdownDrainTimeout = TimeSpan.FromSeconds(20);
+    private CancellationToken shutdownDeadline;
 
     // F2.3-4 ([C-C-22]): in-process retry. SaveChangesAsync transient failure'larında
     // 2 ek deneme ile batch'i kurtarmaya çalışır. Toplam attempts = 3 (ilk + 2 retry).
@@ -22,9 +23,11 @@ public sealed class ActivityLogWriter(
 
     // Sonar S1192 + F4 follow-up: Metric tag adı tek source-of-truth — literal repeat yok.
     private const string OutcomeTagKey       = "outcome";
-    private const string OutcomeCancelled    = "cancelled";
-    private const string OutcomeRetryExhaust = "retry_exhausted";
-    private const string OutcomeToxicRow     = "toxic_row";
+    private const string OutcomeRetryExhaust  = "retry_exhausted";
+    private const string OutcomeToxicRow      = "toxic_row";
+    private const string OutcomeFatalContract = "fatal_contract";
+    private const string OutcomeWriterDead     = "writer_dead";
+    private const string OutcomeShutdownAbandoned = "shutdown_abandoned";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -49,21 +52,37 @@ public sealed class ActivityLogWriter(
         {
             // Shutdown — kalan kayıtlar DrainRemainingAsync ile batch'ler hâlinde yazılır.
         }
+        catch (Exception ex)
+        {
+            // Stop accepting new rows immediately when the sole reader dies. The
+            // fatal batch is already accounted for by FlushAsync; rows still
+            // queued behind it are a separate, otherwise invisible loss.
+            channel.Writer.TryComplete(ex);
+            var queued = channel.Reader.Count;
+            if (queued > 0) ReportFailure(queued, OutcomeWriterDead);
+            throw;
+        }
 
         await DrainRemainingAsync(buffer);
     }
 
-    public override async Task StopAsync(CancellationToken cancellationToken)
+    public override Task StopAsync(CancellationToken cancellationToken)
     {
-        logger.LogInformation("ActivityLogWriter duruyor — channel writer kapatılıyor");
-        channel.Writer.TryComplete();
-        await base.StopAsync(cancellationToken);
+        shutdownDeadline = cancellationToken;
+        // ActivityLogChannelLifetime closes ingress after Kestrel has drained.
+        // This service only waits for the already-completed channel to flush.
+        logger.LogInformation("ActivityLogWriter duruyor — tamamlanmış channel drain ediliyor");
+        return base.StopAsync(cancellationToken);
     }
 
     private async Task DrainRemainingAsync(List<ActivityLog> buffer)
     {
         // 30s timeout: shutdown drain için üst sınır.
-        using var cts = new CancellationTokenSource(ShutdownDrainTimeout);
+        using var timeout = new CancellationTokenSource(ShutdownDrainTimeout);
+        using var cts = shutdownDeadline.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(
+                timeout.Token, shutdownDeadline)
+            : CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
         try
         {
             while (channel.Reader.TryRead(out var extra))
@@ -81,6 +100,8 @@ public sealed class ActivityLogWriter(
         }
         catch (OperationCanceledException ex)
         {
+            var abandoned = buffer.Count + channel.Reader.Count;
+            if (abandoned > 0) ReportFailure(abandoned, OutcomeShutdownAbandoned);
             logger.LogWarning(ex,
                 "ActivityLogWriter shutdown drain timeout aşıldı ({Timeout}s); {Remaining} kayıt yazılamadı",
                 ShutdownDrainTimeout.TotalSeconds, buffer.Count + channel.Reader.Count);
@@ -116,7 +137,6 @@ public sealed class ActivityLogWriter(
                     return;
 
                 case ActivityLogWriteFailureKind.Cancelled:
-                    ReportFailure(entries.Count, OutcomeCancelled);
                     throw outcome.Exception!;
 
                 case ActivityLogWriteFailureKind.ToxicRow:
@@ -133,6 +153,7 @@ public sealed class ActivityLogWriter(
                     break;
 
                 case ActivityLogWriteFailureKind.FatalHost:
+                    ReportFailure(entries.Count, OutcomeFatalContract);
                     logger.LogCritical(outcome.Exception,
                         "Activity log writer systemic veritabanı hatasıyla duruyor");
                     throw outcome.Exception!;
@@ -203,7 +224,6 @@ public sealed class ActivityLogWriter(
         }
         catch (OperationCanceledException)
         {
-            ReportFailure(count, OutcomeCancelled);
             return false;
         }
     }

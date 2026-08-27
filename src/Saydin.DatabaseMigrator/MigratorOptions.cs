@@ -195,7 +195,7 @@ internal sealed record MigratorOptions(
             : new MigrationImpactConfiguration(
                 Path.GetFullPath(impactDirectory), impactPublicKey!, impactPublicKeySha!);
 
-        var sslModeText = values.GetValueOrDefault("--ssl-mode") ?? Get(environment, "PGSSLMODE") ?? "disable";
+        var sslModeText = values.GetValueOrDefault("--ssl-mode") ?? Get(environment, "PGSSLMODE") ?? "require";
         if (!Enum.TryParse<SslMode>(sslModeText.Replace("-", string.Empty, StringComparison.Ordinal),
                 true, out var sslMode))
             throw new MigratorRejectedException("ssl_mode_invalid");

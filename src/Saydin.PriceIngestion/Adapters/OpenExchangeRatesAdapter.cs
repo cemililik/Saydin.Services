@@ -57,8 +57,26 @@ public sealed class OpenExchangeRatesAdapter(
         {
             ct.ThrowIfCancellationRequested();
 
-            var day = await GetOrFetchJsonAsync(
-                client, date, appId, remoteRequestIssued, ct);
+            JsonFetch day;
+            try
+            {
+                day = await GetOrFetchJsonAsync(
+                    client, date, appId, remoteRequestIssued, ct);
+            }
+            catch (ProviderTransportPayloadTooLargeException)
+            {
+                logger.LogWarning(
+                    "OpenExchangeRates provider transport payload limitini aştı: {Symbol} {Date}",
+                    request.AssetSymbol, date);
+                return AdapterOutcome<PricePoint>.RetryableFailure("transport_payload_too_large");
+            }
+            catch (ProviderPayloadTooLargeException)
+            {
+                logger.LogError(
+                    "OpenExchangeRates provider payload exceeded authority limit: {Symbol} {Date}",
+                    request.AssetSymbol, date);
+                return AdapterOutcome<PricePoint>.PermanentFailure("payload_too_large");
+            }
             if (day.RemoteRequestIssued)
                 remoteRequestIssued = true;
             if (day.FailureKind is { } kind)
@@ -228,7 +246,9 @@ public sealed class OpenExchangeRatesAdapter(
         try
         {
             using var document = JsonDocument.Parse(body);
-            return document.RootElement.TryGetProperty("message", out var message)
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("message", out var message)
+                && message.ValueKind == JsonValueKind.String
                 ? message.GetString() : null;
         }
         catch (JsonException)

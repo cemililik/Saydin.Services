@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Configuration;
+using Npgsql;
 using Saydin.PriceIngestion.Adapters;
+using Saydin.PriceIngestion.Extensions;
 using Saydin.PriceIngestion.Repositories;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -26,21 +28,18 @@ public sealed class EvdsInflationWorker(
         configuration.GetValue<int?>($"{ConfigKey}:DailyRunUtcMinute") ?? 0);
     private TimeSpan LogicalRetryDelay => TimeSpan.FromMinutes(30);
     private TimeSpan LeaseDuration => TimeSpan.FromMinutes(30);
+    private TimeSpan ProviderDeadline => HttpResilienceExtensions.TotalRequestTimeout;
     private TimeSpan FailureFinalizeTimeout => TimeSpan.FromMilliseconds(
         configuration.GetValue<int?>($"{ConfigKey}:FailureFinalizeTimeoutMs") ?? 5_000);
 
     public async Task RunAsync(CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested && !await BackfillAsync(ct))
-            await Task.Delay(LogicalRetryDelay, timeProvider, ct);
-
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(GetDelayUntilNextRun(), timeProvider, ct);
-                if (await BackfillAsync(ct))
-                    await FetchLatestAsync(ct);
+                var pass = await BackfillAsync(ct);
+                await Task.Delay(GetDelayUntilNextRun(pass.NextWakeAt), timeProvider, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -49,14 +48,15 @@ public sealed class EvdsInflationWorker(
         }
     }
 
-    private async Task<bool> BackfillAsync(CancellationToken ct)
+    private async Task<WorkerPass> BackfillAsync(CancellationToken ct)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var target = new DateOnly(now.Year, now.Month, 1).AddMonths(-1);
         var scope = Scope(IngestionJobTypes.InflationBackfill);
         await windows.PlanWindowsAsync(scope, BackfillStartDate, target,
             BackfillChunkMonths, IngestionCadence.Monthly, ct);
-        return await DrainAsync(scope, ct);
+        var result = await DrainAsync(scope, ct);
+        return result.NextWakeAt is { } due ? new WorkerPass(due) : WorkerPass.Empty;
     }
 
     internal async Task<bool> RunBackfillChunksAsync(
@@ -66,7 +66,7 @@ public sealed class EvdsInflationWorker(
         var scope = Scope(IngestionJobTypes.InflationBackfill);
         await windows.EnsureWindowsAsync(scope,
             chunks.Select(chunk => new IngestionWindowRange(chunk.From, chunk.To)).ToArray(), ct);
-        return await DrainAsync(scope, ct);
+        return (await DrainAsync(scope, ct)).Disposition == DrainDisposition.Complete;
     }
 
     internal static IReadOnlyList<(DateOnly From, DateOnly To)> ComputeBackfillChunks(
@@ -83,16 +83,7 @@ public sealed class EvdsInflationWorker(
         return chunks;
     }
 
-    private async Task FetchLatestAsync(CancellationToken ct)
-    {
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        var target = new DateOnly(now.Year, now.Month, 1).AddMonths(-1);
-        var scope = Scope(IngestionJobTypes.InflationDaily);
-        await windows.EnsureWindowsAsync(scope, [new IngestionWindowRange(target, target)], ct);
-        await DrainAsync(scope, ct);
-    }
-
-    private async Task<bool> DrainAsync(IngestionWindowScope scope, CancellationToken ct)
+    private async Task<DrainResult> DrainAsync(IngestionWindowScope scope, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -100,26 +91,28 @@ public sealed class EvdsInflationWorker(
             switch (result.Status)
             {
                 case WindowClaimStatus.Complete:
-                    return true;
+                    return DrainResult.Complete;
                 case WindowClaimStatus.Busy:
                 case WindowClaimStatus.NotDue:
-                    return false;
+                    return DrainResult.Deferred(result.NextAttemptAt
+                        ?? timeProvider.GetUtcNow().Add(LogicalRetryDelay));
                 case WindowClaimStatus.PermanentBlocked:
-                    throw new PermanentIngestionWindowException(
-                        adapter.Source, null, default, default,
-                        result.OutcomeCode ?? "permanent_failed");
+                    RecordPermanentBlocked(result.OutcomeCode ?? "permanent_failed");
+                    return DrainResult.PermanentBlocked;
                 case WindowClaimStatus.Claimed:
-                    if (!await ProcessClaimAsync(result.Claim!, ct)) return false;
+                    if (await ProcessClaimAsync(result.Claim!, ct) is { } terminal)
+                        return terminal;
                     break;
                 default:
                     throw new ArgumentOutOfRangeException();
             }
         }
         ct.ThrowIfCancellationRequested();
-        return false;
+        return DrainResult.Deferred(timeProvider.GetUtcNow().Add(LogicalRetryDelay));
     }
 
-    private async Task<bool> ProcessClaimAsync(IngestionWindowClaim claim, CancellationToken ct)
+    private async Task<DrainResult?> ProcessClaimAsync(
+        IngestionWindowClaim claim, CancellationToken ct)
     {
         AdapterOutcome<InflationRate> outcome;
         try
@@ -136,19 +129,41 @@ public sealed class EvdsInflationWorker(
         {
             throw;
         }
+        catch (ProviderDeadlineExceededException)
+        {
+            return await PersistFailureAsync(claim,
+                AdapterOutcome<InflationRate>.RetryableFailure("provider_deadline"), ct);
+        }
         catch (Exception ex)
         {
             var retryable = ProviderFailureClassifier.IsRetryable(ex);
+            var retryAt = RetryAt(claim);
+            var detail = ProviderExceptionSanitizer.Detail(ex);
+            logger.LogError(ProviderExceptionSanitizer.ForLog(ex),
+                "EVDS adapter exception {ExceptionType} ({From}..{To})",
+                ex.GetType().Name, claim.From, claim.To);
             using var finalize = new CancellationTokenSource(FailureFinalizeTimeout);
-            await windows.RecordFailureAsync(claim,
-                retryable ? IngestionWindowStates.RetryableFailed : IngestionWindowStates.PermanentFailed,
-                retryable ? AdapterOutcomeKind.RetryableFailure : AdapterOutcomeKind.PermanentFailure,
-                EmptyCounts(claim),
-                retryable ? "adapter_exception_retryable" : "adapter_exception_permanent",
-                retryable ? "adapter_transient" : "adapter_unhandled", ex.GetType().Name,
-                timeProvider.GetUtcNow().Add(LogicalRetryDelay), finalize.Token);
-            if (retryable) return false;
-            throw;
+            try
+            {
+                await windows.RecordFailureAsync(claim,
+                    retryable ? IngestionWindowStates.RetryableFailed : IngestionWindowStates.PermanentFailed,
+                    retryable ? AdapterOutcomeKind.RetryableFailure : AdapterOutcomeKind.PermanentFailure,
+                    EmptyCounts(claim),
+                    retryable ? "adapter_exception_retryable" : "adapter_exception_permanent",
+                    retryable ? "adapter_transient" : "adapter_unhandled", detail,
+                    retryAt, finalize.Token);
+            }
+            catch (Exception finalizeError)
+            {
+                logger.LogWarning(ProviderExceptionSanitizer.ForLog(finalizeError),
+                    "EVDS failure terminalization başarısız; lease expiry reclaim edecek: {WindowId}",
+                    claim.WindowId);
+                return DrainResult.Deferred(timeProvider.GetUtcNow().Add(LeaseDuration));
+            }
+            if (retryable)
+                return DrainResult.Deferred(retryAt);
+            RecordPermanentBlocked("adapter_exception_permanent");
+            return DrainResult.PermanentBlocked;
         }
 
         if (outcome.IsFailure)
@@ -159,9 +174,7 @@ public sealed class EvdsInflationWorker(
             var rejected = AdapterOutcome<InflationRate>.PartialRejected(
                 outcome.Records, Math.Max(outcome.RawItemCount, outcome.Records.Count),
                 Math.Max(1, outcome.RejectedCount), "worker_month_completeness_rejected");
-            await PersistFailureAsync(claim, rejected, ct);
-            throw new PermanentIngestionWindowException(
-                adapter.Source, null, claim.From, claim.To, rejected.Code);
+            return await PersistFailureAsync(claim, rejected, ct);
         }
 
         try
@@ -173,27 +186,45 @@ public sealed class EvdsInflationWorker(
             await MarkCancelledBoundedAsync(claim);
             throw;
         }
+        catch (PostgresException ex) when (
+            ex.SqlState == PostgresErrorCodes.CheckViolation
+            && ex.ConstraintName == "chk_inflation_rates_authority_immutable")
+        {
+            return await PersistFailureAsync(claim,
+                AdapterOutcome<InflationRate>.PermanentFailure("provider_revision_conflict"), ct);
+        }
         catch
         {
             if (await windows.GetTerminalStateAsync(claim.WindowId, CancellationToken.None) is not null)
-                return true;
+                return null;
             throw;
         }
-        return true;
+        return null;
     }
 
-    private async Task<bool> PersistFailureAsync(
+    private async Task<DrainResult> PersistFailureAsync(
         IngestionWindowClaim claim, AdapterOutcome<InflationRate> outcome, CancellationToken ct)
     {
         var retryable = outcome.Kind == AdapterOutcomeKind.RetryableFailure;
+        var nextAttemptAt = retryable ? RetryAt(claim) : timeProvider.GetUtcNow();
         await windows.RecordFailureAsync(claim,
             retryable ? IngestionWindowStates.RetryableFailed : IngestionWindowStates.PermanentFailed,
             outcome.Kind, FailureCounts(claim, outcome), outcome.Code, outcome.Code, outcome.Detail,
-            timeProvider.GetUtcNow().Add(retryable ? LogicalRetryDelay : TimeSpan.Zero), ct);
-        if (retryable) return false;
-        throw new PermanentIngestionWindowException(
-            adapter.Source, null, claim.From, claim.To, outcome.Code);
+            nextAttemptAt, ct);
+        if (retryable)
+            return DrainResult.Deferred(nextAttemptAt);
+        RecordPermanentBlocked(outcome.Code);
+        return DrainResult.PermanentBlocked;
     }
+
+    private void RecordPermanentBlocked(string outcomeCode) =>
+        logger.LogCritical(
+            "EVDS permanent ingestion scope izole edildi; sibling worker'lar devam edecek: code={Code}",
+            outcomeCode);
+
+    private DateTimeOffset RetryAt(IngestionWindowClaim claim) =>
+        timeProvider.GetUtcNow().Add(IngestionRetryBackoff.Calculate(
+            LogicalRetryDelay, claim.AttemptCount, claim.WindowId));
 
     private async Task MarkCancelledBoundedAsync(IngestionWindowClaim claim)
     {
@@ -267,11 +298,20 @@ public sealed class EvdsInflationWorker(
         CancellationToken ct)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var deadlineCancellation = new CancellationTokenSource();
         var operationTask = operation(linked.Token);
         var renewalTask = RenewUntilCancelledAsync(claim, linked.Token);
+        var deadlineTask = Task.Delay(
+            ProviderDeadline, timeProvider, deadlineCancellation.Token);
         try
         {
-            var first = await Task.WhenAny(operationTask, renewalTask);
+            var first = await Task.WhenAny(operationTask, renewalTask, deadlineTask);
+            if (first == deadlineTask && !operationTask.IsCompleted)
+            {
+                linked.Cancel();
+                _ = ObserveDetachedAsync(operationTask, claim.WindowId);
+                throw new ProviderDeadlineExceededException(claim.WindowId);
+            }
             if (first == renewalTask)
             {
                 linked.Cancel();
@@ -293,41 +333,98 @@ public sealed class EvdsInflationWorker(
         }
         finally
         {
+            deadlineCancellation.Cancel();
             linked.Cancel();
             try { await renewalTask; }
             catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
         }
     }
 
+    private async Task ObserveDetachedAsync(Task operationTask, Guid windowId)
+    {
+        try { await operationTask; }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ProviderExceptionSanitizer.ForLog(ex),
+                "EVDS provider deadline sonrası task gözlemlendi: {WindowId}", windowId);
+        }
+    }
+
     private async Task RenewUntilCancelledAsync(IngestionWindowClaim claim, CancellationToken ct)
     {
+        const int maximumTransientAttempts = 3;
         var interval = TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(1).Ticks,
             LeaseDuration.Ticks / 3));
         while (true)
         {
             await Task.Delay(interval, timeProvider, ct);
-            try
+            for (var attempt = 1; ; attempt++)
             {
-                if (!await windows.RenewLeaseAsync(claim, LeaseDuration, ct))
-                    throw new IngestionLeaseLostException(claim.WindowId);
+                try
+                {
+                    if (!await windows.RenewLeaseAsync(claim, LeaseDuration, ct))
+                        throw new IngestionLeaseLostException(claim.WindowId);
+                    break;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (IngestionLeaseLostException) { throw; }
+                catch (Exception ex) when (IsTransientLeaseFailure(ex)
+                    && attempt < maximumTransientAttempts)
+                {
+                    logger.LogWarning(ProviderExceptionSanitizer.ForLog(ex),
+                        "EVDS lease renewal geçici hata; tekrar deneniyor: {WindowId} attempt={Attempt}",
+                        claim.WindowId, attempt);
+                    var retryDelay = TimeSpan.FromTicks(Math.Max(1,
+                        Math.Min(TimeSpan.FromSeconds(1).Ticks,
+                            LeaseDuration.Ticks / 12 * attempt)));
+                    await Task.Delay(retryDelay, timeProvider, ct);
+                }
+                catch (Exception ex) { throw new IngestionLeaseLostException(claim.WindowId, ex); }
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (IngestionLeaseLostException) { throw; }
-            catch (Exception ex) { throw new IngestionLeaseLostException(claim.WindowId, ex); }
         }
     }
 
-    private TimeSpan GetDelayUntilNextRun()
+    private static bool IsTransientLeaseFailure(Exception exception) =>
+        exception is TimeoutException or IOException or System.Net.Sockets.SocketException ||
+        exception is NpgsqlException { IsTransient: true };
+
+    private TimeSpan GetDelayUntilNextRun(DateTimeOffset? nextWakeAt)
     {
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        var day = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(now.Year, now.Month));
-        var run = new DateTime(now.Year, now.Month, day,
+        var now = timeProvider.GetUtcNow();
+        var utcNow = now.UtcDateTime;
+        var day = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(utcNow.Year, utcNow.Month));
+        var run = new DateTime(utcNow.Year, utcNow.Month, day,
             MonthlyRunUtcTime.Hour, MonthlyRunUtcTime.Minute, 0, DateTimeKind.Utc);
-        if (now < run) return run - now;
-        var next = now.AddMonths(1);
-        day = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(next.Year, next.Month));
-        run = new DateTime(next.Year, next.Month, day,
-            MonthlyRunUtcTime.Hour, MonthlyRunUtcTime.Minute, 0, DateTimeKind.Utc);
-        return run - now;
+        TimeSpan scheduled;
+        if (utcNow < run) scheduled = run - utcNow;
+        else
+        {
+            var next = utcNow.AddMonths(1);
+            day = Math.Min(MonthlyRunDay, DateTime.DaysInMonth(next.Year, next.Month));
+            run = new DateTime(next.Year, next.Month, day,
+                MonthlyRunUtcTime.Hour, MonthlyRunUtcTime.Minute, 0, DateTimeKind.Utc);
+            scheduled = run - utcNow;
+        }
+        if (nextWakeAt is null) return scheduled;
+        var due = nextWakeAt.Value - now;
+        if (due <= TimeSpan.Zero) due = TimeSpan.FromMilliseconds(1);
+        return due < scheduled ? due : scheduled;
+    }
+
+    private enum DrainDisposition { Complete, Deferred, PermanentBlocked }
+
+    private sealed record DrainResult(
+        DrainDisposition Disposition, DateTimeOffset? NextWakeAt = null)
+    {
+        public static DrainResult Complete { get; } = new(DrainDisposition.Complete);
+        public static DrainResult PermanentBlocked { get; } = new(DrainDisposition.PermanentBlocked);
+        public static DrainResult Deferred(DateTimeOffset nextWakeAt) =>
+            new(DrainDisposition.Deferred, nextWakeAt);
+    }
+
+    private sealed record WorkerPass(DateTimeOffset? NextWakeAt)
+    {
+        public static WorkerPass Empty { get; } = new WorkerPass((DateTimeOffset?)null);
     }
 }

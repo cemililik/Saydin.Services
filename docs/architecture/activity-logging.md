@@ -545,10 +545,14 @@ Saydin.Api/
 - **Toksik satır:** `DbUpdateException`'da batch **bisection** ile bölünür; tek satıra
   inince o satır drop edilir (`outcome=toxic_row` metric) — bir bozuk satır tüm batch'i
   düşürmez.
-- **Shutdown:** `StopAsync` `channel.Writer.TryComplete()` çağırır; kalan kayıtlar
-  `DrainRemainingAsync` ile 30s timeout altında batch'ler hâlinde yazılır (drain path'inde
-  retry yapılmaz). Başarısızlıklar `SaydinMetrics.ActivityLogWriteFailures` (`outcome` tag:
-  `cancelled` / `retry_exhausted` / `toxic_row`) ile sayılır.
+- **Shutdown:** hosted service'ler ters kayıt sırasıyla durduğu için ayrı
+  `ActivityLogChannelLifetime`, Kestrel kabul edilmiş istekleri drain ettikten sonra channel
+  ingress'ini kapatır; `ActivityLogWriter` daha sonra kalan kayıtları 20 sn içinde yazar.
+  Host shutdown bütçesi 45 sn, Compose stop grace 60 sn'dir. İptal edilen normal flush kayıp
+  sayılmaz; drain'e geri verilir. Bütçe biterse kalan satırlar `shutdown_abandoned`, writer
+  fatal kapanırsa kabul edilemeyen kuyruk `writer_dead` olarak sayılır. Başarısızlıklar
+  `retry_exhausted`, `toxic_row`, `fatal_contract`, `shutdown_abandoned` veya `writer_dead`
+  sonucuyla görünürdür.
 
 ### 4.4 DI Kaydı (`Program.cs` — gerçek)
 
@@ -568,13 +572,17 @@ builder.Services.AddSingleton(sp => Channel.CreateBounded<ActivityLog>(
 
 builder.Services.AddSingleton<IActivityLogger, ChannelActivityLogger>();
 builder.Services.AddHostedService<ActivityLogWriter>();
+builder.Services.AddHostedService<ActivityLogChannelLifetime>();
 builder.Services.AddTransient<ActivityLogMiddleware>();  // IMiddleware → transient zorunlu
 
-// Pipeline: ForwardedHeaders → Localization → ExceptionHandler → ActivityLogMiddleware
+// Pipeline: ForwardedHeaders → port boundary → localization → ActivityLog →
+// distributed admission → ExceptionHandler → endpoint
 app.UseForwardedHeaders();
 // ...
-app.UseExceptionHandler();
 app.UseMiddleware<ActivityLogMiddleware>();
+app.UseWhen(context => !ApiPortBoundary.IsAdmissionExempt(context), branch =>
+    branch.UseMiddleware<DistributedSecurityLimiterMiddleware>());
+app.UseExceptionHandler();
 ```
 
 ### 4.5 Endpoint'lerde Kullanım (gerçek desen)
@@ -710,8 +718,12 @@ yönü) korunur.
 | `GET /v1/assets/{symbol}/price/{date}` | `asset_price` | assetSymbol, date |
 | `GET /v1/assets/{symbol}/price-range` | `asset_price_range` | assetSymbol, from, to, interval, pointCount |
 | `GET /v1/config` | `config_fetch` | tier |
+| `POST /v1/installations` | `installation_register` | generation, credentialState |
+| `POST /v1/installations/rotation` | `installation_rotation_begin` | generation, credentialState |
+| `POST /v1/installations/rotation/commit` | `installation_rotation_commit` | generation, credentialState |
+| `DELETE /v1/installations/current` | `installation_revoke` | generation, credentialState |
 
-> Tüm 11 action **uygulanmıştır** (endpoint handler'larda `GetOrCreateActivityLog` çağrısı
+> Tüm 15 action **uygulanmıştır** (endpoint handler'larda `GetOrCreateActivityLog` çağrısı
 > mevcut). `asset_price` / `asset_price_range` ayrıca günlük cihaz kotasına (`IDailyLimitGuard`)
 > tabidir; kota aşımında 429 + `error_code` ile satır yine loglanır.
 
@@ -906,7 +918,7 @@ flowchart LR
 |--------|-----|-----|-------|
 | `saydin.activity_log.queue.drops.total` | Counter | `action` (allowlist) | Kuyruk dolu → `itemDropped` callback; gerçek capacity drop |
 | `saydin.activity_log.queue.rejected_writes.total` | Counter | `action` (allowlist), `reason=writer_completed` | Completed writer `TryWrite=false`; capacity drop değildir |
-| `saydin.activity_log.write.failures.total` | Counter | `outcome` (`cancelled`/`retry_exhausted`/`toxic_row`) | `ActivityLogWriter` batch yazımı kaybı |
+| `saydin.activity_log.write.failures.total` | Counter | `outcome` (bounded writer outcome allowlist) | Retry tükenmesi, toksik/fatal satır veya shutdown'da gerçekten terk edilen kayıt |
 | `saydin.activity_log.data.truncations.total` | Counter | `action` (whitelist'li) | `data` > 10.000 byte → placeholder ile değiştirildi |
 
 > Action ve outcome tag'leri sabit, küçük kümelerle sınırlıdır (kardinalite patlaması yok);
@@ -943,7 +955,7 @@ flowchart LR
 | 8 | `ForwardedHeaders` middleware (KnownProxies/Networks config'li) | ✅ |
 | 9 | `IpMasker` (/24, /48; IPv4-mapped indirgeme) | ✅ |
 | 10 | `MaxMindGeoIpResolver` (singleton, graceful degradation, CGNAT/ULA private) | ✅ |
-| 11 | `ActivityLogMiddleware` + `ActivityLogBuilder` ile 11 action otomatik log | ✅ |
+| 11 | `ActivityLogMiddleware` + `ActivityLogBuilder` ile 15 action otomatik log | ✅ |
 | 12 | Cihaz header'larını oku (`X-Device-OS/-Version`, `X-App-Version`) | ✅ |
 | 13 | `data` payload KVKK bucket'lama (ADR-006) | ✅ |
 | 14 | `GeoLite2-City.mmdb` mount (`infrastructure/geoip/`, compose `:ro`) | ✅ (dosya `.gitignore`, MaxMind'dan indirilir) |

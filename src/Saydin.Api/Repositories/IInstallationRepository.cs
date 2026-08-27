@@ -12,6 +12,12 @@ public interface IInstallationRepository
 
     Task<InstallationPrincipal?> ResolveAsync(
         IReadOnlyList<CredentialHashCandidate> candidates,
+        short activeKeyVersion,
+        CancellationToken ct);
+
+    Task<InstallationPrincipal?> ResolvePendingRotationAsync(
+        Guid rotationId,
+        IReadOnlyList<CredentialHashCandidate> candidates,
         CancellationToken ct);
 
     Task<InstallationPrincipal> BeginRotationAsync(
@@ -26,5 +32,7 @@ public interface IInstallationRepository
         CredentialHashCandidate newCredential,
         CancellationToken ct);
 
-    Task RevokeAsync(CredentialHashCandidate currentCredential, CancellationToken ct);
+    Task<InstallationPrincipal> RevokeAsync(
+        CredentialHashCandidate currentCredential,
+        CancellationToken ct);
 }

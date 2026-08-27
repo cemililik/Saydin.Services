@@ -15,6 +15,29 @@ public static class SecureSecretFile
         Read(path, MaxPasswordBytes, MinPasswordBytes, "login_password_secret_invalid");
 
     /// <summary>
+    /// Reads and validates a database password without creating an immutable managed string.
+    /// The caller owns the returned buffer and must clear it after use.
+    /// </summary>
+    public static byte[] ReadPasswordBytes(string path)
+    {
+        byte[]? bytes = null;
+        try
+        {
+            bytes = ReadBytes(
+                path, MinPasswordBytes, MaxPasswordBytes, "login_password_secret_invalid");
+            ValidatePasswordMaterial(bytes, "login_password_secret_invalid");
+            var result = bytes;
+            bytes = null;
+            return result;
+        }
+        finally
+        {
+            if (bytes is not null)
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
+    /// <summary>
     /// Reads an opaque secret through the same Linux openat2/statx identity contract used
     /// by database credentials. The caller owns the returned buffer and must clear it.
     /// </summary>
@@ -78,15 +101,31 @@ public static class SecureSecretFile
     {
         try
         {
-            if (bytes.Contains((byte)0) || bytes.Contains((byte)'\n') || bytes.Contains((byte)'\r'))
-                throw Rejected(code);
-            var value = new UTF8Encoding(false, true).GetString(bytes);
-            if (string.IsNullOrWhiteSpace(value) ||
-                !string.Equals(value, value.Trim(), StringComparison.Ordinal))
-                throw Rejected(code);
-            return value;
+            ValidatePasswordMaterial(bytes, code);
+            return new UTF8Encoding(false, true).GetString(bytes);
         }
-        finally { Array.Clear(bytes); }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    internal static void ValidatePasswordMaterial(ReadOnlySpan<byte> bytes, string code)
+    {
+        if (bytes.IsEmpty || bytes.Contains((byte)0) ||
+            bytes.Contains((byte)'\n') || bytes.Contains((byte)'\r'))
+            throw Rejected(code);
+        try
+        {
+            _ = new UTF8Encoding(false, true).GetCharCount(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            throw Rejected(code);
+        }
+        if (Rune.DecodeFromUtf8(bytes, out var first, out _) !=
+                System.Buffers.OperationStatus.Done ||
+            Rune.DecodeLastFromUtf8(bytes, out var last, out _) !=
+                System.Buffers.OperationStatus.Done ||
+            Rune.IsWhiteSpace(first) || Rune.IsWhiteSpace(last))
+            throw Rejected(code);
     }
 
     private static void RejectReparseTraversal(string fullPath, string code)

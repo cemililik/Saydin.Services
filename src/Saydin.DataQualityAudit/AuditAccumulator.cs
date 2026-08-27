@@ -57,10 +57,10 @@ internal sealed class AuditAccumulator(byte[] hmacKey, int sampleLimit)
             .SelectMany(check => check.Samples.Select(sample => new RepairRecommendation(
                 check.CheckId,
                 sample.BusinessKeyHmac,
-                ActionFor(check.CheckId, sample.ViolationCode),
+                ToWireAction(PolicyFor(check.CheckId, sample.ViolationCode).Action),
                 null,
                 null,
-                RequiresProviderEvidence(check.CheckId))))
+                PolicyFor(check.CheckId, sample.ViolationCode).RequiresProviderEvidence)))
             .OrderBy(item => item.CheckId, StringComparer.Ordinal)
             .ThenBy(item => item.BusinessKeyHmac, StringComparer.Ordinal)
             .ToArray();
@@ -75,16 +75,32 @@ internal sealed class AuditAccumulator(byte[] hmacKey, int sampleLimit)
             code));
     }
 
-    private static string ActionFor(string checkId, string code) => checkId switch
+    internal static RepairPolicy PolicyFor(string checkId, string code) => checkId switch
     {
-        "DQ-001" or "DQ-002" or "DQ-007" => "requeue",
-        "DQ-004" => "refetch",
-        "DQ-005" or "DQ-008" => "manual_review",
-        _ => "manual_review",
+        "DQ-001" => new(RepairAction.Requeue, true),
+        "DQ-002" or "DQ-007" => new(RepairAction.Requeue, false),
+        "DQ-003" => new(RepairAction.RestoreSchemaContract, false),
+        "DQ-004" => new(RepairAction.Refetch, true),
+        "DQ-005" or "DQ-008" => new(RepairAction.ManualReview, true),
+        "DQ-006" => new(RepairAction.RestoreCalendarRelease, true),
+        "DQ-009" => new(RepairAction.ReconcileAuthorityEvidence, true),
+        _ => new(RepairAction.ManualReview, false),
     };
 
-    private static bool RequiresProviderEvidence(string checkId) =>
-        checkId is "DQ-001" or "DQ-004" or "DQ-005" or "DQ-008";
+    private static string ToWireAction(RepairAction action) => action switch
+    {
+        RepairAction.Requeue => "requeue",
+        RepairAction.Refetch => "refetch",
+        RepairAction.RestoreSchemaContract => "restore_schema_contract",
+        RepairAction.RestoreCalendarRelease => "restore_calendar_release",
+        RepairAction.ReconcileAuthorityEvidence => "reconcile_authority_evidence",
+        RepairAction.ManualReview => "manual_review",
+        _ => throw new ArgumentOutOfRangeException(nameof(action)),
+    };
+
+    internal sealed record RepairPolicy(
+        RepairAction Action,
+        bool RequiresProviderEvidence);
 
     private sealed class MutableCheck(AuditSeverity severity)
     {

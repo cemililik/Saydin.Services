@@ -17,5 +17,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Saydin.DataRepair\Saydin.DataRepair.csproj" />
+    <ProjectReference Include="..\..\src\Saydin.DataQualityAudit\Saydin.DataQualityAudit.csproj" />
   </ItemGroup>
 </Project>

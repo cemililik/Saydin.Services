@@ -22,6 +22,29 @@ public sealed class DistributedSecurityLimiterOptions
     [Range(1, 1_000_000)]
     public int PrincipalLimit { get; set; } = 120;
 
+    [Range(1, 100_000)]
+    public int RegistrationExactHourlyLimit { get; set; } = 3;
+
+    [Range(1, 100_000)]
+    public int RegistrationExactDailyLimit { get; set; } = 5;
+
+    [Range(1, 100_000)]
+    public int RegistrationNetworkHourlyLimit { get; set; } = 20;
+
+    [Range(1, 100_000)]
+    public int RegistrationNetworkDailyLimit { get; set; } = 100;
+
+    [Range(1, 1_000_000)]
+    public int RegistrationIpv4ExactHourlyLimit { get; set; } = 60;
+
+    [Range(1, 1_000_000)]
+    public int RegistrationIpv4NetworkHourlyLimit { get; set; } = 1_000;
+
+    // IPv4 shared-address traffic does not consume this scarce daily bucket.
+    // It applies only to IPv6 /64 subscriber networks.
+    [Range(1, 100_000)]
+    public int CalculationNetworkDailyLimit { get; set; } = 500;
+
     public string HmacKeyFile { get; set; } = string.Empty;
 
     public string RedisKeyPrefix { get; set; } = "security:rate:v1:";
@@ -31,6 +54,18 @@ public sealed class DistributedSecurityLimiterOptions
         value.ExactIpLimit is >= 1 and <= 1_000_000 &&
         value.NetworkLimit is >= 1 and <= 1_000_000 &&
         value.PrincipalLimit is >= 1 and <= 1_000_000 &&
+        value.RegistrationExactHourlyLimit is >= 1 and <= 100_000 &&
+        value.RegistrationExactDailyLimit is >= 1 and <= 100_000 &&
+        value.RegistrationNetworkHourlyLimit is >= 1 and <= 100_000 &&
+        value.RegistrationNetworkDailyLimit is >= 1 and <= 100_000 &&
+        value.RegistrationIpv4ExactHourlyLimit is >= 1 and <= 1_000_000 &&
+        value.RegistrationIpv4NetworkHourlyLimit is >= 1 and <= 1_000_000 &&
+        value.CalculationNetworkDailyLimit is >= 1 and <= 100_000 &&
+        value.RegistrationExactHourlyLimit <= value.RegistrationExactDailyLimit &&
+        value.RegistrationNetworkHourlyLimit <= value.RegistrationNetworkDailyLimit &&
+        value.RegistrationExactHourlyLimit <= value.RegistrationNetworkHourlyLimit &&
+        value.RegistrationExactDailyLimit <= value.RegistrationNetworkDailyLimit &&
+        value.RegistrationIpv4ExactHourlyLimit <= value.RegistrationIpv4NetworkHourlyLimit &&
         value.RedisKeyPrefix.Length is >= 1 and <= 96 &&
         value.RedisKeyPrefix.All(character =>
             char.IsAsciiLetterOrDigit(character) || character is ':' or '-' or '_');

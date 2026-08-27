@@ -40,7 +40,58 @@ public sealed class EvidenceBundleTests
             files.EvidencePrivateKeyPath, 1_000_000, DateTimeOffset.UtcNow, default);
         await File.AppendAllTextAsync(Path.Combine(directory, "checks", "dq-001.csv"), "tamper");
 
-        (await EvidenceBundle.VerifyAsync(directory, files.EvidencePublicKeyPath, default)).Should().BeFalse();
+        var verification = await EvidenceBundle.VerifyDetailedAsync(
+            directory, files.EvidencePublicKeyPath, default);
+        verification.Should().Be(new EvidenceVerificationResult(
+            false, "evidence_file_integrity_invalid"));
+    }
+
+    [Fact]
+    public async Task Bundle_IncompleteMarkerIsRealDuringStaging_AndRemovedOnlyAtAtomicPublish()
+    {
+        using var files = new TestFiles();
+        var directory = Path.Combine(files.Root, "marker-lifecycle");
+        EvidenceVerificationResult? stagingResult = null;
+
+        await EvidenceBundle.WriteAsync(
+            directory, ContentWithCanary("private"), files.EvidenceKeyId,
+            files.EvidencePrivateKeyPath, 1_000_000, DateTimeOffset.UtcNow, default,
+            async (staging, _, cancellationToken) =>
+            {
+                File.Exists(Path.Combine(staging, ".incomplete")).Should().BeTrue();
+                stagingResult = await EvidenceBundle.VerifyDetailedAsync(
+                    staging, files.EvidencePublicKeyPath, cancellationToken);
+            });
+
+        stagingResult.Should().Be(new EvidenceVerificationResult(
+            false, "evidence_bundle_incomplete"));
+        File.Exists(Path.Combine(directory, ".incomplete")).Should().BeFalse();
+        (await EvidenceBundle.VerifyDetailedAsync(
+            directory, files.EvidencePublicKeyPath, default)).Should()
+            .Be(new EvidenceVerificationResult(true, "evidence_verified"));
+    }
+
+    [Theory]
+    [InlineData("manifest", "evidence_manifest_unreadable")]
+    [InlineData("signature", "evidence_signature_unreadable")]
+    [InlineData("inventory", "evidence_inventory_invalid")]
+    public async Task Bundle_VerificationReturnsDistinctExactPhaseCode(
+        string mutation,
+        string expectedCode)
+    {
+        using var files = new TestFiles();
+        var directory = Path.Combine(files.Root, $"phase-{mutation}");
+        await EvidenceBundle.WriteAsync(
+            directory, ContentWithCanary("private"), files.EvidenceKeyId,
+            files.EvidencePrivateKeyPath, 1_000_000, DateTimeOffset.UtcNow, default);
+        if (mutation == "manifest") File.Delete(Path.Combine(directory, "manifest.json"));
+        else if (mutation == "signature") File.Delete(Path.Combine(directory, "manifest.sig"));
+        else await File.WriteAllTextAsync(Path.Combine(directory, "unexpected"), "extra");
+
+        var result = await EvidenceBundle.VerifyDetailedAsync(
+            directory, files.EvidencePublicKeyPath, default);
+
+        result.Should().Be(new EvidenceVerificationResult(false, expectedCode));
     }
 
     [Fact]

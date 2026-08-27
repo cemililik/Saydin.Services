@@ -34,15 +34,17 @@ public record DcaResponse(
     // Enflasyon düzeltmesi — IncludeInflation = false ise null
     decimal?  CumulativeInflationPercent,
     decimal?  RealProfitLossPercent,
-    // Legacy as-of alanı: complete exact hesapta terminal CPI ayı, veri eksikse null.
+    // WhatIf ile aynı legacy as-of semantiği: terminal CPI hedef aydan gerideyse
+    // gerçekten kullanılan final CPI ayı, exact hedef ay kullanıldıysa null.
     DateOnly? InflationDataAsOf,
     IReadOnlyList<DcaPurchase>   Purchases,
     IReadOnlyList<DcaChartPoint> ChartData,
-    // Additive API-04 alanları. Tutarlar terminal fiyat gününün TÜFE ayındaki TL
-    // satın alma gücüyle ve yalnız final sınırında 2 haneye yuvarlanır.
+    // Additive reel-getiri alanları. Tutarlar terminal tarihten ileri olmayan son
+    // final CPI deflatörüyle ve yalnız response sınırında 2 haneye yuvarlanır.
     decimal? InflationAdjustedInvestedTry = null,
     decimal? RealProfitLossTry = null,
     string?  RealReturnMethod = null,
     DateOnly? InflationTerminalMonth = null,
-    CalculationDataResponse? Data = null
+    CalculationDataResponse? Data = null,
+    IReadOnlyList<DateOnly>? SkippedPurchaseDates = null
 );

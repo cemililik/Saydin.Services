@@ -30,6 +30,7 @@
   <data name="DailyLimitExceededDetail"><value>You have reached the daily limit of {0} calculations. Please try again tomorrow.</value></data>
   <data name="CompareSymbolCount"><value>Between 2 and 5 symbols are required for comparison.</value></data>
   <data name="BuyDateAfterSellDate"><value>Buy date cannot be after sell date.</value></data>
+  <data name="CalculationEndDateCannotBeInFuture"><value>Calculation end date cannot be in the future.</value></data>
   <data name="InvalidAmountType"><value>Invalid amountType: '{0}'. Expected: try, units, grams</value></data>
   <data name="InvalidPeriod"><value>Invalid period: '{0}'. Expected: weekly, monthly</value></data>
   <data name="InvalidDcaAmountType"><value>Invalid amountType: '{0}'. DCA calculation only supports 'try'.</value></data>
@@ -48,6 +49,13 @@
   <data name="AmountMustBePositive"><value>Amount must be greater than zero.</value></data>
   <data name="RateLimited"><value>Too many requests</value></data>
   <data name="RateLimitedDetail"><value>At most {1} requests per {0} seconds. Please try again shortly.</value></data>
+  <data name="SecurityRateLimitedDetail"><value>Too many requests were received from this client. Please retry after the indicated delay.</value></data>
+  <data name="SecurityLimiterUnavailable"><value>Request admission unavailable</value></data>
+  <data name="SecurityLimiterUnavailableDetail"><value>The request cannot be admitted safely right now. Please try again later.</value></data>
+  <data name="SecurityClientAddressUntrusted"><value>Client address cannot be trusted</value></data>
+  <data name="SecurityClientAddressUntrustedDetail"><value>The proxy chain did not provide one trusted client address. Correct the network path before retrying.</value></data>
+  <data name="QuotaUnavailable"><value>Quota service unavailable</value></data>
+  <data name="QuotaUnavailableDetail"><value>The calculation quota cannot be verified safely right now. Please try again later.</value></data>
   <data name="PayloadTooLarge"><value>Request body too large</value></data>
   <data name="PayloadTooLargeDetail"><value>The request body can be at most {0} UTF-8 bytes.</value></data>
   <data name="UnsupportedJsonContentType"><value>Unsupported content type</value></data>
@@ -97,4 +105,6 @@
   <data name="Asset_GARAN"><value>Garanti BBVA</value></data>
   <data name="InstallationCredentialInvalid"><value>Installation credential required</value></data>
   <data name="InstallationCredentialInvalidDetail"><value>A valid installation credential must be sent using the Installation authorization scheme.</value></data>
+  <data name="RouteNotFound"><value>Resource not found</value></data>
+  <data name="RouteNotFoundDetail"><value>The requested resource is not available on this connection.</value></data>
 </root>

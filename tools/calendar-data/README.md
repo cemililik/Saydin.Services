@@ -22,16 +22,22 @@ sonu varsayımıyla uydurmaz. Coverage eksikse provider çağrısından önce
 ## Production güncelleme sözleşmesi
 
 - **TCMB (`tcmb_indicative_fx`)**: Systemd timer her gün 06:00 Europe/Istanbul'da acquisition
-  job'ını çalıştırmalı;
-  `Istanbul yesterday` gününü içerecek yıllık/aylık resmî arşiv sayfalarını staging'e indirir.
+  job'ını çalıştırmalı. Job planı idempotent biçimde materialize eder; 16:30 İstanbul provider
+  cutoff'unu aşmayan en yeni yıllık/aylık resmî arşiv sayfalarını staging'e indirir.
   Exact URI `https://www.tcmb.gov.tr/kurlar/kurYYYY_tr.html` ve
   `/kurlar/YYYYMM/Mon_tr.html` dışına redirect/host/path kabul edilmez. Gün aylık arşivde henüz
-  yayınlanmamışsa coverage ileri taşınmaz; job retry olur. Sonra snapshot SHA-256'ları,
+  yayınlanmamışsa requested coverage arşivdeki son kanıtlı publication gününe clamp edilir.
+  Aktif release içindeki en son `observation_expected=true` gün worker hedefidir; dolayısıyla
+  bugün kanıtlıysa bugün, değilse son eligible gün kullanılır ve bilinmeyen ileri gün için
+  provider çağrısı yapılmaz. Sonra snapshot SHA-256'ları,
   `retrievedAt`, yeni `snapshotSetId`, coverage ve expected-output kontratı güncellenir.
 - **BIST Pay (`bist_pay_xist`)**: Yıllık timer Borsa İstanbul yeni yıl Pay Piyasası tatil PDF'ini
   yayımlayınca
   ve en geç mevcut horizon bitimine 60 gün kala acquisition job yeni resmî PDF + index snapshot'ı
   hazırlar. PDF semantiği full/partial/closed olarak replay edilmeden release yayınlanmaz.
+  PDF'de listelenmeyen hafta içi `full_session` satırları doğrudan tarih kanıtı değil, resmî
+  closure/partial-session listesindeki yokluktan yapılan açık bir çıkarımdır; index snapshot'ı
+  exact yıllık authority PDF bağlantılarını çapraz doğrular.
 - TCMB active coverage Istanbul-yesterday'dan geri kalırsa veya BIST horizon 45 günden azsa
   `infrastructure/prometheus/rules/ingestion.yml` critical alert üretir. Worker'ın
   `calendar.not_ready` metriğinde tek artış production readiness ihlalidir;
@@ -42,6 +48,12 @@ code review ve acquisition kimliğinden ayrı reviewer anahtarıyla imzalı arti
 geçirilir. `review-envelope.json`, source manifest ve expected-output byte hash'lerini bağlar;
 manifest de tüm raw snapshot hash'lerini bağlar. `retrievedAt` authority publication zamanı
 değildir; indirmenin UTC audit zamanıdır. Raw bytes ve resmî URI provenance kaydıdır.
+
+BIST `full_session` satırları resmî tatil/erken kapanış çizelgesinde doğrudan listelenmez.
+Hafta sonu olmayan ve exact yıllık authority PDF'inde kapanış/yarım gün olarak yer almayan günler
+`inferred_open_from_official_closure_schedule` reason code'u ile üretilir. Bu satırdaki
+`evidence_raw_sha256`, doğrudan bir açık-seans kaydı iddiası değil, tamamlayıcısı alınan exact
+resmî kapanış çizelgesinin provenance'ıdır; index→PDF çapraz bağı üretimden önce doğrulanır.
 
 ## Ağ erişimli acquisition
 

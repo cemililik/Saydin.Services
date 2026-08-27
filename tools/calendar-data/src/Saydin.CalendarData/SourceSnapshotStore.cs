@@ -131,8 +131,7 @@ public sealed partial class SourceSnapshotStore
                 if (source.Year is not null || source.Month is not null)
                     throw new CalendarDataException("source_date_unexpected", source.Id);
                 RequireUri(uri, "www.tcmb.gov.tr",
-                    "/wps/wcm/connect/TR/TCMB+TR/Main+Menu/Banka+Hakkinda/Sikca+Sorulan+Sorular", source.Id,
-                    compareUnescaped: true);
+                    "/wps/wcm/connect/TR/TCMB+TR/Main+Menu/Banka+Hakkinda/Sikca+Sorulan+Sorular", source.Id);
                 RequireMediaType(source, "text/html");
                 break;
             case "bistPayHolidayPdf":
@@ -170,13 +169,16 @@ public sealed partial class SourceSnapshotStore
             throw new CalendarDataException("source_media_type_mismatch", source.Id);
     }
 
-    private static void RequireUri(Uri uri, string host, string path, string id, bool compareUnescaped = false)
+    private static void RequireUri(Uri uri, string host, string path, string id)
     {
         var escapedPath = uri.GetComponents(UriComponents.Path, UriFormat.UriEscaped);
         if (!escapedPath.StartsWith("/", StringComparison.Ordinal)) escapedPath = "/" + escapedPath;
-        var actualPath = compareUnescaped ? Uri.UnescapeDataString(escapedPath) : escapedPath;
+        if (escapedPath.Contains("%2f", StringComparison.OrdinalIgnoreCase)
+            || escapedPath.Contains("%5c", StringComparison.OrdinalIgnoreCase))
+            throw new CalendarDataException("source_uri_not_allowlisted", id);
+        var unescapedPath = Uri.UnescapeDataString(escapedPath);
         if (!string.Equals(uri.IdnHost, host, StringComparison.Ordinal)
-            || !string.Equals(actualPath, path, StringComparison.Ordinal))
+            || !string.Equals(unescapedPath, path, StringComparison.Ordinal))
             throw new CalendarDataException("source_uri_not_allowlisted", id);
     }
 

@@ -7,6 +7,32 @@ public sealed class RepairExecutorIntegrationTests(RepairDatabaseFixture fixture
     : IClassFixture<RepairDatabaseFixture>
 {
     [Fact]
+    public async Task SchemaV2Requeue_ReleasesStaleCalendarBindingAndRollbackRestoresIt()
+    {
+        var repair = await fixture.CreateCaseAsync(calendarBound: true);
+        try
+        {
+            repair.Preimage.CalendarReleaseId.Should().NotBeNull();
+
+            var apply = await fixture.RunAsync(repair, "apply");
+            apply.Exit.Should().Be(RepairExitCodes.Success, apply.Error);
+            var rebound = await fixture.LoadSnapshotAsync(repair.Files.WindowId);
+            rebound.State.Should().Be("pending");
+            rebound.CalendarReleaseId.Should().BeNull();
+
+            var rollback = await fixture.RunAsync(repair, "rollback");
+            rollback.Exit.Should().Be(RepairExitCodes.Success, rollback.Error);
+            var restored = await fixture.LoadSnapshotAsync(repair.Files.WindowId);
+            restored.State.Should().Be("permanent_failed");
+            restored.CalendarReleaseId.Should().Be(repair.Preimage.CalendarReleaseId);
+        }
+        finally
+        {
+            await fixture.CleanupAsync(repair);
+        }
+    }
+
+    [Fact]
     public async Task ProductionTargetRejectsLocalDqaEvidenceBeforeDatabaseMutation()
     {
         var repair = await fixture.CreateCaseAsync();
@@ -16,7 +42,8 @@ public sealed class RepairExecutorIntegrationTests(RepairDatabaseFixture fixture
             {
                 Target = repair.Plan.Target with { Environment = "production" },
             });
-            var result = await fixture.RunAsync(repair, "dry-run");
+            var result = await fixture.RunAsync(repair, "dry-run", runtime: name =>
+                name == "SAYDIN_ENVIRONMENT" ? "production" : fixture.RuntimeEnvironment(name));
             result.Exit.Should().Be(RepairExitCodes.SignatureFailure);
             result.Error.Should().Contain("evidence_manifest_invalid");
             (await fixture.LoadSnapshotAsync(repair.Files.WindowId)).State

@@ -34,6 +34,7 @@ public sealed record ManagedRole(
 public sealed class RoleContract
 {
     public const int ContractSchemaVersion = 1;
+    private const int MaximumLoginVersion = 32;
     private const string MarkerVersion = "saydin-role-bootstrap/v1";
     private static readonly Regex DeploymentPattern =
         new("^[a-z][a-z0-9-]{2,11}$", RegexOptions.CultureInvariant);
@@ -82,6 +83,8 @@ public sealed class RoleContract
     ];
 
     public IReadOnlyList<ManagedRole> StableRoles => [Owner, .. Capabilities, TimescaleScheduler];
+    public static IReadOnlyList<int> AllowedLoginVersions { get; } =
+        Enumerable.Range(1, MaximumLoginVersion).ToArray();
 
     // The lock serializes every role graph claim for one physical database. It
     // deliberately excludes deployment, prefix, extension and contract inputs.
@@ -194,7 +197,7 @@ public sealed class RoleContract
 
     public ManagedRole Login(LoginPurpose purpose, int version)
     {
-        if (version is < 1 or > 999)
+        if (!IsAllowedLoginVersion(version))
             throw Rejected("login_version_invalid", DatabaseSecurityFailureKind.InvalidArguments);
         var purposeName = PurposeName(purpose);
         var role = Role($"{purposeName}_login_v{version}", ManagedRoleKind.Login, purposeName, version);
@@ -228,6 +231,9 @@ public sealed class RoleContract
         LoginPurpose.Audit => AuditCapability,
         _ => throw new ArgumentOutOfRangeException(nameof(purpose)),
     };
+
+    public static bool IsAllowedLoginVersion(int version) =>
+        version is >= 1 and <= MaximumLoginVersion;
 
     public bool TryParseManagedMarker(string marker, out string purpose, out int? version)
     {
@@ -285,7 +291,7 @@ public sealed class RoleContract
             expected = version switch
             {
                 null => StableRoles.SingleOrDefault(candidate => candidate.Purpose == parsedPurpose),
-                >= 1 and <= 999 when Enum.GetValues<LoginPurpose>().Select(PurposeName)
+                >= 1 and <= MaximumLoginVersion when Enum.GetValues<LoginPurpose>().Select(PurposeName)
                     .Contains(parsedPurpose, StringComparer.Ordinal) =>
                     Login(ParsePurpose(parsedPurpose), version.Value),
                 _ => null,

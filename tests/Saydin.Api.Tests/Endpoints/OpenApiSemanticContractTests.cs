@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.OpenApi;
 using Saydin.Api.Endpoints;
 using Saydin.Api.Services;
+using Saydin.Api.Repositories;
 using Saydin.Api;
 using Microsoft.Extensions.Localization;
 using NSubstitute;
@@ -27,6 +28,8 @@ public sealed class OpenApiSemanticContractTests
         builder.Services.AddSingleton(Substitute.For<IDailyLimitGuard>());
         builder.Services.AddSingleton(Substitute.For<IPlanLimitResolver>());
         builder.Services.AddSingleton(Substitute.For<IInstallationPrincipalContext>());
+        builder.Services.AddSingleton(Substitute.For<IInstallationCredentialKeyring>());
+        builder.Services.AddSingleton(Substitute.For<IInstallationRepository>());
         builder.Services.AddSingleton(Substitute.For<ISavedScenarioService>());
         builder.Services.AddSingleton(Substitute.For<IAppConfigService>());
         builder.Services.AddSingleton(Substitute.For<IStringLocalizer<ErrorMessages>>());
@@ -36,6 +39,7 @@ public sealed class OpenApiSemanticContractTests
         app.MapAssetsEndpoints();
         app.MapScenariosEndpoints();
         app.MapAppConfigEndpoints();
+        app.MapInstallationEndpoints();
         await app.StartAsync();
 
         var provider = app.Services.GetRequiredKeyedService<IOpenApiDocumentProvider>("v1");
@@ -56,9 +60,13 @@ public sealed class OpenApiSemanticContractTests
             [("/v1/assets/{symbol}/price-range", "get")] = ["200", "400", "401", "404", "429", "503"],
             [("/v1/scenarios", "get")] = ["200", "400", "401", "429", "503"],
             [("/v1/scenarios/page", "get")] = ["200", "400", "401", "429", "503"],
-            [("/v1/scenarios", "post")] = ["201", "400", "401", "404", "409", "413", "415", "422", "429", "503"],
+            [("/v1/scenarios", "post")] = ["201", "400", "401", "404", "413", "415", "422", "429", "503"],
             [("/v1/scenarios/{id}", "delete")] = ["204", "401", "404", "429", "503"],
             [("/v1/config", "get")] = ["200", "400", "401", "429", "503"],
+            [("/v1/installations", "post")] = ["201", "429", "503"],
+            [("/v1/installations/rotation", "post")] = ["200", "401", "429", "503"],
+            [("/v1/installations/rotation/commit", "post")] = ["204", "400", "401", "429", "503"],
+            [("/v1/installations/current", "delete")] = ["204", "401", "429", "503"],
         };
 
         var paths = document.RootElement.GetProperty("paths");
@@ -80,5 +88,30 @@ public sealed class OpenApiSemanticContractTests
                     .Should().BeTrue($"{operation.Method.ToUpperInvariant()} {operation.Path} {status} must be ProblemDetails");
             }
         }
+
+        var pageParameters = paths.GetProperty("/v1/scenarios/page")
+            .GetProperty("get").GetProperty("parameters")
+            .EnumerateArray()
+            .Select(parameter => (
+                Name: parameter.GetProperty("name").GetString(),
+                In: parameter.GetProperty("in").GetString(),
+                Required: parameter.TryGetProperty("required", out var required) &&
+                    required.GetBoolean()))
+            .ToArray();
+        pageParameters.Should().BeEquivalentTo([
+            (Name: "limit", In: "query", Required: false),
+            (Name: "cursor", In: "query", Required: false),
+        ]);
+
+        var deleteParameters = paths.GetProperty("/v1/scenarios/{id}")
+            .GetProperty("delete").GetProperty("parameters")
+            .EnumerateArray()
+            .Select(parameter => (
+                Name: parameter.GetProperty("name").GetString(),
+                In: parameter.GetProperty("in").GetString(),
+                Required: parameter.GetProperty("required").GetBoolean()))
+            .ToArray();
+        deleteParameters.Should().ContainSingle().Which.Should()
+            .Be(("id", "path", true));
     }
 }

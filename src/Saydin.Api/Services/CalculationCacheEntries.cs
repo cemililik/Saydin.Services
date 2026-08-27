@@ -61,6 +61,8 @@ internal sealed record WhatIfCacheEntry(
         && Amount == amount
         && string.Equals(AmountType, amountType, StringComparison.Ordinal)
         && IncludeInflation == includeInflation
+        && CalculationCacheStampContract.IsLanguage(Language)
+        && CalculationCacheStampContract.IsLanguage(language)
         && string.Equals(Language, language, StringComparison.Ordinal)
         && Response is not null
         && string.Equals(Response.AssetSymbol, symbol, StringComparison.Ordinal)
@@ -125,6 +127,8 @@ internal sealed record ReverseWhatIfCacheEntry(
         && TargetAmount == targetAmount
         && string.Equals(TargetAmountType, targetAmountType, StringComparison.Ordinal)
         && IncludeInflation == includeInflation
+        && CalculationCacheStampContract.IsLanguage(Language)
+        && CalculationCacheStampContract.IsLanguage(language)
         && string.Equals(Language, language, StringComparison.Ordinal)
         && Response is not null
         && string.Equals(Response.AssetSymbol, symbol, StringComparison.Ordinal)
@@ -191,6 +195,8 @@ internal sealed record DcaCacheEntry(
         && string.Equals(Period, period, StringComparison.Ordinal)
         && string.Equals(AmountType, amountType, StringComparison.Ordinal)
         && IncludeInflation == includeInflation
+        && CalculationCacheStampContract.IsLanguage(Language)
+        && CalculationCacheStampContract.IsLanguage(language)
         && string.Equals(Language, language, StringComparison.Ordinal)
         && Response is not null
         && string.Equals(Response.AssetSymbol, symbol, StringComparison.Ordinal)
@@ -208,11 +214,24 @@ internal static class CatalogCacheContract
         string? hash,
         Repositories.AssetCatalogVersion catalog) =>
         catalog.IsValid
+        && CalculationCacheStampContract.IsCatalogHash(hash)
         && revision == catalog.Revision
         && string.Equals(
             hash,
             Convert.ToHexString(catalog.CatalogSha256).ToLowerInvariant(),
             StringComparison.Ordinal);
+}
+
+internal static class CalculationCacheStampContract
+{
+    internal static bool IsLanguage(string? language) =>
+        language is { Length: 2 }
+        && language.All(static character => character is >= 'a' and <= 'z');
+
+    internal static bool IsCatalogHash(string? hash) =>
+        hash is { Length: 64 }
+        && hash.All(static character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
 
 internal static class CalculationCacheContract

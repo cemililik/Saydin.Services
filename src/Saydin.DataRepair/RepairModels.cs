@@ -110,7 +110,8 @@ internal sealed record RollbackState(
     string? OutcomeCode,
     string? ErrorCode,
     DateTimeOffset UpdatedAt,
-    DateTimeOffset? CompletedAt);
+    DateTimeOffset? CompletedAt,
+    Guid? CalendarReleaseId);
 
 internal sealed record RepairOperationReceipt(
     int Index,

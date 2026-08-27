@@ -60,37 +60,44 @@ internal static class AuditApplication
         await using var signer = EvidenceSignerFactory.Create(
             options, input, environment, kmsClientFactory);
         var hmacKey = AuditCryptography.ReadHmacKey(options.HmacKeyFile);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(input.Manifest.Budget.TotalTimeoutSeconds));
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(input.Manifest.Budget.TotalTimeoutSeconds));
 
-        var embedded = EmbeddedMigrations.Load();
-        var runtimeDatabase = RuntimeDatabaseOptions.FromEnvironment(
-            LoginPurpose.Audit, RuntimeDatabasePooling.Disabled, environment);
-        var backupValidUntilText = environment("SAYDIN_BACKUP_V1_VALID_UNTIL");
-        if (backupValidUntilText is null ||
-            !RoleContract.TryParseBackupValidUntil(
-                backupValidUntilText, out var backupV1ValidUntilUtc))
-            throw new AuditRejectedException(
-                "backup_valid_until_invalid", AuditExitCodes.InvalidArguments);
-        await using var dataSource = await RuntimeDatabase.OpenVerifiedDataSourceAsync(
-            runtimeDatabase, cancellationToken: timeout.Token);
-        var runner = new AuditRunner(
-            dataSource, input, embedded, hmacKey,
-            runtimeDatabase.Contract, backupV1ValidUntilUtc);
-        var content = await runner.RunAsync(timeout.Token);
-        var bundle = await EvidenceBundle.WriteAsync(
-            options.OutputDirectory,
-            content,
-            input.Manifest.EvidenceKeyId,
-            signer,
-            input.Manifest.Budget.MaxEvidenceBytes,
-            timeProvider.GetUtcNow(),
-            timeout.Token);
-        await output.WriteLineAsync(
-            $"audit complete: content_sha256={bundle.ContentBundleSha256}; violations={content.Checks.Count(check => check.Severity >= AuditSeverity.High && check.TotalCount > 0)}");
-        return content.Checks.Any(check => check.Severity >= AuditSeverity.High && check.TotalCount > 0)
-            ? AuditExitCodes.Violations
-            : AuditExitCodes.Clean;
+            var embedded = EmbeddedMigrations.Load();
+            var runtimeDatabase = RuntimeDatabaseOptions.FromEnvironment(
+                LoginPurpose.Audit, RuntimeDatabasePooling.Disabled, environment);
+            var backupValidUntilText = environment("SAYDIN_BACKUP_V1_VALID_UNTIL");
+            if (backupValidUntilText is null ||
+                !RoleContract.TryParseBackupValidUntil(
+                    backupValidUntilText, out var backupV1ValidUntilUtc))
+                throw new AuditRejectedException(
+                    "backup_valid_until_invalid", AuditExitCodes.InvalidArguments);
+            await using var dataSource = await RuntimeDatabase.OpenVerifiedDataSourceAsync(
+                runtimeDatabase, cancellationToken: timeout.Token);
+            var runner = new AuditRunner(
+                dataSource, input, embedded, hmacKey,
+                runtimeDatabase.Contract, backupV1ValidUntilUtc);
+            var content = await runner.RunAsync(timeout.Token);
+            var bundle = await EvidenceBundle.WriteAsync(
+                options.OutputDirectory,
+                content,
+                input.Manifest.EvidenceKeyId,
+                signer,
+                input.Manifest.Budget.MaxEvidenceBytes,
+                timeProvider.GetUtcNow(),
+                timeout.Token);
+            await output.WriteLineAsync(
+                $"audit complete: content_sha256={bundle.ContentBundleSha256}; violations={content.Checks.Count(check => check.Severity >= AuditSeverity.High && check.TotalCount > 0)}");
+            return content.Checks.Any(check => check.Severity >= AuditSeverity.High && check.TotalCount > 0)
+                ? AuditExitCodes.Violations
+                : AuditExitCodes.Clean;
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(hmacKey);
+        }
     }
 
     private static async Task<int> RunVerifyAsync(
@@ -98,12 +105,12 @@ internal static class AuditApplication
         TextWriter output,
         CancellationToken cancellationToken)
     {
-        var result = await EvidenceBundle.VerifyAsync(
+        var result = await EvidenceBundle.VerifyDetailedAsync(
             options.BundleDirectory,
             options.PublicKeyFile,
             cancellationToken);
-        if (!result)
-            throw new AuditRejectedException("evidence_verification_failed", AuditExitCodes.EvidenceFailure);
+        if (!result.IsValid)
+            throw new AuditRejectedException(result.Code, AuditExitCodes.EvidenceFailure);
         await output.WriteLineAsync("evidence verified");
         return AuditExitCodes.Clean;
     }

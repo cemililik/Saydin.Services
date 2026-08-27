@@ -10,7 +10,9 @@
 ## Redis
 
 - [ ] **Bellek limiti ve eviction politikası ayarlanmalı**
-  - `maxmemory` ve `maxmemory-policy` (önerilen: `allkeys-lru`) konfigürasyonu
+  - `maxmemory-policy` güvenlik/kota sayaçları için sabit **`noeviction`** olmalıdır; resmi
+    production validator başka bir policy'yi reddeder. `maxmemory` gerçek key kardinalitesi ve
+    headroom ölçümüne göre ayrıca boyutlandırılır; policy değişikliği kapasite çözümü değildir.
   - Tetikleyici: Redis bellek kullanımı %70'i aşıyorsa
 
 - [ ] **Quota lease hash yükü izlenmeli**

@@ -9,6 +9,7 @@ namespace Saydin.PriceIngestion.Adapters;
 public sealed class TwelveDataAdapter(
     IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
+    TimeProvider timeProvider,
     ILogger<TwelveDataAdapter> logger) : IExternalPriceAdapter
 {
     public string Source => "twelvedata";
@@ -63,18 +64,26 @@ public sealed class TwelveDataAdapter(
             var payload = await BoundedHttpContent.ReadAsync(response.Content, ct);
             using var document = JsonDocument.Parse(payload.Bytes);
             var root = document.RootElement;
-            if (root.TryGetProperty("status", out var statusElement)
-                && !string.Equals(statusElement.GetString(), "ok", StringComparison.OrdinalIgnoreCase))
+            if (root.ValueKind != JsonValueKind.Object)
+                return AdapterOutcome<PricePoint>.PermanentFailure(
+                    "contract_value_kind_invalid");
+            if (root.TryGetProperty("status", out var statusElement))
             {
-                var providerCode = root.TryGetProperty("code", out var codeElement)
-                    && codeElement.ValueKind == JsonValueKind.Number
-                    && codeElement.TryGetInt32(out var numericCode)
-                    && numericCode is >= 100 and <= 599
-                    ? numericCode : 0;
-                return providerCode == 429
-                    ? AdapterOutcome<PricePoint>.RetryableFailure("provider_rate_limit")
-                    : AdapterOutcome<PricePoint>.PermanentFailure(
-                        "provider_error", providerCode == 0 ? "code=unknown" : $"code={providerCode}");
+                if (statusElement.ValueKind != JsonValueKind.String)
+                    return AdapterOutcome<PricePoint>.PermanentFailure(
+                        "contract_value_kind_invalid");
+                if (!string.Equals(statusElement.GetString(), "ok", StringComparison.OrdinalIgnoreCase))
+                {
+                    var providerCode = root.TryGetProperty("code", out var codeElement)
+                        && codeElement.ValueKind == JsonValueKind.Number
+                        && codeElement.TryGetInt32(out var numericCode)
+                        && numericCode is >= 100 and <= 599
+                        ? numericCode : 0;
+                    return providerCode == 429
+                        ? AdapterOutcome<PricePoint>.RetryableFailure("provider_rate_limit")
+                        : AdapterOutcome<PricePoint>.PermanentFailure(
+                            "provider_error", providerCode == 0 ? "code=unknown" : $"code={providerCode}");
+                }
             }
             if (!root.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
                 return AdapterOutcome<PricePoint>.PermanentFailure("schema_missing_values");
@@ -89,13 +98,33 @@ public sealed class TwelveDataAdapter(
                 "TwelveData {Symbol}: {Count} fiyat noktası alındı ({From}–{To})",
                 request.AssetSymbol, points.Count, request.From, request.To);
 
-            return AdapterCompleteness.Price(request, points, rawItemCount, rejectedCount);
+            var completeness = AdapterCompleteness.Price(
+                request, points, rawItemCount, rejectedCount);
+            if (completeness.Kind == AdapterOutcomeKind.PartialRejected
+                && rejectedCount == 0
+                && IsOnlyCurrentTerminalObservationMissing(request, points))
+                return AdapterOutcome<PricePoint>.RetryableFailure(
+                    "not_published_yet", rawItemCount: rawItemCount,
+                    rejectedCount: completeness.RejectedCount);
+            return completeness;
         }
         catch (ProviderContractException ex)
         {
             logger.LogError("TwelveData provider contract rejected: {Code} {Symbol}",
                 ex.Code, request.AssetSymbol);
             return AdapterOutcome<PricePoint>.PermanentFailure(ex.Code);
+        }
+        catch (ProviderTransportPayloadTooLargeException)
+        {
+            logger.LogWarning("TwelveData provider transport payload limitini aştı: {Symbol}",
+                request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.RetryableFailure("transport_payload_too_large");
+        }
+        catch (ProviderPayloadTooLargeException)
+        {
+            logger.LogError("TwelveData provider payload exceeded authority limit: {Symbol}",
+                request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.PermanentFailure("payload_too_large");
         }
         catch (JsonException)
         {
@@ -113,5 +142,21 @@ public sealed class TwelveDataAdapter(
                 Source, request.AssetSymbol, request.From, request.To);
             return AdapterOutcome<PricePoint>.RetryableFailure("network_error");
         }
+    }
+
+    private bool IsOnlyCurrentTerminalObservationMissing(
+        PriceFetchRequest request,
+        IReadOnlyCollection<PricePoint> points)
+    {
+        var expected = AdapterCompleteness.Dates(request.From, request.To)
+            .Except(request.CalendarClosedDates)
+            .ToHashSet();
+        var missing = expected.Except(points.Select(point => point.PriceDate)).ToArray();
+        if (missing.Length != 1 || expected.Count == 0 || missing[0] != expected.Max())
+            return false;
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Istanbul");
+        var localToday = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(timeProvider.GetUtcNow(), zone).DateTime);
+        return missing[0] == localToday;
     }
 }

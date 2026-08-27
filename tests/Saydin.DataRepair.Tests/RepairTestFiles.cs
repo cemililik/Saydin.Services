@@ -73,6 +73,15 @@ internal sealed class RepairTestFiles : IDisposable
             bytes, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
     }
 
+    public void WriteSignedEvidenceManifestBytes(byte[] bytes)
+    {
+        WritePrivate(Path.Combine(EvidenceDirectory, "manifest.json"), bytes);
+        WritePrivate(Path.Combine(EvidenceDirectory, "manifest.sha256"),
+            Encoding.ASCII.GetBytes(RepairCryptography.Sha256Hex(bytes) + "\n"));
+        WritePrivate(Path.Combine(EvidenceDirectory, "manifest.sig"), evidenceKey.SignData(
+            bytes, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+    }
+
     public string[] CommonArguments(params string[] prefix) =>
     [
         .. prefix,
@@ -100,7 +109,7 @@ internal sealed class RepairTestFiles : IDisposable
         const string database = "saydin_repair_test";
         var prefix = RoleContract.DerivePrefix(deployment, database, systemHash);
         return new RepairPlan(
-            1,
+            2,
             RepairCryptography.Sha256Hex(planKey.ExportSubjectPublicKeyInfo()),
             ReceiptKeyId,
             Now.AddMinutes(-1),
@@ -133,11 +142,7 @@ internal sealed class RepairTestFiles : IDisposable
             [new DqaEvidenceFile("evidence-content.json", content.LongLength, contentHash)]);
         var manifestBytes = CanonicalJson.Serialize(
             manifest, RepairJsonContext.Default.DqaEvidenceManifest);
-        WritePrivate(Path.Combine(EvidenceDirectory, "manifest.json"), manifestBytes);
-        WritePrivate(Path.Combine(EvidenceDirectory, "manifest.sha256"),
-            Encoding.ASCII.GetBytes(RepairCryptography.Sha256Hex(manifestBytes) + "\n"));
-        WritePrivate(Path.Combine(EvidenceDirectory, "manifest.sig"), evidenceKey.SignData(
-            manifestBytes, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+        WriteSignedEvidenceManifestBytes(manifestBytes);
         return contentHash;
     }
 

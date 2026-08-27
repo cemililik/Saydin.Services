@@ -78,6 +78,13 @@ public sealed record MarketCalendarReadiness(
         new(false, true, null, null, "calendar_not_required");
 }
 
+public sealed record MarketCalendarTargetResolution(
+    bool Ready,
+    DateOnly? TargetDate,
+    Guid? ReleaseId,
+    string CalendarCode,
+    string OutcomeCode);
+
 public sealed class CalendarNotReadyException(string outcomeCode)
     : InvalidOperationException($"Authoritative market calendar ready değil: {outcomeCode}")
 {
@@ -86,21 +93,24 @@ public sealed class CalendarNotReadyException(string outcomeCode)
 
 public interface IIngestionWindowRepository
 {
-    Task<IngestionFreshnessState> ReadFreshnessStateAsync(CancellationToken ct) =>
-        Task.FromResult(new IngestionFreshnessState(
-            DateTimeOffset.UtcNow, [], []));
+    Task<IngestionFreshnessState> ReadFreshnessStateAsync(CancellationToken ct);
 
     Task<MarketCalendarReadiness> CheckCalendarReadinessAsync(
         IngestionWindowScope scope,
         DateOnly from,
         DateOnly to,
-        CancellationToken ct) => Task.FromResult(MarketCalendarReadiness.NotRequired);
+        CancellationToken ct);
+
+    Task<MarketCalendarTargetResolution> ResolveLatestExpectedObservationAsync(
+        string calendarCode,
+        DateOnly notAfter,
+        CancellationToken ct);
 
     Task<IReadOnlySet<DateOnly>> GetExpectedNoDataDatesAsync(
         Guid releaseId,
         DateOnly from,
         DateOnly to,
-        CancellationToken ct) => Task.FromResult<IReadOnlySet<DateOnly>>(new HashSet<DateOnly>());
+        CancellationToken ct);
 
     Task PlanWindowsAsync(
         IngestionWindowScope scope,
@@ -156,12 +166,14 @@ public interface IIngestionWindowRepository
 
 public interface IIngestionPersistenceFaultInjector
 {
+    Task BeforeClaimCommitAsync(Guid windowId, CancellationToken ct);
     Task BeforeCommitAsync(Guid windowId, CancellationToken ct);
     Task AfterCommitAsync(Guid windowId, CancellationToken ct);
 }
 
 public sealed class NoopIngestionPersistenceFaultInjector : IIngestionPersistenceFaultInjector
 {
+    public Task BeforeClaimCommitAsync(Guid windowId, CancellationToken ct) => Task.CompletedTask;
     public Task BeforeCommitAsync(Guid windowId, CancellationToken ct) => Task.CompletedTask;
     public Task AfterCommitAsync(Guid windowId, CancellationToken ct) => Task.CompletedTask;
 }

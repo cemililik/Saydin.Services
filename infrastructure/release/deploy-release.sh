@@ -3,6 +3,8 @@ set -eu
 umask 077
 
 die() { printf '%s\n' "$1" >&2; exit "${2:-70}"; }
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+repo_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P) || exit 70
 [ "$#" -eq 7 ] || die "deployment_usage" 64
 environment=$1
 project=$2
@@ -23,42 +25,106 @@ case "$receipt_dir" in /*) ;; *) die "deployment_absolute_path_required" 64 ;; e
 [ ! -e "$receipt_dir" ] || die "deployment_receipt_target_exists" 73
 mkdir -m 0700 "$receipt_dir"
 
-manifest_sha=$(python3 infrastructure/release/release_manifest.py verify --manifest "$release_dir/release-manifest.json")
-if ! python3 - "$release_dir/release-manifest.json" "$env_file" <<'PY'
-import json, sys
-manifest=json.load(open(sys.argv[1],encoding="utf-8")); values={}
-for number,line in enumerate(open(sys.argv[2],encoding="utf-8"),1):
-    line=line.rstrip("\n")
-    if not line or line.startswith("#"): continue
-    key,sep,value=line.partition("=")
-    if not sep or key in values: raise SystemExit("deployment_env_invalid")
-    values[key]=value
-first={"api":"SAYDIN_API_IMAGE","ingestion":"SAYDIN_INGESTION_IMAGE","control":"SAYDIN_CONTROL_IMAGE",
-       "calendar":"SAYDIN_CALENDAR_IMAGE","dqa":"SAYDIN_DQA_IMAGE","backup":"SAYDIN_BACKUP_IMAGE","caddy":"SAYDIN_CADDY_IMAGE"}
-runtime={"timescale":"SAYDIN_TIMESCALE_IMAGE","redis":"SAYDIN_REDIS_IMAGE",
-         "postgresExporter":"SAYDIN_POSTGRES_EXPORTER_IMAGE","redisExporter":"SAYDIN_REDIS_EXPORTER_IMAGE",
-         "otel":"SAYDIN_OTEL_IMAGE","prometheus":"SAYDIN_PROMETHEUS_IMAGE","alertmanager":"SAYDIN_ALERTMANAGER_IMAGE",
-         "blackbox":"SAYDIN_BLACKBOX_IMAGE","nodeExporter":"SAYDIN_NODE_EXPORTER_IMAGE"}
-expected={first[item["name"]]:item["reference"]+"@"+item["digest"] for item in manifest["images"]}
-expected.update({runtime[name]:reference for name,reference in manifest["runtimeImages"].items()})
-if any(values.get(key)!=value for key,value in expected.items()): raise SystemExit("deployment_manifest_image_mismatch")
-if (values.get("SAYDIN_GIT_SHA")!=manifest["source"]["commitSha"]
-        or values.get("SAYDIN_RELEASE_VERSION")!=manifest["releaseId"]
-        or values.get("SAYDIN_SERVICE_VERSION")!=manifest["releaseId"]):
-    raise SystemExit("deployment_manifest_source_mismatch")
-PY
+manifest_sha=$(python3 "$script_dir/release_manifest.py" verify --manifest "$release_dir/release-manifest.json")
+if ! python3 "$script_dir/render-deployment-env.py" \
+  --manifest "$release_dir/release-manifest.json" --verify-existing "$env_file"
 then
   die "deployment_manifest_binding_failed" 78
 fi
 rendered=$(mktemp /tmp/saydin-production-compose.XXXXXX.json)
-trap 'rm -f "$rendered"' EXIT HUP INT TERM
+rules_response=$(mktemp /tmp/saydin-prometheus-rules.XXXXXX.json)
+targets_response=$(mktemp /tmp/saydin-prometheus-targets.XXXXXX.json)
+series_response=$(mktemp /tmp/saydin-prometheus-series.XXXXXX.json)
+trap 'rm -f -- "$rendered" "$rules_response" "$targets_response" "$series_response"' EXIT HUP INT TERM
 
 compose() {
   docker compose --project-name "$project" --env-file "$env_file" --file "$compose_file" "$@"
 }
 
 compose config --format json > "$rendered"
-python3 infrastructure/deployment/validate-production.py "$rendered"
+python3 "$repo_root/infrastructure/deployment/validate-production.py" "$rendered"
+volume_contracts=$(python3 - "$rendered" <<'PY'
+import json, re, sys
+document=json.load(open(sys.argv[1], encoding="utf-8"))
+volumes=document["volumes"]
+private={
+ "postgres_secret":("postgres","private"), "redis_secret":("redis","private"),
+ "bootstrap_secret":("bootstrap","private"), "migrator_secret":("migrator","private"),
+ "api_secret":("api","private"), "api_config":("api-config","root"),
+ "ingestion_secret":("ingestion","private"), "ingestion_config":("ingestion-config","root"),
+ "calendar_secret":("calendar","private"), "exporter_secret":("exporter","private"),
+ "redis_exporter_secret":("redis-exporter","private"),
+ "alertmanager_secret":("alertmanager","private"), "audit_secret":("audit","private"),
+ "data_repair_secret":("data-repair","private"),
+ "backup_secret":("backup","private"),
+}
+writable={
+ "postgres_data":70, "redis_data":999, "caddy_data":1000, "caddy_config":1000,
+ "prometheus_data":65534, "alertmanager_data":65534, "otel_queue":10001,
+ "tempo_data":10001, "loki_data":10001, "backup_metrics":1001,
+ "backup_base_staging":1001, "backup_wal_spool":1001, "calendar_data":1001,
+ "audit_output":1001,
+ "data_repair_receipts":1001,
+}
+for key,(purpose,location) in private.items():
+ name=volumes[key]["name"]
+ if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name): raise SystemExit(1)
+ print("private", purpose, location, name, sep="|")
+for key,uid in writable.items():
+ name=volumes[key]["name"]
+ if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name): raise SystemExit(1)
+ print("runtime", uid, "root", name, sep="|")
+name=volumes["blackbox_targets"]["name"]
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name): raise SystemExit(1)
+print("blackbox", "65534", "root", name, sep="|")
+PY
+) || die "deployment_volume_contract_render_failed" 78
+helper_image=$(python3 - "$rendered" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["services"]["postgres"]["image"])
+PY
+) || die "deployment_volume_helper_image_missing" 78
+public_host=$(python3 - "$rendered" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["services"]["caddy"]["environment"]["SAYDIN_PUBLIC_HOST"])
+PY
+) || die "deployment_public_host_missing" 78
+printf '%s\n' "$volume_contracts" | while IFS='|' read -r kind argument location volume_name; do
+  docker volume inspect "$volume_name" >/dev/null 2>&1 \
+    || die "deployment_external_volume_missing" 78
+  case "$kind" in
+    private)
+      material_root=/material
+      [ "$location" = private ] && material_root=/material/private
+      docker run --rm --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges:true --user 0:0 --pids-limit 64 \
+        --memory 128m --cpus 0.25 --tmpfs /tmp:mode=0700,size=8m \
+        --mount "type=bind,src=$repo_root/infrastructure/deployment/validate-private-material.py,dst=/validator.py,readonly" \
+        --mount "type=volume,src=$volume_name,dst=/material,readonly" \
+        --entrypoint python3 "$helper_image" /validator.py "$argument" "$material_root" \
+        || die "deployment_private_material_invalid" 78
+      ;;
+    runtime)
+      docker run --rm --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges:true --user 0:0 --pids-limit 64 \
+        --memory 128m --cpus 0.25 --tmpfs /tmp:mode=0700,size=8m \
+        --mount "type=bind,src=$repo_root/infrastructure/deployment/validate-runtime-volume.py,dst=/validator.py,readonly" \
+        --mount "type=volume,src=$volume_name,dst=/material,readonly" \
+        --entrypoint python3 "$helper_image" /validator.py --uid "$argument" /material \
+        || die "deployment_runtime_volume_invalid" 78
+      ;;
+    blackbox)
+      docker run --rm --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges:true --user 0:0 --pids-limit 64 \
+        --memory 128m --cpus 0.25 --tmpfs /tmp:mode=0700,size=8m \
+        --mount "type=bind,src=$repo_root/infrastructure/deployment/validate-blackbox-targets.py,dst=/validator.py,readonly" \
+        --mount "type=volume,src=$volume_name,dst=/material,readonly" \
+        --entrypoint python3 "$helper_image" /validator.py --public-host "$public_host" /material \
+        || die "deployment_blackbox_targets_invalid" 78
+      ;;
+    *) die "deployment_volume_contract_invalid" 78 ;;
+  esac
+done
 if ! python3 - "$rendered" <<'PY'
 import json, sys
 document=json.load(open(sys.argv[1], encoding="utf-8"))
@@ -78,6 +144,26 @@ if [ "$environment" = production ] && [ "${SAYDIN_ENABLE_BACKUP-}" != true ]; th
 fi
 
 compose up -d postgres redis otel-collector
+backup_valid_until=$(python3 - "$rendered" <<'PY'
+import datetime, json, sys
+value=json.load(open(sys.argv[1], encoding="utf-8"))["services"]["database-backup"]["environment"]["SAYDIN_BACKUP_V1_VALID_UNTIL"]
+parsed=datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+print(int(parsed.timestamp()))
+PY
+) || die "deployment_backup_validity_format_invalid" 78
+attempt=0
+until compose exec -T postgres pg_isready -h 127.0.0.1 -d postgres >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 60 ] || die "deployment_database_preflight_unavailable" 75
+  sleep 2
+done
+backup_validity_window=$(compose exec -T postgres psql -X -A -t -v ON_ERROR_STOP=1 \
+  -U saydin_admin -d postgres -c \
+  "SELECT floor(extract(epoch FROM (to_timestamp($backup_valid_until) - clock_timestamp())))::bigint") \
+  || die "deployment_backup_validity_clock_query_failed" 75
+case "$backup_validity_window" in ""|*[!0-9]*) die "deployment_backup_validity_window_invalid" 78 ;; esac
+[ "$backup_validity_window" -ge 3888000 ] && [ "$backup_validity_window" -le 8035200 ] || \
+  die "deployment_backup_validity_window_unsafe" 78
 backup_cidr=$(python3 - "$rendered" <<'PY'
 import json, sys
 value=json.load(open(sys.argv[1], encoding="utf-8"))["networks"]["backup-db"]["ipam"]["config"]
@@ -106,7 +192,7 @@ hba_path=$(compose exec -T postgres sh -eu -c \
 case "$hba_path" in /*/pg_hba.conf) ;; *) die "deployment_hba_path_invalid" 78 ;; esac
 compose exec -T --user 70:70 postgres python3 - install --hba "$hba_path" \
   --cidr "$backup_cidr" --role-prefix "$role_prefix" \
-  < infrastructure/backup/manage_backup_hba.py
+  < "$repo_root/infrastructure/backup/manage_backup_hba.py"
 # Expanded inside the PostgreSQL container, not by the deployment shell.
 # shellcheck disable=SC2016
 hba_reload=$(compose exec -T postgres sh -eu -c \
@@ -116,7 +202,7 @@ hba_reload=$(compose exec -T postgres sh -eu -c \
 [ "$hba_reload" = t0 ] || die "deployment_hba_reload_failed"
 compose exec -T --user 70:70 postgres python3 - verify --hba "$hba_path" \
   --cidr "$backup_cidr" --role-prefix "$role_prefix" \
-  < infrastructure/backup/manage_backup_hba.py
+  < "$repo_root/infrastructure/backup/manage_backup_hba.py"
 
 compose up --no-deps --force-recreate --exit-code-from database-role-bootstrap database-role-bootstrap
 prebootstrap_log=$(compose logs --no-color database-role-bootstrap)
@@ -139,9 +225,30 @@ printf '%s\n' "$migrator_verify" | grep -q 'backup_postbootstrap_required=false'
   || die "deployment_migrator_postbootstrap_invalid"
 
 if [ "${SAYDIN_ENABLE_BACKUP-}" = true ]; then
-  compose --profile backup run --rm --no-deps database-backup verify-auth
-  compose --profile backup up -d --no-deps database-wal-archive database-backup
+  backup_role="${role_prefix}_backup_login_v1"
+  backup_role_validity=$(compose exec -T postgres psql -X -A -t -F '|' -v ON_ERROR_STOP=1 \
+    -v backup_role="$backup_role" -U saydin_admin -d postgres -c \
+    "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint,
+            floor(extract(epoch FROM rolvaliduntil))::bigint
+       FROM pg_catalog.pg_roles WHERE rolname=:'backup_role'") \
+    || die "deployment_backup_role_validity_query_failed" 78
+  case "$backup_role_validity" in *'|'*) ;; *) die "deployment_backup_role_validity_invalid" 78 ;; esac
+  backup_database_epoch=${backup_role_validity%%|*}
+  backup_actual_valid_until=${backup_role_validity#*|}
+  case "$backup_database_epoch:$backup_actual_valid_until" in
+    *:*:*|*[!0-9:]*|:*|*:) die "deployment_backup_role_validity_invalid" 78 ;;
+  esac
+  [ "$backup_actual_valid_until" = "$backup_valid_until" ] \
+    || die "deployment_backup_role_validity_mismatch" 78
+  backup_actual_window=$((backup_actual_valid_until - backup_database_epoch))
+  [ "$backup_actual_window" -ge 3888000 ] && [ "$backup_actual_window" -le 8035200 ] \
+    || die "deployment_backup_role_validity_unsafe" 78
+  compose --profile backup run --rm --no-deps \
+    -e SAYDIN_BACKUP_ROLE_VALID_UNTIL_EPOCH_SECONDS="$backup_actual_valid_until" \
+    database-backup verify-auth
+  compose --profile backup up -d --no-deps database-wal-archive
   compose --profile backup run --rm --no-deps database-backup base-backup
+  compose --profile backup up -d --no-deps database-backup
   [ -n "$(compose --profile backup ps --status running -q database-wal-archive)" ] \
     || die "deployment_wal_archive_not_running"
   [ -n "$(compose --profile backup ps --status running -q database-backup)" ] \
@@ -152,6 +259,43 @@ compose --profile audit up --no-deps --exit-code-from data-quality-audit data-qu
 compose --profile audit run --rm --no-deps data-quality-audit verify-evidence \
   --bundle /run/audit-output/evidence \
   --public-key /run/saydin-secrets/private/evidence-public.pem
+
+# Validate every mutable monitoring config with the candidate binaries before
+# force-recreating the currently healthy control plane.
+compose run --rm --no-deps --entrypoint promtool prometheus \
+  check config /etc/prometheus/prometheus.yml
+compose run --rm --no-deps --entrypoint amtool alertmanager \
+  check-config /run/saydin-secrets/private/alertmanager.yml
+compose run --rm --no-deps --entrypoint /otelcol-contrib otel-collector \
+  validate --config=/etc/otelcol/config.yml
+compose run --rm --no-deps --entrypoint /tempo tempo \
+  -config.file=/etc/tempo/config.yml -config.expand-env=true -config.verify=true
+compose run --rm --no-deps --entrypoint /usr/bin/loki loki \
+  -config.file=/etc/loki/config.yml -config.expand-env=true -verify-config
+
+compose up -d --no-deps --force-recreate \
+  alertmanager tempo loki otel-collector postgres-exporter redis-exporter \
+  blackbox-exporter node-exporter prometheus
+attempt=0
+# Expanded inside the Prometheus container, not by the deployment shell.
+# shellcheck disable=SC2016
+until compose exec -T prometheus sh -eu -c '
+  promtool check healthy --url=http://127.0.0.1:9090 >/dev/null
+  for endpoint in \
+    http://alertmanager:9093/-/ready \
+    http://otel-collector:13133/ \
+    http://tempo:3200/ready \
+    http://loki:3100/ready \
+    http://postgres-exporter:9187/metrics \
+    http://redis-exporter:9121/metrics \
+    http://blackbox-exporter:9115/metrics \
+    http://node-exporter:9100/metrics
+  do wget -q --spider "$endpoint"; done
+'; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 60 ] || die "deployment_monitoring_readiness_failed"
+  sleep 2
+done
 
 compose up -d --no-deps saydin-api
 attempt=0
@@ -173,6 +317,43 @@ curl --fail --silent --show-error --config "$require_smoke" >/dev/null
 if [ "${SAYDIN_ENABLE_INGESTION-}" = true ]; then
   compose --profile ingestion up -d saydin-price-ingestion
 fi
+validate_monitoring_runtime() {
+  if [ "${SAYDIN_ENABLE_INGESTION-}" = true ]; then
+    python3 "$repo_root/infrastructure/deployment/validate-prometheus-runtime.py" \
+      --rule-root "$repo_root/infrastructure/prometheus/rules" \
+      --rules-response "$rules_response" --targets-response "$targets_response" \
+      --series-response "$series_response" \
+      --expected-probe "https://$public_host/health/live" --require-ingestion
+  else
+    python3 "$repo_root/infrastructure/deployment/validate-prometheus-runtime.py" \
+      --rule-root "$repo_root/infrastructure/prometheus/rules" \
+      --rules-response "$rules_response" --targets-response "$targets_response" \
+      --series-response "$series_response" \
+      --expected-probe "https://$public_host/health/live"
+  fi
+}
+fetch_monitoring_runtime() {
+  series_end=$(date +%s)
+  series_start=$((series_end - 300))
+  case "$series_start:$series_end" in *[!0-9:]*) return 1 ;; esac
+  compose exec -T prometheus wget -qO- \
+    'http://127.0.0.1:9090/api/v1/rules?type=alert' > "$rules_response" \
+    && compose exec -T prometheus wget -qO- \
+    'http://127.0.0.1:9090/api/v1/targets?state=active' > "$targets_response" \
+    && compose exec -T prometheus wget -qO- \
+    "http://127.0.0.1:9090/api/v1/series?match%5B%5D=%7B__name__%3D~%22saydin_activity_log_.*%7Csaydin_process_start_time_seconds%7Chttp_server_request_duration_seconds_count%7Csaydin_market_calendar_coverage_horizon_days%22%7D&start=$series_start&end=$series_end" \
+      > "$series_response"
+}
+attempt=0
+until fetch_monitoring_runtime \
+    && validate_monitoring_runtime >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 60 ] || {
+    validate_monitoring_runtime || true
+    die "deployment_prometheus_runtime_contract_failed" 78
+  }
+  sleep 2
+done
 # The one control-plane session is excluded; any other admin/superuser backend blocks admission.
 backend_count=$(compose exec -T postgres psql -X -A -t -v ON_ERROR_STOP=1 -U saydin_admin -d postgres -c \
   "SELECT count(*) FROM pg_stat_activity a JOIN pg_roles r ON r.oid=a.usesysid WHERE a.pid<>pg_backend_pid() AND (r.rolsuper OR r.rolname='saydin_admin');")

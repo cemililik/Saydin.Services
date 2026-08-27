@@ -3,7 +3,10 @@
 > **Başlangıç:** 2026-08-18  
 > **Branch:** yalnız `development`  
 > **Plan:** [`05-remediation-action-plan.md`](05-remediation-action-plan.md)  
-> **Durum:** devam ediyor; production release kapalı
+> **Durum:** bu belge önceki remediation dalgalarının tarihsel kaydıdır. 2026-08-24 tarihli PR
+> review kapanış durumu ve exact güncel kapılar için
+> [`pr-review/07-remediation-progress.md`](pr-review/07-remediation-progress.md) otoritatiftir;
+> production release dış ortam receipt'leri tamamlanana kadar kapalıdır.
 
 ## Branch ve çalışma disiplini
 
@@ -399,13 +402,13 @@ Kabul kanıtı:
 
 Residual rollout/operasyon:
 
-- Repo henüz resmî kaynaktan snapshot bundle hazırlayan bounded acquisition executable'ı, günlük/yıllık
-  scheduler veya stale-horizon alert deployment artifact'ı sağlamaz. TCMB active horizon bugün
-  2026-08-17'de bittiğinden production deployment bu parçalar kurulup resmi bundle promotion'ı
-  kanıtlanana kadar blokludur; günlük worker takvim uydurmaz.
+- Bounded acquisition executable'ı, idempotent plan materializer, günlük/yıllık systemd schedule,
+  stale/expiring-horizon alert'i ve imzalı review/promotion kapısı artık repoda ve pinli Docker
+  davranış testleriyle doğrulanmıştır. Kalan koşul kod artefaktı değil, gerçek reviewer anahtarıyla
+  yeni resmî bundle acquisition→review→promotion receipt'inin staging ortamında üretilmesidir.
 - Calendar importer capability/ACL ve owner/superuser ayrımı migration 019 ile DB sınırında
-  kurulmuştur. Production calendar job credential mount/scheduler wiring'i ve resmi-source acquisition
-  deployment'ı hâlâ release-blocking'dir; DB kontratının varlığı bu runtime artifact'ların yerine geçmez.
+  kurulmuştur. Production credential mount'u ve gerçek resmî-source promotion receipt'i hâlâ
+  release-blocking dış ortam kabulüdür; runtime artefaktları artık eksik değildir.
 
 ### SUP-001 — Fatal worker görünürlüğü ve process recovery
 
@@ -427,7 +430,8 @@ Raw terminal portföy değeri kullanılır; yuvarlama yalnız response sınırı
 `InflationTerminalMonth` alanları eklendi; cache namespace'i `dca:v2` oldu. Eksik/geçersiz exact CPI
 ayı reel alanları null bırakır ve incomplete sonuç cache'lenmez. Üç cash-flow exact fixture, tek katkı
 Fisher parity, missing CPI ve rounding testleri API unit suite'inde geçmektedir. Bulk exact-CPI EF
-sorgusunun gerçek PostgreSQL testi kapanış residualıdır.
+sorgusu gerçek PostgreSQL üzerinde tek-sorgu projection ve terminal ay kapsamıyla doğrulanmıştır;
+bu başlıkta repo-içi test residualı kalmamıştır.
 
 ### API-06/API-07 — Finansal minimizasyon ve doğru drop telemetrisi
 
@@ -632,30 +636,17 @@ Değişiklik ve kabul kanıtı:
 
 ## Güncel doğrulama tabanı
 
-| Kanıt | Sonuç |
-|---|---|
-| API unit | 545 passed, 0 failed, 0 skipped |
-| PriceIngestion | 145 passed, 0 failed, 0 skipped |
-| CalendarData offline replay/unit | 80 passed, 0 failed, 0 skipped |
-| Required API integration + guard | 57 passed; required minimum 57, failed/skipped/notExecuted forbidden |
-| Ingestion ledger + write fence + CAL importer (gerçek TimescaleDB) | 39 passed, 0 failed, 0 skipped |
-| DatabaseRoleBootstrap / DatabaseSecurity | 76 unit + 7 real-PG passed; 0 failed, 0 skipped |
-| DatabaseMigrator (iki gerçek TimescaleDB) | 124 passed; required minimum 124, skipped/failed/notExecuted forbidden |
-| DataQualityAudit unit | 84 passed, 0 failed, 0 skipped |
-| DataQualityAudit (gerçek TimescaleDB) | 72 passed, 0 failed, 0 skipped |
-| DataRepair | 15 unit + 7 real-PG passed; 0 failed, 0 skipped |
-| Solution Docker Release build | 0 warning, 0 error |
-| Fresh migration | Current image exact 24/24 terminal+checksum; 2 hypertable; control `ready`; 022 SHA `568017c27eb6038a06b48ee00f2f0820bba6cf7b577dd5f283291ac9995e8afd` |
-| Vulnerable NuGet paketleri | 21/21 project lockfile; `NuGetAuditMode=all`, High/Critical fail-closed ve locked restore |
-| Unit coverage baseline | 7 canonical Cobertura; unique weighted line `%71,09`, branch `%56,21`; DataRepair `%62,27/%43,81`; eksik/malformed/alt-eşik/container-path self-test 5/5 |
-| Merged changed-line admission | 7 unit + 5 required gerçek-infrastructure Cobertura exact-cardinality; unique source-line merge; changed executable-line floor `%80`; eksik/bozuk/alt-eşik fail-closed |
-| Production/development assurance | Production manifest 29/29 mutation; backup HBA 8/8; observability 8/8; development Compose 7/7 mutation; iki proje collision-free |
+Bu tarihsel kaydın önceki bölümlerindeki sayaçlar, ilgili dalganın çalıştırıldığı andaki kanıtlardır;
+güncel ratchet olarak yorumlanmamalıdır. 2026-08-27 final ağacının otoritatif tabanı şöyledir:
 
-Data-quality audit çekirdeği ve disposable gerçek-DB kabulü tamamlandı; production-benzeri hedefte audit
-henüz çalıştırılmadı. CAL-001 acquisition/scheduler/alert deployment'ı, gerçek OCI IAM/KMS operator
-onayı ve gerçek production repair plan/key/operator promotion'ı release-blocking kalır. Production
-release bu residual kapılar bitene kadar kapalıdır.
-Güncel CAL/PRV/platform snapshot gate'i: solution Release build 0 warning/error; ingestion unit 145/145,
-CalendarData 80/80, ingestion real-PG 39/39 ve migrator iki-cluster required minimum 124; tüm ilgili TRX'lerde
-failed/skipped/notExecuted sıfırdır. API ve required API integration sayıları tabloda son doğrulanmış
-ayrı lane snapshot'ı olarak tutulur.
+| Kanıt | Güncel sonuç |
+|---|---|
+| Root unit matrisi | 1.236/1.236: API 658, ingestion 182, DQA 97, migrator-unit 78, RoleBootstrap 98, DataRepair 29, CalendarData 94; fail/skip 0 |
+| Gerçek infrastructure | API 66, ingestion 44, DQA 106, DataRepair 32, RoleBootstrap 13, migrator iki-cluster 185; fail/skip/notExecuted 0 |
+| Fresh migration | Development smoke'ta exact `27` migration ve `ready`; 001–022 byte-identical; 023/024/025 trust-root ve function-body pin paritesi |
+| Solution Docker Release build | 0 warning, 0 error |
+| Unit coverage | Weighted line `%78,57`, branch `%66,19`; changed executable lines `%84,03` |
+| Production/development assurance | 68 production, 21 development Compose, 18 observability, 11 private-material, 12 runtime ve 2 volume mutation; backup static 64, HBA 8 |
+
+Tam komut/koşu kapsamı, migration SHA-256 değerleri, açık riskler ve dış release koşulları için
+[`pr-review2/08-remediation-execution.md`](pr-review2/08-remediation-execution.md) esas alınır.

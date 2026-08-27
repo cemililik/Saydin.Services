@@ -132,6 +132,9 @@ public static class CalendarDataGenerator
         var from = ParseDate(calendar.CoverageFrom, "coverage_from_invalid");
         var through = ParseDate(calendar.CoverageThrough, "coverage_through_invalid");
         var sources = manifest.Sources.Where(source => source.CalendarCode == TcmbCode).ToArray();
+        var policy = sources.SingleOrDefault(source => source.Kind == "tcmbPolicyFaq")
+            ?? throw new CalendarDataException("tcmb_policy_source_missing");
+        ValidateTcmbPolicy(store.Read(policy));
         var annual = UniqueDictionary(sources.Where(source => source.Kind == "tcmbAnnualIndex"), source => source.Year!.Value,
             "tcmb_annual_source_duplicate");
         var months = UniqueDictionary(sources.Where(source => source.Kind == "tcmbMonthlyArchive"),
@@ -153,11 +156,15 @@ public static class CalendarDataGenerator
 
         var output = Header();
         var rowCount = 0;
+        DateOnly? latestPublication = null;
         for (var cursor = new DateOnly(from.Year, from.Month, 1); cursor <= through; cursor = cursor.AddMonths(1))
         {
             if (!months.TryGetValue((cursor.Year, cursor.Month), out var source))
                 throw new CalendarDataException("tcmb_month_source_missing", cursor.ToString("yyyy-MM", CultureInfo.InvariantCulture));
             var published = TcmbArchiveParser.ParsePublicationDates(store.Read(source), cursor.Year, cursor.Month);
+            var latestInMonth = published.Where(date => date <= through).DefaultIfEmpty().Max();
+            if (latestInMonth != default && (latestPublication is null || latestInMonth > latestPublication))
+                latestPublication = latestInMonth;
             var monthEnd = new DateOnly(cursor.Year, cursor.Month, DateTime.DaysInMonth(cursor.Year, cursor.Month));
             var start = cursor < from ? from : cursor;
             var end = monthEnd > through ? through : monthEnd;
@@ -169,6 +176,16 @@ public static class CalendarDataGenerator
                     expected ? "official_archive_link" : "official_archive_absence",
                     source.RawSha256);
                 rowCount++;
+            }
+            if (cursor.Year == through.Year && cursor.Month == through.Month)
+            {
+                var weekend = through.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+                if (!weekend && !published.Contains(through)
+                    || weekend && (latestPublication is null
+                        || latestPublication < through.AddDays(-3)))
+                    throw new CalendarDataException(
+                        "tcmb_coverage_beyond_last_publication",
+                        through.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
             }
         }
         return Build(calendar, sources, output, rowCount);
@@ -182,6 +199,9 @@ public static class CalendarDataGenerator
         var from = ParseDate(calendar.CoverageFrom, "coverage_from_invalid");
         var through = ParseDate(calendar.CoverageThrough, "coverage_through_invalid");
         var sources = manifest.Sources.Where(source => source.CalendarCode == BistCode).ToArray();
+        var index = sources.SingleOrDefault(source => source.Kind == "bistHolidayIndex")
+            ?? throw new CalendarDataException("bist_index_source_missing");
+        var indexBytes = store.Read(index);
         var pdfs = UniqueDictionary(sources.Where(source => source.Kind == "bistPayHolidayPdf"), source => source.Year!.Value,
             "bist_pdf_source_duplicate");
         var sessionsByYear = new Dictionary<int, IReadOnlyDictionary<DateOnly, BistHolidaySession>>();
@@ -189,6 +209,7 @@ public static class CalendarDataGenerator
         {
             if (!pdfs.TryGetValue(year, out var source))
                 throw new CalendarDataException("bist_pdf_source_missing", year.ToString(CultureInfo.InvariantCulture));
+            ValidateBistIndexLink(indexBytes, source);
             sessionsByYear[year] = BistPayCalendarParser.Parse(store.Read(source), year);
         }
 
@@ -210,11 +231,76 @@ public static class CalendarDataGenerator
             }
             else
             {
-                AppendRow(output, BistCode, date, true, "full_session", "regular_weekday", source.RawSha256);
+                // This is explicitly an inference from the complement of the official closure
+                // schedule. The reason code must not claim that the PDF directly enumerated an
+                // open session; the evidence hash identifies the exact authority schedule used.
+                AppendRow(output, BistCode, date, true, "full_session",
+                    "inferred_open_from_official_closure_schedule", source.RawSha256);
             }
             rowCount++;
         }
         return Build(calendar, sources, output, rowCount);
+    }
+
+    internal static DateOnly ResolveLatestTcmbPublication(
+        string dataRoot,
+        SourceManifest manifest,
+        DateOnly notAfter)
+    {
+        var store = new SourceSnapshotStore(dataRoot, manifest);
+        foreach (var source in manifest.Sources.Where(source =>
+                     source.CalendarCode == TcmbCode
+                     && source.Kind == "tcmbMonthlyArchive"
+                     && new DateOnly(source.Year!.Value, source.Month!.Value, 1) <= notAfter)
+                 .OrderByDescending(source => source.Year)
+                 .ThenByDescending(source => source.Month))
+        {
+            var latest = TcmbArchiveParser.ParsePublicationDates(
+                    store.Read(source), source.Year!.Value, source.Month!.Value)
+                .Where(date => date <= notAfter)
+                .OrderByDescending(date => date)
+                .FirstOrDefault();
+            if (latest != default) return latest;
+        }
+        throw new CalendarDataException("tcmb_publication_evidence_missing",
+            notAfter.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+    }
+
+    internal static DateOnly ResolveTcmbCoverageThrough(
+        string dataRoot,
+        SourceManifest manifest,
+        DateOnly requestedThrough)
+    {
+        if (requestedThrough.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+        {
+            // The pinned TCMB policy explicitly states that indicative rates are
+            // not determined on weekends. Archive evidence must still be recent;
+            // an arbitrarily old publication cannot justify advancing coverage.
+            var latest = ResolveLatestTcmbPublication(dataRoot, manifest, requestedThrough);
+            if (latest < requestedThrough.AddDays(-3))
+                throw new CalendarDataException(
+                    "tcmb_coverage_beyond_last_publication",
+                    requestedThrough.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+            return requestedThrough;
+        }
+        return ResolveLatestTcmbPublication(dataRoot, manifest, requestedThrough);
+    }
+
+    private static void ValidateTcmbPolicy(byte[] raw)
+    {
+        var text = Encoding.UTF8.GetString(raw);
+        if (!text.Contains("15.30", StringComparison.Ordinal)
+            || !text.Contains("16.00-16.30", StringComparison.Ordinal)
+            || !text.Contains("resmi tatiller, hafta sonları ve yarım gün", StringComparison.OrdinalIgnoreCase))
+            throw new CalendarDataException("tcmb_policy_semantics_missing");
+    }
+
+    private static void ValidateBistIndexLink(byte[] indexRaw, SourceDefinition pdf)
+    {
+        var text = Encoding.UTF8.GetString(indexRaw);
+        var expected = $"pay-piyasasi-{pdf.Year}-yili-tatil-tablosu.pdf";
+        if (!text.Contains(expected, StringComparison.OrdinalIgnoreCase))
+            throw new CalendarDataException("bist_index_pdf_link_missing", expected);
     }
 
     private static NormalizedCalendar Build(

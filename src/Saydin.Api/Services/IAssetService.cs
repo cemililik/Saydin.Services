@@ -23,7 +23,7 @@ public interface IAssetService
     /// Haftasonu veya resmi tatile denk gelen tarihler için kullanılır.
     /// </summary>
     Task<PricePoint> GetNearestPriceAsync(string symbol, DateOnly date, CancellationToken ct);
-    Task<IReadOnlyList<PricePoint>> GetNearestPricesAsync(
+    Task<IReadOnlyList<PricePoint?>> GetNearestPricesAsync(
         string symbol,
         IReadOnlyList<DateOnly> dates,
         CancellationToken ct);

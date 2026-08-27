@@ -1,10 +1,16 @@
 using Saydin.Api.Runtime;
+using System.Diagnostics;
+using System.Net.Mime;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Localization;
+using Saydin.Api.Exceptions;
 
 namespace Saydin.Api.Middleware;
 
 public sealed class ApiPortBoundaryMiddleware(
     ApiRuntimeContract runtime,
-    IHostEnvironment environment) : IMiddleware
+    IHostEnvironment environment,
+    IStringLocalizer<ErrorMessages> localizer) : IMiddleware
 {
     public async Task InvokeAsync(HttpContext context, RequestDelegate next)
     {
@@ -12,6 +18,19 @@ public sealed class ApiPortBoundaryMiddleware(
         if (kind == ApiPortRequestKind.Rejected)
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
+            await context.Response.WriteAsJsonAsync(new ProblemDetails
+            {
+                Type = "https://saydin.app/errors/route-not-found",
+                Title = localizer["RouteNotFound"],
+                Detail = localizer["RouteNotFoundDetail"],
+                Status = StatusCodes.Status404NotFound,
+                Extensions =
+                {
+                    ["code"] = ApiErrorCodes.RouteNotFound,
+                    ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
+                },
+            }, options: null, contentType: MediaTypeNames.Application.ProblemJson,
+                context.RequestAborted);
             return;
         }
         context.Items[ApiPortBoundary.RequestKindItemKey] = kind;
@@ -27,13 +46,21 @@ public sealed class ApiPortBoundaryMiddleware(
         var testServerPublic = port == 0 && !environment.IsProduction();
         var isPublicPort = port == runtime.PublicPort || testServerPublic;
         var isManagementPort = port == runtime.ManagementPort;
-        var path = context.Request.Path;
+        var path = NormalizePath(context.Request.Path.Value);
 
-        if (path == ApiPortBoundary.LivePath)
+        if (string.Equals(path, ApiPortBoundary.LivePath, StringComparison.OrdinalIgnoreCase))
             return isPublicPort ? ApiPortRequestKind.PublicLiveness : ApiPortRequestKind.Rejected;
-        if (path == ApiPortBoundary.ReadyPath || path == ApiPortBoundary.MetricsPath)
+        if (string.Equals(path, ApiPortBoundary.ReadyPath, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(path, ApiPortBoundary.MetricsPath, StringComparison.OrdinalIgnoreCase))
             return isManagementPort ? ApiPortRequestKind.Management : ApiPortRequestKind.Rejected;
         return isPublicPort ? ApiPortRequestKind.PublicProduct : ApiPortRequestKind.Rejected;
+    }
+
+    internal static string NormalizePath(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return "/";
+        var segments = value.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return segments.Length == 0 ? "/" : "/" + string.Join('/', segments);
     }
 }
 

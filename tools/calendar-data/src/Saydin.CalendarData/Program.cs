@@ -4,6 +4,15 @@ using Saydin.DatabaseSecurity;
 
 try
 {
+    if (args is ["materialize-plan", "--base-data-root", var materializeBase,
+        "--schedule", "tcmb", "--output", var materializeOutput])
+    {
+        CalendarPlanMaterializer.MaterializeTcmb(
+            materializeBase, materializeOutput, TimeProvider.System.GetUtcNow());
+        Console.WriteLine($"calendar_plan_materialized={materializeOutput}");
+        return;
+    }
+
     if (args is ["acquire", "--base-data-root", var baseRoot, "--plan", var planPath,
         "--staging-root", var stagingRoot, "--output-name", var outputName])
     {
@@ -53,6 +62,11 @@ try
 catch (CalendarDataException ex)
 {
     Console.Error.WriteLine(ex.Message);
+    Environment.ExitCode = 2;
+}
+catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+{
+    Console.Error.WriteLine($"bundle_unreadable:{ex.GetType().Name}");
     Environment.ExitCode = 2;
 }
 catch (DatabaseSecurityRejectedException ex)

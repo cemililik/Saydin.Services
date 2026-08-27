@@ -24,6 +24,20 @@ done
 
 "$SCRIPT_DIR/validation-self-test.py" "$TMP_DIR/a.json"
 
+if docker compose --project-name saydin_prod_validation_profile --env-file "$ENV_FILE" \
+  --file "$SCRIPT_DIR/compose.production.yml" config --services | grep -Fxq data-repair; then
+  echo "production_validation_failed:data_repair_default_profile" >&2
+  exit 2
+fi
+repair_count=$(docker compose --project-name saydin_prod_validation_profile --env-file "$ENV_FILE" \
+  --file "$SCRIPT_DIR/compose.production.yml" --profile data-repair-operator config --services \
+  | awk '$0 == "data-repair" { count++ } END { print count + 0 }')
+if [[ "$repair_count" != 1 ]]; then
+  echo "production_validation_failed:data_repair_operator_profile" >&2
+  exit 2
+fi
+echo "production_data_repair_profile_passed"
+
 python3 - "$TMP_DIR/a.json" "$TMP_DIR/b.json" <<'PY'
 import json, sys
 first = json.load(open(sys.argv[1], encoding="utf-8"))

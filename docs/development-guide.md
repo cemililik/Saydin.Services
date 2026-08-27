@@ -67,10 +67,16 @@ Sabit `container_name` kullanılmaz; bütün container/volume adları Compose pr
 ### İlk Kurulum (one-shot migrator — otomatik)
 
 Güncel güvenli akış önce one-shot `Saydin.DatabaseRoleBootstrap ensure`, sonra versioned migrator
-login/password-file kullanan `database-migrator`'dır. API, ingestion ve monitoring yalnız migrator
-sıfır exit ile tamamlanırsa başlar. Boş DB 24 migration ile bootstrap edilir; yönetilen DB checksum,
-rol grafiği, ACL ve schema fingerprint kontrolünden geçirilir. Elle `001_initial.sql` çalıştırılmaz.
-Kök Compose role-bootstrap → managed migrator zincirini ve per-purpose file-secret mount'larını taşır:
+login/password-file kullanan `database-migrator`, ardından post-migration role-bootstrap ensure'dır.
+İkinci ensure 022 sonrası backup graph'ını tamamlayıp fiziksel backup kimlik doğrulamasını yapmadan
+API, ingestion ve monitoring başlamaz. Boş DB 27 migration ile bootstrap edilir; yönetilen DB
+checksum, rol grafiği, ACL ve schema fingerprint kontrolünden geçirilir. Elle `001_initial.sql`
+çalıştırılmaz. `database-backup-hba` one-shot'ı project subnet'ini container içinden türetir ve
+yalnız exact backup v1/v2 rollerine SCRAM replication izni verir; backup rolleri SQL
+veritabanlarında açık değildir.
+Kök Compose pre-bootstrap → managed migrator → exact HBA → post-bootstrap zincirini ve per-purpose
+file-secret mount'larını taşır. Required CI aynı akışı benzersiz project/volume'lerle fresh DB'de
+çalıştırır, iki verify-only kontrolünden sonra yalnız kendi test kaynaklarını siler:
 
 ```bash
 docker compose --env-file .env --env-file .env.database-runtime ps --all database-migrator
@@ -222,37 +228,35 @@ kalır (`LogWarning` + `country`/`city` null) — **istek başarısız olmaz**. 
 
 ## 5. Testleri Çalıştırma
 
-Tekrarlanabilir Docker-first yol **`tests` compose profili**dir (pinned SDK imajı + repo mount +
-compose ağı). Host SDK kullanılsa bile `global.json`, locked restore ve aynı test projeleri
-korunmalıdır; `saydin-api` runtime imajı SDK/test projeleri içermez.
+Tekrarlanabilir yerel unit yolu **`tests` compose profili**dir (pinned SDK imajı + repo mount).
+Host SDK kullanılsa bile `global.json`, locked restore ve aynı test projeleri korunmalıdır;
+`saydin-api` runtime imajı SDK/test projeleri içermez. Root test servisi purpose-specific DB
+credential taşımadığından solution/integration komutlarını fail-closed reddeder.
 
 ```bash
-# Lokal optional mod: tüm solution. Integration için postgres/redis up olmalı;
-# infra yoksa yalnız integration testleri Skipped olabilir.
-docker compose --env-file .env --env-file .env.database-runtime up -d postgres database-migrator redis
+# Yedi unit projesi: locked restore + Release build/test + coverage ratchet
 docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests
 
 # Yalnız unit testler (DB gerekmez)
-docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.Api.Tests
-docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.PriceIngestion.Tests
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.Api.Tests/Saydin.Api.Tests.csproj
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.PriceIngestion.Tests/Saydin.PriceIngestion.Tests.csproj
 
-# Gerçek PostgreSQL/Redis entegrasyon testleri (F2.6-21)
-docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests test tests/Saydin.Api.IntegrationTests
-
-# Sadece build doğrulaması (compose'suz, SDK imajı + mount)
-docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
+# Sadece build doğrulaması (compose'suz, exact SDK digest'i + mount)
+docker run --rm -v "$PWD":/src -w /src \
+  mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c \
   dotnet build Saydin.Services.sln -c Debug
 ```
 
-> **Integration testleri (F2.6-21 / RP-02):** Yukarıdaki geliştirici akışı **optional**
-> moddur; DB/Redis erişilemezse `SkippableFact` ile atlama kolaylığı korunur. Required CI job'ı
-> ise `.github/compose.integration.yml` ile host portu açmadan UUID-bazlı disposable
+> **Integration testleri (F2.6-21 / RP-02):** Gerçek integration kapısı root development
+> Compose üzerinden çalıştırılmaz. Required CI job'ı `.github/compose.integration.yml` ile host
+> portu açmadan UUID-bazlı disposable
 > iki ayrı TimescaleDB + Redis kurar, `SAYDIN_INTEGRATION_REQUIRED=true` kullanır ve
 > infra/guard hatasında fail-fast olur. CI ayrıca role-bootstrap + migrator `--verify-only`, fresh
-> `24 migration + 2 hypertable + 24 checksum + 24 terminal + ready` kapısını; API integration
-> TRX'inde en az 57, ingestion ledger TRX'inde 39, role-bootstrap TRX'lerinde 76+7, migrator
-> TRX'inde 124 ve DQA TRX'lerinde 82+72 executed test ile sıfır failed/skipped/notExecuted şartını
-> doğrular. Kanonik executable adımlar
+> `27 migration + 2 hypertable + 27 checksum + 27 terminal + ready` kapısını; API integration
+> TRX'inde en az 66, ingestion ledger TRX'inde 44, calendar-data TRX'inde 94,
+> role-bootstrap TRX'lerinde 98+13, migrator TRX'inde 185, DQA TRX'lerinde 97+106 ve
+> DataRepair TRX'inde 32 executed test ile sıfır failed/skipped/notExecuted şartını doğrular.
+> Kanonik executable adımlar
 > `.github/workflows/ci.yml` içindeki `integration-test` job'ındadır.
 
 ## 6. Sık Kullanılan Komutlar

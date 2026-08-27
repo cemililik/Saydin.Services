@@ -8,7 +8,9 @@ import re
 import sys
 from pathlib import Path
 
-NAMES = {"api", "ingestion", "control", "calendar", "dqa", "backup", "caddy"}
+NAMES = {
+    "api", "ingestion", "control", "calendar", "data_repair", "dqa", "backup", "caddy",
+}
 
 
 def digest(path: Path) -> str:

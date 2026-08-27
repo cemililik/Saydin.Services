@@ -55,7 +55,7 @@ internal static class FinalObservationAuthority
         && !string.IsNullOrEmpty(point.PriceKind)
         && point.ObservationSha256 is { Length: ObservationAuthorityLimits.Sha256Bytes }
         && point.AuthorityContractVersion > 0
-        && point.SourceRaw is not null
+        && (point.HasSourceRaw || point.SourceRaw is not null)
         && IsSupportedPricePair(point.ProviderSource, point.PriceKind);
 
     internal static ObservationAuthorityValue ToValue(PricePoint point)

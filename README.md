@@ -45,9 +45,14 @@ ingestion, calendar, audit, exporter ve migrator yalnız kendi dosyasını gör�
 Ingestion default stack'e dahil değildir; dış provider'a istemsiz çağrı yapılmaması için yalnız
 `ingestion` profiliyle ve `.env` içinde en az bir `WORKER_*_ENABLED=true` seçiliyken başlatılır.
 
-022-ready deployment Compose sözleşmesi önce PostgreSQL bağlantı health'ini, ardından one-shot
-`database-migrator` başarısını bekler; API/ingestion/DB monitoring yalnız doğrulanmış şemayla başlar.
-Fresh DB'de önce role-bootstrap global graph'ı kurar, managed migrator 24 migration'ı uygular.
+022-ready development Compose sözleşmesi PostgreSQL bağlantı health'ini, pre-bootstrap,
+one-shot `database-migrator`, exact HBA ve post-migration bootstrap kapılarını bekler;
+API/ingestion/DB monitoring yalnız doğrulanmış şema ve rol grafiğiyle başlar.
+Fresh DB'de ilk role-bootstrap migrator graph'ını kurar, managed migrator 27 migration'ı uygular;
+post-migration role-bootstrap ise 022 sonrası backup graph'ını tamamlayıp fiziksel bağlantıyı
+doğrulamadan runtime servislerini başlatmaz. Development HBA one-shot'ı yalnız türetilmiş backup
+v1/v2 rolleri ve yalnız project subnet'i için SCRAM replication izni kurar; aynı rolleri bütün SQL
+veritabanlarından reddeder.
 Complete-014/managed-through-018 legacy DB yalnız açık privilege-cutover yoluyla alınır;
 checksum/rol/ACL/şema drift'i fail-closed'dur. İşletim, mevcut root-Compose sınırı ve recovery akışı
 için bkz. [development-guide.md](docs/development-guide.md).

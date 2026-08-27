@@ -25,4 +25,13 @@ public sealed class IngestionTestTargetGuardTests
         var act = () => IngestionTestTargetGuard.Validate(connection, "true", RunId, "postgres");
         act.Should().NotThrow();
     }
+
+    [Fact]
+    public void RuntimeDatasourceCoordinates_AreGuardedIndependentlyFromAdminSecret()
+    {
+        var act = () => IngestionTestTargetGuard.ValidateRuntime(
+            "prod-db", $"saydin_ingestion_test_{RunId}", "true", RunId, "postgres");
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("*host*");
+    }
 }

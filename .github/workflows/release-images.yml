@@ -34,7 +34,9 @@ jobs:
   policy:
     name: Validate release control plane
     runs-on: [self-hosted, linux, x64, saydin-release]
-    permissions: {contents: read}
+    permissions:
+      actions: read
+      contents: read
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -43,7 +45,9 @@ jobs:
           persist-credentials: false
       - name: Fail-closed static and mutation gates
         shell: bash
-        env: {RELEASE_TAG: "${{ inputs.release_tag }}"}
+        env:
+          RELEASE_TAG: "${{ inputs.release_tag }}"
+          SAYDIN_REQUIRE_DOCKER_SMOKES: "1"
         run: |
           set -euo pipefail
           test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/release-images.yml@refs/heads/main"
@@ -52,6 +56,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git rev-list -n1 "$RELEASE_TAG")"
           test -z "$(git status --porcelain)"
           python3 infrastructure/release/validate-release.py
+          python3 .github/scripts/test-verify-release-ci-admission.py
           python3 infrastructure/release/tests/release-manifest-self-test.py
           python3 infrastructure/backup/tests/backup-static-self-test.py
           infrastructure/deployment/validate-production.sh \
@@ -79,6 +84,26 @@ jobs:
             --entrypoint promtool \
             prom/prometheus@sha256:565ee86501224ebbb98fc10b332fa54440b100469924003359edf49cbce374bd \
             test rules /etc/prometheus/tests/rules.test.yml
+      - name: Exact release commit için required CI kabulünü doğrula
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit_sha=$(git rev-parse HEAD)
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$commit_sha&status=success&per_page=100" \
+            > ci-runs.json
+          ci_run_id=$(python3 .github/scripts/verify-release-ci-admission.py select \
+            --runs ci-runs.json --commit-sha "$commit_sha" --branch main)
+          [[ "$ci_run_id" =~ ^[1-9][0-9]*$ ]]
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs?per_page=100" \
+            > ci-jobs.json
+          python3 .github/scripts/verify-release-ci-admission.py verify \
+            --jobs ci-jobs.json --commit-sha "$commit_sha" --run-id "$ci_run_id"
 
   build:
     name: Build and attest ${{ matrix.name }}
@@ -98,6 +123,7 @@ jobs:
           - {name: ingestion, image: saydin-price-ingestion, context: ., dockerfile: src/Saydin.PriceIngestion/Dockerfile}
           - {name: control, image: saydin-database-control, context: ., dockerfile: infrastructure/postgres/Dockerfile.migrator}
           - {name: calendar, image: saydin-calendar, context: ., dockerfile: tools/calendar-data/Dockerfile}
+          - {name: data_repair, image: saydin-data-repair, context: ., dockerfile: src/Saydin.DataRepair/Dockerfile}
           - {name: dqa, image: saydin-data-quality-audit, context: ., dockerfile: infrastructure/release/Dockerfile.dqa}
           - {name: backup, image: saydin-database-backup, context: infrastructure/backup, dockerfile: infrastructure/backup/Dockerfile}
           - {name: caddy, image: saydin-caddy, context: ., dockerfile: infrastructure/deployment/Dockerfile.caddy}

@@ -1,18 +1,30 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Saydin.DatabaseSecurity;
 
 namespace Saydin.DataRepair;
+
+internal enum ReceiptStoreCheckpoint
+{
+    BeforePromoteRename,
+    AfterPromoteRenameBeforeRootSync,
+    RootDirectorySynced,
+}
 
 internal sealed class ReceiptStore
 {
     private const string ReceiptFile = "receipt.json";
     private const string SignatureFile = "receipt.sig";
     private readonly string root;
+    private readonly Action<ReceiptStoreCheckpoint> checkpoint;
 
-    public ReceiptStore(string root)
+    public ReceiptStore(
+        string root,
+        Action<ReceiptStoreCheckpoint>? checkpoint = null)
     {
         this.root = ValidateRoot(root);
+        this.checkpoint = checkpoint ?? (_ => { });
     }
 
     public string FinalPath(string nonceSha256, string mode) =>
@@ -64,8 +76,12 @@ internal sealed class ReceiptStore
         string nonceSha256,
         string mode,
         ReadOnlyMemory<byte> publicSpki,
-        CancellationToken cancellationToken) =>
-        await VerifyAsync(FinalPath(nonceSha256, mode), publicSpki, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        SynchronizeRoot();
+        checkpoint(ReceiptStoreCheckpoint.RootDirectorySynced);
+        return await VerifyAsync(FinalPath(nonceSha256, mode), publicSpki, cancellationToken);
+    }
 
     public async Task<VerifiedRepairReceipt> ReadPendingAsync(
         string nonceSha256,
@@ -82,7 +98,11 @@ internal sealed class ReceiptStore
         ValidateReceiptInventory(pending, requireComplete: true, CancellationToken.None);
         if (Directory.Exists(final) || File.Exists(final))
             throw Rejected("receipt_final_exists");
+        checkpoint(ReceiptStoreCheckpoint.BeforePromoteRename);
         Directory.Move(pending, final);
+        checkpoint(ReceiptStoreCheckpoint.AfterPromoteRenameBeforeRootSync);
+        SynchronizeRoot();
+        checkpoint(ReceiptStoreCheckpoint.RootDirectorySynced);
     }
 
     public void DeletePending(string nonceSha256, string mode)
@@ -137,7 +157,7 @@ internal sealed class ReceiptStore
 
     private static void ValidateReceipt(RepairReceipt receipt, string publicKeyId)
     {
-        if (receipt.SchemaVersion != 1 ||
+        if (receipt.SchemaVersion is not (1 or 2) ||
             receipt.SignatureAlgorithm != "ECDSA-SHA256-RFC3279-DER" ||
             receipt.SigningProvider is not ("local-pem" or "oci-kms-instance-principal") ||
             receipt.Mode is not ("apply" or "rollback") ||
@@ -153,6 +173,7 @@ internal sealed class ReceiptStore
                 !RepairCryptography.IsSha256(receipt.PriorReceiptSha256) ||
             receipt.DatabaseTransactionId <= 0 || receipt.CreatedAtUtc.Offset != TimeSpan.Zero ||
             receipt.Operations is null || receipt.Operations.Count is < 1 or > 1_000 ||
+            receipt.Operations.Any(operation => operation is null) ||
             !receipt.Operations.Select(operation => operation.Index).Order()
                 .SequenceEqual(Enumerable.Range(0, receipt.Operations.Count)) ||
             receipt.Operations.Any(operation => operation.Index < 0 ||
@@ -172,8 +193,9 @@ internal sealed class ReceiptStore
             throw Rejected("receipt_signing_identity_invalid");
     }
 
-    private static bool IsKmsIdentity(string identity)
+    private static bool IsKmsIdentity(string? identity)
     {
+        if (string.IsNullOrEmpty(identity)) return false;
         var values = identity.Split(':', StringSplitOptions.None);
         return values.Length == 2 && IsKmsOcid(values[0], "ocid1.key.") &&
                IsKmsOcid(values[1], "ocid1.keyversion.");
@@ -325,6 +347,51 @@ internal sealed class ReceiptStore
             throw Rejected("receipt_file_changed");
         return bytes;
     }
+
+    private static void FlushDirectoryToDisk(string directory)
+    {
+        // O_RDONLY is zero on every Linux ABI. Architecture-specific O_DIRECTORY
+        // values are deliberately avoided; ValidateRoot already pins this path to a
+        // non-link directory and fsync(2) on the resulting directory fd makes the
+        // pending-to-final rename durable.
+        var descriptor = open(directory, 0, 0);
+        if (descriptor < 0)
+            throw NativeIoException("open receipt root");
+        try
+        {
+            if (fsync(descriptor) != 0)
+                throw NativeIoException("synchronize receipt root");
+        }
+        finally
+        {
+            _ = close(descriptor);
+        }
+    }
+
+    private void SynchronizeRoot()
+    {
+        try
+        {
+            FlushDirectoryToDisk(root);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw Rejected("receipt_directory_sync_failed");
+        }
+    }
+
+    private static IOException NativeIoException(string operation) =>
+        new($"Unable to {operation}.",
+            new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError()));
+
+    [DllImport("libc", SetLastError = true, ExactSpelling = true)]
+    private static extern int open(string path, int flags, uint mode);
+
+    [DllImport("libc", SetLastError = true, ExactSpelling = true)]
+    private static extern int fsync(int descriptor);
+
+    [DllImport("libc", SetLastError = true, ExactSpelling = true)]
+    private static extern int close(int descriptor);
 
     private static RepairRejectedException Rejected(string code) =>
         new(code, RepairExitCodes.ReceiptFailure);

@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using Saydin.Api.Services;
 using Saydin.Shared.Constants;
@@ -108,7 +107,7 @@ public sealed class ActivityLogBuilder
         if (_data is not null)
         {
             var element = JsonSerializer.SerializeToElement(_data);
-            var byteSize = EstimateUtf8Size(element);
+            var byteSize = JsonbStorageSize.UpperBound(element);
             if (byteSize > ActivityLogLimits.DataMaxBytes)
             {
                 var actionTag = ActivityActions.Lookup.Contains(_action!) ? _action! : UnknownFallback;
@@ -116,7 +115,11 @@ public sealed class ActivityLogBuilder
                     new KeyValuePair<string, object?>("action", actionTag));
                 // Boş `{"_truncated":true}` placeholder ile yine satır yazılır,
                 // observability'de "data was dropped" sinyali kalır.
-                serializedData = JsonSerializer.SerializeToElement(new { _truncated = true, originalBytes = byteSize });
+                serializedData = JsonSerializer.SerializeToElement(new
+                {
+                    _truncated = true,
+                    estimatedJsonbBytes = byteSize,
+                });
             }
             else
             {
@@ -168,19 +171,6 @@ public sealed class ActivityLogBuilder
         if (char.IsHighSurrogate(value[cut - 1]))
             cut--;
         return value[..cut];
-    }
-
-    /// <summary>
-    /// LOGR-028: JsonElement'in UTF-8 serileştirme boyutu yaklaşık tahmini.
-    /// `pg_column_size` ile birebir aynı değil ama %95+ doğru — pre-validation
-    /// için makul. Tam ölçüm için JsonSerializer.SerializeToUtf8Bytes kullanılır
-    /// (allocation) — yaklaşım yeterli.
-    /// </summary>
-    private static int EstimateUtf8Size(JsonElement element)
-    {
-        // RawText kullan: JSON binary olarak kompakt değil ama overhead %5 civarında.
-        var text = element.GetRawText();
-        return Encoding.UTF8.GetByteCount(text);
     }
 
     /// <summary>

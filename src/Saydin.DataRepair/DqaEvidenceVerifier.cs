@@ -15,7 +15,7 @@ internal static class DqaEvidenceVerifier
         string directory,
         string publicKeyFile,
         RepairEvidenceBinding expected,
-        string targetEnvironment,
+        VerifiedPhysicalRepairTarget target,
         CancellationToken cancellationToken)
     {
         try
@@ -39,7 +39,7 @@ internal static class DqaEvidenceVerifier
             var manifest = JsonSerializer.Deserialize(
                     canonical, RepairJsonContext.Default.DqaEvidenceManifest)
                 ?? throw Rejected("evidence_manifest_invalid");
-            ValidateManifest(manifest, publicKeyId, expected, targetEnvironment);
+            ValidateManifest(manifest, publicKeyId, expected, target.IsProduction);
 
             var manifestHash = Encoding.ASCII.GetString(await ReadBoundedAsync(
                 Path.Combine(root, "manifest.sha256"), 128, cancellationToken)).TrimEnd('\n');
@@ -89,12 +89,12 @@ internal static class DqaEvidenceVerifier
         DqaEvidenceManifest manifest,
         string publicKeyId,
         RepairEvidenceBinding expected,
-        string targetEnvironment)
+        bool isProduction)
     {
         if (manifest.SchemaVersion != 2 ||
             manifest.SignatureAlgorithm != "ECDSA-SHA256-RFC3279-DER" ||
             manifest.SigningProvider is not ("local-pem" or "oci-kms-instance-principal") ||
-            targetEnvironment == "production" &&
+            isProduction &&
                 manifest.SigningProvider != "oci-kms-instance-principal" ||
             !IsSigningIdentity(manifest) ||
             !RepairCryptography.IsSha256(manifest.KeyId) ||
@@ -112,6 +112,9 @@ internal static class DqaEvidenceVerifier
 
     private static bool IsSigningIdentity(DqaEvidenceManifest manifest)
     {
+        if (string.IsNullOrEmpty(manifest.SigningProvider) ||
+            string.IsNullOrEmpty(manifest.SigningKeyIdentity))
+            return false;
         if (manifest.SigningProvider == "local-pem")
             return manifest.SigningKeyIdentity == $"local-pem:{manifest.KeyId}";
         var identities = manifest.SigningKeyIdentity.Split(':', StringSplitOptions.None);

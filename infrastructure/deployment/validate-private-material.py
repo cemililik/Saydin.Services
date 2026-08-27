@@ -10,6 +10,7 @@ import re
 import stat
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 EXPECTED: dict[str, tuple[int, dict[str, str]]] = {
@@ -18,14 +19,15 @@ EXPECTED: dict[str, tuple[int, dict[str, str]]] = {
     }),
     "redis": (999, {"redis.conf": "redis"}),
     "bootstrap": (1001, {
-        "admin-connection": "bootstrap-admin", "migrator-v1": "scalar", "api-v1": "scalar",
-        "ingestion-v1": "scalar", "calendar_importer-v1": "scalar",
-        "exporter-v1": "scalar", "audit-v1": "scalar", "backup-v1": "scalar",
+        "admin-connection": "bootstrap-admin", "migrator-current": "scalar",
+        "api-current": "scalar", "ingestion-current": "scalar",
+        "calendar_importer-current": "scalar", "exporter-current": "scalar",
+        "audit-current": "scalar", "backup-v1": "scalar",
     }),
     "migrator": (1001, {"password": "scalar"}),
     "api": (1001, {
         "password": "scalar", "installation-keyring.json": "json",
-        "security-limiter-hmac": "scalar",
+        "security-limiter-hmac": "scalar", "activity-principal-hmac": "binary-32",
     }),
     "api-config": (1001, {"appsettings.Production.json": "api-config"}),
     "ingestion": (1001, {"password": "scalar"}),
@@ -36,6 +38,10 @@ EXPECTED: dict[str, tuple[int, dict[str, str]]] = {
     "alertmanager": (65534, {"alertmanager.yml": "alertmanager"}),
     "audit": (1001, {
         "password": "scalar", "evidence-public.pem": "public-pem", "evidence-hmac": "scalar",
+        "production-target": "binary-32",
+    }),
+    "data-repair": (1001, {
+        "ingestion-current": "scalar", "audit-current": "scalar",
     }),
     "backup": (1001, {
         "password": "scalar", "repository-password": "scalar",
@@ -58,7 +64,149 @@ def read_bounded(path: Path, limit: int = 1_048_576) -> bytes:
     return value
 
 
+def _section_blocks(lines: list[str], section: str, item_indent: int) -> list[list[str]]:
+    try:
+        start = lines.index(section + ":") + 1
+    except ValueError as error:
+        raise ValueError("yaml_section_missing") from error
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    prefix = " " * item_indent + "- "
+    for line in lines[start:]:
+        if line and not line.startswith(" "):
+            break
+        if line.startswith(prefix):
+            if current:
+                blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _receiver_blocks(lines: list[str]) -> dict[str, list[str]]:
+    receivers: dict[str, list[str]] = {}
+    for block in _section_blocks(lines, "receivers", 2):
+        match = re.fullmatch(r"  - name:\s*([a-z0-9-]+)\s*", block[0])
+        if match is None or match.group(1) in receivers:
+            raise ValueError("alertmanager_receiver_shape")
+        receivers[match.group(1)] = block
+    return receivers
+
+
+def _receiver_webhooks(block: list[str]) -> list[tuple[str, bool]]:
+    try:
+        start = block.index("    webhook_configs:") + 1
+    except ValueError as error:
+        raise ValueError("alertmanager_webhook_missing") from error
+    webhooks: list[tuple[str, bool]] = []
+    current: list[str] = []
+    for line in block[start:]:
+        if line.startswith("      - "):
+            if current:
+                webhooks.append(_parse_webhook(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        webhooks.append(_parse_webhook(current))
+    if not webhooks:
+        raise ValueError("alertmanager_webhook_missing")
+    return webhooks
+
+
+def _parse_webhook(lines: list[str]) -> tuple[str, bool]:
+    url_match = re.fullmatch(r"      - url:\s*(\S+)\s*", lines[0])
+    if url_match is None:
+        raise ValueError("alertmanager_webhook_shape")
+    send_resolved = any(
+        re.fullmatch(r"        send_resolved:\s*true\s*", line) is not None
+        for line in lines[1:]
+    )
+    return url_match.group(1), send_resolved
+
+
+def _duration_seconds(value: str) -> float:
+    match = re.fullmatch(r"([1-9][0-9]*)(ms|s|m|h)", value)
+    if match is None:
+        raise ValueError("alertmanager_duration_shape")
+    scale = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}[match.group(2)]
+    return int(match.group(1)) * scale
+
+
+def validate_alertmanager(text: str) -> None:
+    if "\t" in text:
+        raise ValueError("alertmanager_tab_indentation")
+    lines = [line.rstrip() for line in text.splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    try:
+        route_start = lines.index("route:")
+        routes_start = lines.index("  routes:", route_start + 1)
+    except ValueError as error:
+        raise ValueError("alertmanager_route_shape") from error
+    route_lines = lines[routes_start:]
+    route_blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in route_lines[1:]:
+        if line and not line.startswith(" "):
+            break
+        if line.startswith("    - "):
+            if current:
+                route_blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        route_blocks.append(current)
+    watchdog_routes = [
+        block for block in route_blocks
+        if any('severity="watchdog"' in line for line in block)
+    ]
+    if len(watchdog_routes) != 1:
+        raise ValueError("alertmanager_watchdog_route")
+    watchdog_route = watchdog_routes[0]
+    receiver = next((match.group(1) for line in watchdog_route
+                     if (match := re.fullmatch(
+                         r"      receiver:\s*([a-z0-9-]+)\s*", line))), None)
+    repeat = next((match.group(1) for line in watchdog_route
+                   if (match := re.fullmatch(
+                       r"      repeat_interval:\s*(\S+)\s*", line))), None)
+    if receiver != "external-watchdog" or repeat is None or _duration_seconds(repeat) > 60:
+        raise ValueError("alertmanager_watchdog_route")
+
+    receivers = _receiver_blocks(lines)
+    required_receivers = {"operator-critical", "operator-warning", "external-watchdog"}
+    if not required_receivers.issubset(receivers):
+        raise ValueError("alertmanager_receiver_shape")
+    receiver_webhooks = {
+        name: _receiver_webhooks(receivers[name]) for name in required_receivers
+    }
+    watchdog_webhooks = receiver_webhooks["external-watchdog"]
+    if not any(send_resolved for _, send_resolved in watchdog_webhooks):
+        raise ValueError("alertmanager_watchdog_send_resolved")
+    all_urls = [url for webhooks in receiver_webhooks.values() for url, _ in webhooks]
+    parsed = [urlsplit(url) for url in all_urls]
+    if any(value.scheme != "https" or not value.hostname for value in parsed):
+        raise ValueError("alertmanager_webhook_url")
+    watchdog_hosts = {
+        urlsplit(url).hostname for url, _ in watchdog_webhooks
+    }
+    operator_hosts = {
+        urlsplit(url).hostname
+        for name in ("operator-critical", "operator-warning")
+        for url, _ in receiver_webhooks[name]
+    }
+    if watchdog_hosts & operator_hosts:
+        raise ValueError("alertmanager_watchdog_host_not_independent")
+
+
 def validate_content(kind: str, content: bytes) -> None:
+    if kind == "binary-32":
+        if len(content) != 32:
+            raise ValueError("binary_secret_shape")
+        return
     text = content.decode("utf-8")
     if PLACEHOLDER.search(text) or "\x00" in text:
         raise ValueError("placeholder_or_binary")
@@ -129,8 +277,45 @@ def validate_content(kind: str, content: bytes) -> None:
         if not text.startswith("-----BEGIN CERTIFICATE-----\n") or "PRIVATE KEY" in text:
             raise ValueError("pem_shape")
     elif kind == "alertmanager":
-        if "CHANGE_ME" in text or "example.invalid" in text:
-            raise ValueError("alertmanager_shape")
+        validate_alertmanager(text)
+
+
+def validate_material(root: Path, expected_uid: int,
+                      expected_files: dict[str, str]) -> str | None:
+    try:
+        if not root.is_absolute():
+            return "directory_not_absolute"
+        unresolved = root
+        root_stat = os.lstat(unresolved)
+        if stat.S_ISLNK(root_stat.st_mode):
+            return "directory_type"
+        for parent in unresolved.parents:
+            if parent == parent.parent:
+                break
+            if parent.exists() and stat.S_ISLNK(os.lstat(parent).st_mode):
+                return "ancestor_symlink"
+        root = unresolved.resolve(strict=True)
+        root_stat = os.lstat(root)
+        if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+            return "directory_type"
+        if root_stat.st_uid != expected_uid or stat.S_IMODE(root_stat.st_mode) != 0o700:
+            return "directory_owner_or_mode"
+        names = {item.name for item in root.iterdir()}
+        if names != set(expected_files):
+            return "file_set"
+        for name, kind in expected_files.items():
+            path = root / name
+            value_stat = os.lstat(path)
+            if not stat.S_ISREG(value_stat.st_mode) or stat.S_ISLNK(value_stat.st_mode):
+                return "file_type"
+            if value_stat.st_nlink != 1 or value_stat.st_uid != expected_uid:
+                return "file_owner_or_link"
+            if stat.S_IMODE(value_stat.st_mode) not in {0o400, 0o600}:
+                return "file_mode"
+            validate_content(kind, read_bounded(path))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return "content_or_io"
+    return None
 
 
 def main() -> int:
@@ -139,39 +324,9 @@ def main() -> int:
     parser.add_argument("root", type=Path)
     args = parser.parse_args()
     expected_uid, expected_files = EXPECTED[args.purpose]
-    try:
-        if not args.root.is_absolute():
-            return fail("directory_not_absolute")
-        unresolved = args.root
-        root_stat = os.lstat(unresolved)
-        if stat.S_ISLNK(root_stat.st_mode):
-            return fail("directory_type")
-        for parent in unresolved.parents:
-            if parent == parent.parent:
-                break
-            if parent.exists() and stat.S_ISLNK(os.lstat(parent).st_mode):
-                return fail("ancestor_symlink")
-        root = unresolved.resolve(strict=True)
-        root_stat = os.lstat(root)
-        if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
-            return fail("directory_type")
-        if root_stat.st_uid != expected_uid or stat.S_IMODE(root_stat.st_mode) != 0o700:
-            return fail("directory_owner_or_mode")
-        names = {item.name for item in root.iterdir()}
-        if names != set(expected_files):
-            return fail("file_set")
-        for name, kind in expected_files.items():
-            path = root / name
-            value_stat = os.lstat(path)
-            if not stat.S_ISREG(value_stat.st_mode) or stat.S_ISLNK(value_stat.st_mode):
-                return fail("file_type")
-            if value_stat.st_nlink != 1 or value_stat.st_uid != expected_uid:
-                return fail("file_owner_or_link")
-            if stat.S_IMODE(value_stat.st_mode) not in {0o400, 0o600}:
-                return fail("file_mode")
-            validate_content(kind, read_bounded(path))
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-        return fail("content_or_io")
+    error = validate_material(args.root, expected_uid, expected_files)
+    if error:
+        return fail(error)
     print(f"private_material_accepted:{args.purpose}")
     return 0
 

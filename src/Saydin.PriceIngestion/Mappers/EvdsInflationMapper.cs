@@ -27,9 +27,13 @@ public static class EvdsInflationMapper
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new ProviderContractException("contract_value_kind_invalid");
 
         if (!root.TryGetProperty("items", out var items))
             return [];
+        if (items.ValueKind != JsonValueKind.Array)
+            throw new ProviderContractException("contract_value_kind_invalid");
 
         var rates = new List<InflationRate>();
         var now   = DateTimeOffset.UtcNow;
@@ -37,20 +41,25 @@ public static class EvdsInflationMapper
 
         foreach (var item in items.EnumerateArray())
         {
+            if (item.ValueKind != JsonValueKind.Object)
+                throw new ProviderContractException("contract_value_kind_invalid");
             if (!item.TryGetProperty("Tarih", out var dateEl))
                 continue;
 
-            if (!TryParseDate(dateEl.GetString(), out var periodDate))
+            if (!TryParseDate(ProviderValueParser.ReadString(dateEl), out var periodDate))
                 continue;
 
             if (!item.TryGetProperty(FieldName, out var valueEl))
                 continue;
 
-            var valueStr = valueEl.GetString();
-            if (string.IsNullOrWhiteSpace(valueStr) || valueStr == "ND")
-                continue;
+            if (valueEl.ValueKind == JsonValueKind.String)
+            {
+                var valueText = ProviderValueParser.ReadString(valueEl);
+                if (string.IsNullOrWhiteSpace(valueText) || valueText == "ND")
+                    continue;
+            }
 
-            if (!decimal.TryParse(valueStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var indexValue))
+            if (!ProviderValueParser.TryReadDecimal(valueEl, out var indexValue))
                 continue;
             if (indexValue <= 0)
                 throw new ProviderContractException("contract_index_value_invalid");

@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using FluentAssertions;
+using Oci.KeymanagementService.Models;
+using Oci.KeymanagementService.Requests;
 
 namespace Saydin.DataQualityAudit.Tests;
 
@@ -192,6 +194,46 @@ public sealed class EvidenceSigningTests
     }
 
     [Fact]
+    public async Task OciSdkClient_BuildsPinnedDigestRequest_AndForwardsCallerCancellation()
+    {
+        var digest = Enumerable.Range(0, 32).Select(index => (byte)index).ToArray();
+        using var cancellation = new CancellationTokenSource();
+        var transport = new RecordingSdkTransport();
+        using var client = new OciSdkKmsSigningClient(transport);
+
+        var response = await client.SignDigestAsync(
+            KeyId, KeyVersionId, digest, cancellation.Token);
+
+        response.KeyId.Should().Be(KeyId);
+        transport.Request.Should().NotBeNull();
+        transport.Request!.SignDataDetails.KeyId.Should().Be(KeyId);
+        transport.Request.SignDataDetails.KeyVersionId.Should().Be(KeyVersionId);
+        transport.Request.SignDataDetails.Message.Should().Be(Convert.ToBase64String(digest));
+        transport.Request.SignDataDetails.MessageType.Should().Be(SignDataDetails.MessageTypeEnum.Digest);
+        transport.Request.SignDataDetails.SigningAlgorithm.Should()
+            .Be(SignDataDetails.SigningAlgorithmEnum.EcdsaSha256);
+        transport.Request.SignDataDetails.LoggingContext.Should()
+            .Contain("component", "saydin-data-quality-audit");
+        transport.CancellationToken.Should().Be(cancellation.Token);
+    }
+
+    [Fact]
+    public async Task OciKmsSigner_PreservesCallerCancellationDistinctly()
+    {
+        using var files = new TestFiles();
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+        var client = new DelegateFakeClient((_, _, _, token) =>
+            Task.FromCanceled<OciKmsSignatureResponse>(token));
+        await using var signer = new OciKmsEvidenceSigner(Options(files), client);
+
+        var action = () => signer.SignAsync("manifest"u8.ToArray(), cancellation.Token);
+
+        var exception = (await action.Should().ThrowAsync<OperationCanceledException>()).Which;
+        exception.CancellationToken.Should().Be(cancellation.Token);
+    }
+
+    [Fact]
     public async Task KmsFailure_PublishesNeitherFinalNorStagingBundle()
     {
         using var files = new TestFiles();
@@ -224,14 +266,43 @@ public sealed class EvidenceSigningTests
             EvidencePrivateKeyFile = "/must/not/be/read/private.pem",
             EvidenceSigner = new LocalPemSignerConfiguration("/must/not/be/read/private.pem"),
         };
+        var input = Input(files, "production");
+        scan = scan with
+        {
+            ProductionTargetAuthorityFile = files.WriteProductionTargetAuthority(input.Manifest.Target),
+        };
 
         var action = () => EvidenceSignerFactory.Create(
-            scan, Input(files, "production"), _ => null);
+            scan, input, _ => null);
 
         action.Should().Throw<AuditRejectedException>().Which
             .Should().Match<AuditRejectedException>(exception =>
                 exception.Code == "production_signer_mode_rejected" &&
                 exception.ExitCode == AuditExitCodes.InvalidArguments);
+    }
+
+    [Fact]
+    public void ProductionTargetAuthority_IsRequiredAndCryptographicallyBoundToPhysicalTuple()
+    {
+        using var files = new TestFiles();
+        var input = Input(files, "production");
+
+        var missing = () => EvidenceSignerFactory.Create(
+            KmsScan(files), input, _ => null,
+            _ => new DelegateFakeClient((_, _, _, _) => throw new InvalidOperationException()));
+        missing.Should().Throw<AuditRejectedException>().Which.Code
+            .Should().Be("production_target_authority_missing");
+
+        var otherTarget = input.Manifest.Target with { Database = input.Manifest.Target.Database + "_other" };
+        var mismatchScan = KmsScan(files) with
+        {
+            ProductionTargetAuthorityFile = files.WriteProductionTargetAuthority(otherTarget),
+        };
+        var mismatch = () => EvidenceSignerFactory.Create(
+            mismatchScan, input, _ => null,
+            _ => new DelegateFakeClient((_, _, _, _) => throw new InvalidOperationException()));
+        mismatch.Should().Throw<AuditRejectedException>().Which.Code
+            .Should().Be("production_target_authority_mismatch");
     }
 
     [Theory]
@@ -250,8 +321,13 @@ public sealed class EvidenceSigningTests
     {
         using var files = new TestFiles();
         var created = false;
+        var input = Input(files, "production");
+        var scan = KmsScan(files) with
+        {
+            ProductionTargetAuthorityFile = files.WriteProductionTargetAuthority(input.Manifest.Target),
+        };
         var action = () => EvidenceSignerFactory.Create(
-            KmsScan(files), Input(files, "production"),
+            scan, input,
             name => name == variable ? "configured-even-if-empty-or-indirect" : null,
             _ =>
             {
@@ -275,10 +351,15 @@ public sealed class EvidenceSigningTests
             AllowedEvidenceKeyIds = new HashSet<string>(StringComparer.Ordinal) { privateKeyId },
         };
         var client = new DelegateFakeClient((_, _, _, _) => throw new InvalidOperationException());
-        var scan = KmsScan(files) with { EvidenceSigner = configured };
+        var input = Input(files, "production");
+        var scan = KmsScan(files) with
+        {
+            EvidenceSigner = configured,
+            ProductionTargetAuthorityFile = files.WriteProductionTargetAuthority(input.Manifest.Target),
+        };
 
         var action = () => EvidenceSignerFactory.Create(
-            scan, Input(files, "production"), _ => null, _ => client);
+            scan, input, _ => null, _ => client);
 
         action.Should().Throw<AuditRejectedException>().Which
             .Should().Match<AuditRejectedException>(exception =>
@@ -379,5 +460,23 @@ public sealed class EvidenceSigningTests
         }
 
         public void Dispose() => key.Dispose();
+    }
+
+    private sealed class RecordingSdkTransport : IOciKmsSdkTransport
+    {
+        public SignRequest? Request { get; private set; }
+        public CancellationToken CancellationToken { get; private set; }
+
+        public Task<OciKmsSignatureResponse> SignAsync(
+            SignRequest request,
+            CancellationToken cancellationToken)
+        {
+            Request = request;
+            CancellationToken = cancellationToken;
+            return Task.FromResult(new OciKmsSignatureResponse(
+                KeyId, KeyVersionId, "EcdsaSha256", Convert.ToBase64String(new byte[64])));
+        }
+
+        public void Dispose() { }
     }
 }

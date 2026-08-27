@@ -1,6 +1,6 @@
 # ADR-008 — Kaydedilmiş Senaryo Payload Bütçesi ve Cursor Sayfalama
 
-- **Durum:** Uygulama katmanı kabul edildi; migration 018 release gate'i bekliyor
+- **Durum:** Kabul edildi; migration 018 ve operasyonel release gate'i uygulanıyor
 - **Tarih:** 2026-08-18
 - **Karar verenler:** Backend ekibi
 - **İlgili bulgu/work item:** `REM-API-03` (ExtraData abuse ve liste amplification)
@@ -66,8 +66,14 @@ bir page envelope'a çevirmek breaking change olur.
   `configured <= 0 ? 100 : min(configured, 100)` olarak hesaplanır.
 - `AppConfig.maxSavedScenarios` planın ham `0=unlimited` değerini değil effective cap'i döner;
   premium istemci artık yanlış bir sınırsızlık vaadi görmez.
-- 100'den fazla mevcut satır silinmez. Yeni save 422 alır; tüm mevcut satırlar additive cursor
-  endpointinden okunabilir.
+- Migration 018 hiçbir mevcut satırı otomatik silmez veya yeniden yazmaz. Buna karşılık 100'ün
+  üzerinde tarihsel satırı olan tek bir kullanıcı bile migration preflight'ını fail-closed
+  durdurur. Bu durum deploy sırasında keşfedilmemelidir: operatör önce read-only envanteri
+  çalıştırır. Fazla satırlar korunacaksa deploy bloke kalır; ayrıştırılacaksa yalnız şifreli dış
+  arşiv, tam satır eşitliği ve bağımsız değişiklik onayı sonrasında kontrollü olarak silinir.
+- Migration 018 başarıyla uygulandıktan sonra yeni save 422 alır ve API'deki mevcut satırların
+  tamamı additive cursor endpointinden okunabilir. Pre-018 arşivine ayrılmış satırlar API'de
+  kalmaz; değişiklik kaydı ve saklama politikası boyunca arşivden erişilebilir kalır.
 
 ### Liste sözleşmeleri
 
@@ -88,13 +94,13 @@ bir page envelope'a çevirmek breaking change olur.
 - Page activity yeni bir DB action değeri açmaz. Mevcut allowlist'teki `scenario_list` kullanılır;
   data içinde düşük kardinaliteli `paginated=true/false` ve `hasNextPage` bulunur.
 
-## Migration 018 Release Gate'i (bu lane'de uygulanmadı)
+## Migration 018 Release Gate'i
 
-Migration numarası **018** rezerve edilmiştir. Calendar lane'indeki 017 tamamlanmadan migration,
-migrator manifesti, CI/Compose veya Shared mapping değiştirilmez. 018 şunları içermelidir:
+Migration **018** append-only trust zincirine alınmıştır ve mevcut baytları değiştirilmez. Gate:
 
-1. Mevcut ihlalleri read-only preflight ile say; object olmayan veya
-   `octet_length(extra_data::text) > 8192` satır varsa otomatik truncate/delete etmeden fail-closed.
+1. Mevcut ihlalleri read-only preflight ile say; object olmayan,
+   `octet_length(extra_data::text) > 8192`, DCA için `quantity_unit <> 'try'` veya kullanıcı
+   başına 100'den fazla satır varsa otomatik truncate/delete etmeden fail-closed.
 2. `extra_data IS NULL OR jsonb_typeof(extra_data) = 'object'` ve
    `extra_data IS NULL OR octet_length(extra_data::text) <= 8192` CHECK'lerini ekle ve validate et.
 3. `saved_scenarios(user_id, created_at DESC, id DESC)` composite index'ini ekle. Eski iki kolonlu
@@ -106,17 +112,24 @@ migrator manifesti, CI/Compose veya Shared mapping değiştirilmez. 018 şunlar�
 5. Temsili tek-kullanıcı veri setinde `EXPLAIN (ANALYZE, BUFFERS)` page sorgusunun composite
    index scan kullandığını, explicit sort/large offset yapmadığını ve en fazla `limit+1` satıra
    kadar okuduğunu doğrula.
+6. Production yükseltmesinden önce
+   [`scenario-integrity-migration.md`](../runbooks/scenario-integrity-migration.md) uygulanır.
+   Fazla satırların dış arşive ayrılması bir migration yan etkisi değildir; ayrı değişiklik
+   kaydı, bağımsız onay, bakım penceresi ve arşivdeki satırların canlı satırlarla tam eşitlik
+   kontrolünü gerektirir.
 
 ## Sonuçlar ve Residual Risk
 
 - Request/JSON/DB allocation'ları bounded, type-confused ve bilinmeyen alanlar fail-closed olur.
 - Eski mobil array kontratı korunur; yeni istemci cursor endpointine kademeli geçebilir.
-- Migration 018 yayınlanana kadar unsafe doğrudan DB writer için octet/object defense-in-depth
-  yoktur; API path'i yine sınırlandırılmıştır.
+- Migration 018 öncesindeki bir production veritabanında unsafe doğrudan DB writer için
+  octet/object defense-in-depth yoktur; API path'i yine sınırlandırılmıştır. Read-only release
+  preflight'ı temiz değilse migration çalıştırılmaz.
 - `CountByUserIdAsync` ile insert aynı atomik işlem değildir. İki eşzamanlı save cap'in bir üstüne
   çıkabilir; bu yarış `API-05` atomik constraint/transaction lane'inde kapanacaktır.
 - Keyset bir snapshot değildir: cursor sonrasında eklenen daha yeni kayıtlar mevcut traversal'da
   görünmez; silinen kayıtlar boşluk bırakabilir. Buna karşın sıralama boundary'si aynı timestamp'te
   duplicate/skip üretmez.
-- Legacy istemci 100'den eski kayıtları göstermez; veri kaybı yoktur ve cursor endpointi bütün
-  mevcut kayıtları erişilebilir tutar. Mobil istemcinin cursor'a geçişi ayrı ürün work item'ıdır.
+- Legacy istemci 100'den eski canlı kayıtları göstermez; cursor endpointi bütün canlı kayıtları
+  erişilebilir tutar. Pre-018 kontrollü arşive ayrılmış kayıtların erişim yüzeyi operasyonel
+  arşivdir. Mobil istemcinin cursor'a geçişi ayrı ürün work item'ıdır.

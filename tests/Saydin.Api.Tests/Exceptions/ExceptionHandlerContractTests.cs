@@ -33,6 +33,7 @@ namespace Saydin.Api.Tests.Exceptions;
 ///   <item>ExternalApiExceptionHandler upstream <c>source</c>'u gövdeye <b>koymaz</b> (EC-9).</item>
 /// </list>
 /// </summary>
+[Collection(MetricsTestCollection.Name)]
 public class ExceptionHandlerContractTests
 {
     /// <summary>Program.cs ile birebir: ResourcesPath OLMADAN gerçek resx localizer (key'lerin varlığını da doğrular).</summary>

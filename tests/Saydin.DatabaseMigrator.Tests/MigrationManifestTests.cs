@@ -3,15 +3,16 @@ using Saydin.Migrations;
 
 namespace Saydin.DatabaseMigrator.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class MigrationManifestTests
 {
     [Fact]
-    public void Load_MigrationDirectory_ReturnsTwentyFourRawByteChecksumsInOrdinalOrder()
+    public void Load_MigrationDirectory_ReturnsTwentySevenRawByteChecksumsInOrdinalOrder()
     {
         var manifest = MigrationManifest.Load(TestPaths.MigrationsDirectory);
 
-        manifest.Migrations.Should().HaveCount(24);
-        MigratorMigrationTrustRoot.Versions.Should().HaveCount(24);
+        manifest.Migrations.Should().HaveCount(27);
+        MigratorMigrationTrustRoot.Versions.Should().HaveCount(27);
         MigratorMigrationTrustRoot.Checksums.Keys.Should()
             .BeEquivalentTo(MigratorMigrationTrustRoot.Versions);
         manifest.Migrations.Select(item => item.Version)
@@ -20,20 +21,36 @@ public sealed class MigrationManifestTests
         manifest.Migrations.Should().OnlyContain(item => item.Checksum.Length == 64);
         manifest.Migrations.Single(item => item.Kind == MigrationKind.OptionalExporterRole)
             .Version.Should().Be("012b_create_exporter_role");
+        var rehashSql = manifest.Migrations.Single(item =>
+            item.Version == "024_installation_credential_rehash").ReadSql();
+        rehashSql.Should().Contain("IF p_key_version=p_active_key_version THEN")
+            .And.Contain("credential.secret_hash=p_secret_hash")
+            .And.Contain("credential.secret_hash=p_active_secret_hash")
+            .And.Contain("FOR UPDATE OF credential;")
+            .And.NotContain("FOR UPDATE OF credential,principal;");
     }
 
     [Fact]
-    public void ValidateHistoricalPrefix_UnknownTailMigration_RejectsBeforeExecution()
+    public void ValidateTrustedPrefix_OrderedSqlTail_IsAdmittedForImpactValidation()
     {
         using var directory = CopyHistoricalDirectory();
-        File.WriteAllText(Path.Combine(directory.Path, "999_unknown.sql"),
+        File.WriteAllText(Path.Combine(directory.Path, "026_impact_tail.sql"),
             "CREATE TABLE public.must_never_execute(id integer);\n");
         var manifest = MigrationManifest.Load(directory.Path);
 
-        var action = () => MigrationRunner.ValidateHistoricalPrefix(manifest);
+        var action = () => MigrationRunner.ValidateTrustedPrefix(manifest);
 
-        action.Should().Throw<MigratorRejectedException>()
-            .Which.Code.Should().Be("historical_manifest_mismatch");
+        action.Should().NotThrow();
+    }
+
+    [Fact]
+    public void ValidateTrustedPrefix_CanonicalPrefixWithoutTail_IsAccepted()
+    {
+        var manifest = MigrationManifest.Load(TestPaths.MigrationsDirectory);
+
+        var action = () => MigrationRunner.ValidateTrustedPrefix(manifest);
+
+        action.Should().NotThrow();
     }
 
     [Theory]
@@ -41,16 +58,20 @@ public sealed class MigrationManifestTests
     [InlineData("016_ingestion_write_fence.sql")]
     [InlineData("017_authoritative_market_calendars.sql")]
     [InlineData("018_scenario_integrity.sql")]
+    [InlineData("019_privilege_separation.sql")]
     [InlineData("020_price_authority_expand.sql")]
     [InlineData("021_api_trust_expand.sql")]
     [InlineData("022_principal_retention.sql")]
-    public void ValidateHistoricalPrefix_OmittedCanonicalMigration_Rejects(string omittedFile)
+    [InlineData("023_installation_lifecycle_admission.sql")]
+    [InlineData("024_installation_credential_rehash.sql")]
+    [InlineData("025_ingestion_calendar_rebind.sql")]
+    public void ValidateTrustedPrefix_OmittedCanonicalMigration_Rejects(string omittedFile)
     {
         using var directory = CopyHistoricalDirectory();
         File.Delete(Path.Combine(directory.Path, omittedFile));
         var manifest = MigrationManifest.Load(directory.Path);
 
-        var action = () => MigrationRunner.ValidateHistoricalPrefix(manifest);
+        var action = () => MigrationRunner.ValidateTrustedPrefix(manifest);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("historical_manifest_mismatch");
@@ -84,14 +105,14 @@ public sealed class MigrationManifestTests
     }
 
     [Fact]
-    public void ValidateHistoricalPrefix_OneChangedHistoricalByte_RejectsPinnedTrustRoot()
+    public void ValidateTrustedPrefix_OneChangedHistoricalByte_RejectsPinnedTrustRoot()
     {
         using var directory = CopyHistoricalDirectory();
         var path = Path.Combine(directory.Path, "001_initial.sql");
         File.AppendAllText(path, "\n-- accidental historical edit\n");
         var manifest = MigrationManifest.Load(directory.Path);
 
-        var act = () => MigrationRunner.ValidateHistoricalPrefix(manifest);
+        var act = () => MigrationRunner.ValidateTrustedPrefix(manifest);
 
         act.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("historical_checksum_mismatch");
@@ -105,14 +126,14 @@ public sealed class MigrationManifestTests
     [InlineData("020_price_authority_expand.sql")]
     [InlineData("021_api_trust_expand.sql")]
     [InlineData("022_principal_retention.sql")]
-    public void ValidateHistoricalPrefix_ChangedAdditiveByte_RejectsPinnedMigration(string fileName)
+    public void ValidateTrustedPrefix_ChangedAdditiveByte_RejectsPinnedMigration(string fileName)
     {
         using var directory = CopyHistoricalDirectory();
         var path = Path.Combine(directory.Path, fileName);
         File.AppendAllText(path, "\n-- accidental deployed migration edit\n");
         var manifest = MigrationManifest.Load(directory.Path);
 
-        var act = () => MigrationRunner.ValidateHistoricalPrefix(manifest);
+        var act = () => MigrationRunner.ValidateTrustedPrefix(manifest);
 
         act.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("pinned_checksum_mismatch");

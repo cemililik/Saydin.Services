@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
+using Saydin.Api.Helpers;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
@@ -70,6 +71,7 @@ public class WhatIfCalculatorTests
 
     public WhatIfCalculatorTests()
     {
+        _timeProvider.SetUtcNow(new DateTimeOffset(2026, 5, 28, 22, 0, 0, TimeSpan.Zero));
         _dailyLimitGuard.TryAcquireAsync(
                 Arg.Any<User?>(), Arg.Any<string>(), Arg.Any<string>(),
                 Arg.Any<int?>(), Arg.Any<CancellationToken>())
@@ -145,13 +147,11 @@ public class WhatIfCalculatorTests
         result.AssetSymbol.Should().Be("USDTRY");
         result.BuyPrice.Should().Be(5.95m);
         result.SellPrice.Should().Be(8.50m);
+        result.UnitsAcquired.Should().Be(1680.672269m);
         result.InitialValueTry.Should().Be(10_000m);
-
-        result.UnitsAcquired.Should().Be(Math.Round(10_000m / 5.95m, 6, MidpointRounding.AwayFromZero));
-
-        var expectedFinal = Math.Round(result.UnitsAcquired * 8.50m, 2, MidpointRounding.AwayFromZero);
-        result.FinalValueTry.Should().Be(expectedFinal);
-        result.ProfitLossTry.Should().Be(expectedFinal - 10_000m);
+        result.FinalValueTry.Should().Be(14_285.71m);
+        result.ProfitLossTry.Should().Be(4_285.71m);
+        result.ProfitLossPercent.Should().Be(42.86m);
         result.IsProfit.Should().BeTrue();
     }
 
@@ -215,15 +215,33 @@ public class WhatIfCalculatorTests
     }
 
     [Fact]
-    public async Task CalculateAsync_NoSellDate_UsesTodayAsDefault()
+    public async Task CalculateAsync_HighUnitPriceAtBreakeven_UsesRequestedCapitalForMath()
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
-        SetupPrices(buyPrice: 5.95m, sellPrice: 30m, sellDate: today);
+        SetupPrices(buyPrice: 3_000_000m, sellPrice: 3_000_000m);
+
+        var result = await _sut.CalculateAsync(
+            MakeRequest("USDTRY", BuyDate, SellDate, 100m, "try"),
+            CancellationToken.None);
+
+        result.UnitsAcquired.Should().Be(0.000033m);
+        result.InitialValueTry.Should().Be(100m);
+        result.FinalValueTry.Should().Be(100m);
+        result.ProfitLossTry.Should().Be(0m);
+        result.ProfitLossPercent.Should().Be(0m);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_NoSellDate_UsesLiteralLatestAuthorityDate()
+    {
+        var latestAuthorityDate = new DateOnly(2026, 5, 28);
+        SetupPrices(buyPrice: 5.95m, sellPrice: 30m, sellDate: latestAuthorityDate);
 
         var request = new WhatIfRequest("USDTRY", BuyDate, SellDate: null, 10_000m, "try");
         var result  = await _sut.CalculateAsync(request, CancellationToken.None);
 
-        result.SellDate.Should().Be(today);
+        result.SellDate.Should().Be(latestAuthorityDate);
+        await _assetService.Received(1).GetLatestPriceDateAsync(
+            "USDTRY", Arg.Any<CancellationToken>());
     }
 
     // ── Validasyon ───────────────────────────────────────────────────────────
@@ -241,6 +259,32 @@ public class WhatIfCalculatorTests
 
         await act.Should().ThrowAsync<ValidationException>()
                  .WithMessage("*BuyDateAfterSellDate*");
+    }
+
+    [Fact]
+    public async Task CalculationEntryPoints_ExplicitFutureSellDate_AreRejectedBeforeQuota()
+    {
+        _timeProvider.SetUtcNow(new DateTimeOffset(
+            2026, 5, 28, 22, 0, 0, TimeSpan.Zero));
+        BusinessClock.TodayInIstanbul(_timeProvider).Should().Be(new DateOnly(2026, 5, 29));
+        var future = new DateOnly(2026, 5, 30);
+
+        await FluentActions.Awaiting(() => _sut.CalculateAsync(
+                MakeRequest("USDTRY", BuyDate, future, 100m, "try"), CancellationToken.None))
+            .Should().ThrowAsync<ValidationException>()
+            .Where(error => error.Field == nameof(WhatIfRequest.SellDate));
+        await FluentActions.Awaiting(() => _sut.CalculateReverseAsync(
+                MakeReverseRequest("USDTRY", BuyDate, future, 100m, "try"), CancellationToken.None))
+            .Should().ThrowAsync<ValidationException>()
+            .Where(error => error.Field == nameof(ReverseWhatIfRequest.SellDate));
+        await FluentActions.Awaiting(() => _sut.CompareAsync(
+                new CompareRequest(["USDTRY", "EURTRY"], BuyDate, future, 100m, "try"),
+                CancellationToken.None))
+            .Should().ThrowAsync<ValidationException>()
+            .Where(error => error.Field == nameof(CompareRequest.SellDate));
+
+        await _dailyLimitGuard.DidNotReceiveWithAnyArgs().TryAcquireAsync(
+            default, default!, default!, default, default);
     }
 
     [Fact]
@@ -474,6 +518,8 @@ public class WhatIfCalculatorTests
     [InlineData("amount")]
     [InlineData("type")]
     [InlineData("inflation")]
+    [InlineData("language")]
+    [InlineData("catalog_hash")]
     public async Task CalculateAsync_CurrentKeyWrongRequestEnvelope_IsCacheMiss(string mutation)
     {
         var request = MakeRequest("USDTRY", BuyDate, SellDate, 1m, "units");
@@ -490,6 +536,8 @@ public class WhatIfCalculatorTests
             "amount" => entry with { Amount = 999m },
             "type" => entry with { AmountType = "try" },
             "inflation" => entry with { IncludeInflation = true },
+            "language" => entry with { Language = new string('x', 4_096) },
+            "catalog_hash" => entry with { CatalogHash = new string('a', 4_096) },
             _ => throw new InvalidOperationException("unknown_test_mutation"),
         };
         _cache.TryGetAsync<WhatIfCacheEntry>(Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -530,6 +578,8 @@ public class WhatIfCalculatorTests
     [InlineData("amount")]
     [InlineData("type")]
     [InlineData("inflation")]
+    [InlineData("language")]
+    [InlineData("catalog_hash")]
     public async Task CalculateReverseAsync_CurrentKeyWrongRequestEnvelope_IsCacheMiss(
         string mutation)
     {
@@ -547,6 +597,8 @@ public class WhatIfCalculatorTests
             "amount" => entry with { TargetAmount = 999m },
             "type" => entry with { TargetAmountType = "try" },
             "inflation" => entry with { IncludeInflation = true },
+            "language" => entry with { Language = new string('x', 4_096) },
+            "catalog_hash" => entry with { CatalogHash = new string('a', 4_096) },
             _ => throw new InvalidOperationException("unknown_test_mutation"),
         };
         _cache.TryGetAsync<ReverseWhatIfCacheEntry>(
@@ -741,12 +793,6 @@ public class WhatIfCalculatorTests
         _assetService.GetLatestPriceDateAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
                      .Returns(effectiveSell);
 
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
-        if (today != effectiveSell)
-        {
-            _assetService.GetNearestPriceAsync(Arg.Any<string>(), today, Arg.Any<CancellationToken>())
-                         .Returns(AuthorityTestData.FinalPrice(today, sellPrice, AssetId));
-        }
     }
 
     // ── Haftasonu / Tarih Düzeltmesi ────────────────────────────────────────
@@ -882,17 +928,11 @@ public class WhatIfCalculatorTests
         result.BuyPrice.Should().Be(5.95m);
         result.SellPrice.Should().Be(8.50m);
 
-        var expectedUnits = Math.Round(100_000m / 8.50m, 6, MidpointRounding.AwayFromZero);
-        result.UnitsAcquired.Should().Be(expectedUnits);
-
-        // F4-3: targetValueTry forward-consistent türetilir (bu fiyatlarda 100.000,00'a yuvarlanır).
-        var expectedTarget = Math.Round(expectedUnits * 8.50m, 2, MidpointRounding.AwayFromZero);
-        result.TargetValueTry.Should().Be(expectedTarget);
-
-        var expectedInvestment = Math.Round(expectedUnits * 5.95m, 2, MidpointRounding.AwayFromZero);
-        result.RequiredInvestmentTry.Should().Be(expectedInvestment);
-
-        result.ProfitLossTry.Should().Be(expectedTarget - expectedInvestment);
+        result.UnitsAcquired.Should().Be(11_764.705882m);
+        result.TargetValueTry.Should().Be(100_000m);
+        result.RequiredInvestmentTry.Should().Be(70_000m);
+        result.ProfitLossTry.Should().Be(30_000m);
+        result.ProfitLossPercent.Should().Be(42.86m);
         result.IsProfit.Should().BeTrue();
 
         // F4-3 forward-consistency kilidi: UnitsAcquired × SellPrice == TargetValueTry.

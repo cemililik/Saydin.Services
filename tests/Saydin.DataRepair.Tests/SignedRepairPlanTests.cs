@@ -16,7 +16,8 @@ public sealed class SignedRepairPlanTests
         verified.Plan.Operations.Should().HaveCount(1);
         await DqaEvidenceVerifier.VerifyAsync(
             files.EvidenceDirectory, files.EvidencePublicKeyFile,
-            verified.Plan.Evidence, verified.Plan.Target.Environment, default);
+            verified.Plan.Evidence,
+            VerifiedPhysicalRepairTarget.FromLiveTrust(verified.Plan.Target), default);
     }
 
     [Fact]
@@ -37,7 +38,7 @@ public sealed class SignedRepairPlanTests
         using var files = new RepairTestFiles();
         var canonical = File.ReadAllBytes(files.PlanFile);
         var duplicate = Encoding.UTF8.GetBytes(
-            "{\"schemaVersion\":1," + Encoding.UTF8.GetString(canonical)[1..]);
+            "{\"schemaVersion\":2," + Encoding.UTF8.GetString(canonical)[1..]);
         files.WriteSignedPlanBytes(duplicate);
         var duplicateAction = () => SignedRepairPlan.LoadAndVerify(
             files.PlanFile, files.PlanSignatureFile, files.PlanPublicKeyFile,
@@ -96,7 +97,8 @@ public sealed class SignedRepairPlanTests
             Path.Combine(files.EvidenceDirectory, "evidence-content.json"), "tampered");
         var action = () => DqaEvidenceVerifier.VerifyAsync(
             files.EvidenceDirectory, files.EvidencePublicKeyFile,
-            files.Plan.Evidence, files.Plan.Target.Environment, default);
+            files.Plan.Evidence,
+            VerifiedPhysicalRepairTarget.FromLiveTrust(files.Plan.Target), default);
         (await action.Should().ThrowAsync<RepairRejectedException>())
             .Which.Code.Should().Be("evidence_file_invalid");
     }
@@ -107,7 +109,9 @@ public sealed class SignedRepairPlanTests
         using var files = new RepairTestFiles();
         var action = () => DqaEvidenceVerifier.VerifyAsync(
             files.EvidenceDirectory, files.EvidencePublicKeyFile,
-            files.Plan.Evidence, "production", default);
+            files.Plan.Evidence,
+            VerifiedPhysicalRepairTarget.FromLiveTrust(
+                files.Plan.Target with { Environment = "production" }), default);
         (await action.Should().ThrowAsync<RepairRejectedException>())
             .Which.Code.Should().Be("evidence_manifest_invalid");
     }
@@ -122,7 +126,8 @@ public sealed class SignedRepairPlanTests
 
         var action = () => DqaEvidenceVerifier.VerifyAsync(
             files.EvidenceDirectory, files.EvidencePublicKeyFile,
-            files.Plan.Evidence, files.Plan.Target.Environment, default);
+            files.Plan.Evidence,
+            VerifiedPhysicalRepairTarget.FromLiveTrust(files.Plan.Target), default);
 
         (await action.Should().ThrowAsync<RepairRejectedException>())
             .Which.Code.Should().Be("evidence_inventory_invalid");
@@ -137,7 +142,8 @@ public sealed class SignedRepairPlanTests
 
         var action = () => DqaEvidenceVerifier.VerifyAsync(
             files.EvidenceDirectory, files.EvidencePublicKeyFile,
-            files.Plan.Evidence, files.Plan.Target.Environment, cancellation.Token);
+            files.Plan.Evidence,
+            VerifiedPhysicalRepairTarget.FromLiveTrust(files.Plan.Target), cancellation.Token);
 
         await action.Should().ThrowAsync<OperationCanceledException>();
     }
@@ -158,6 +164,49 @@ public sealed class SignedRepairPlanTests
             new FixedTimeProvider(files.Now));
         oversized.Should().Throw<RepairRejectedException>()
             .Which.Code.Should().Be("plan_file_invalid");
+    }
+
+    [Theory]
+    [InlineData("keyId", "plan_contract_invalid")]
+    [InlineData("changeTicket", "plan_contract_invalid")]
+    [InlineData("nonce", "plan_contract_invalid")]
+    public void MissingRequiredSignedPlanString_IsRejectedWithStableInvalidArgumentCode(
+        string property,
+        string expectedCode)
+    {
+        using var files = new RepairTestFiles();
+        var node = JsonNode.Parse(File.ReadAllBytes(files.PlanFile))!.AsObject();
+        node.Remove(property).Should().BeTrue();
+        files.WriteSignedPlanBytes(CanonicalJson.Canonicalize(
+            Encoding.UTF8.GetBytes(node.ToJsonString())));
+
+        var action = () => SignedRepairPlan.LoadAndVerify(
+            files.PlanFile, files.PlanSignatureFile, files.PlanPublicKeyFile,
+            new FixedTimeProvider(files.Now));
+
+        var rejected = action.Should().Throw<RepairRejectedException>().Which;
+        rejected.Code.Should().Be(expectedCode);
+        rejected.ExitCode.Should().Be(RepairExitCodes.InvalidArguments);
+    }
+
+    [Fact]
+    public async Task MissingRequiredSignedManifestString_IsRejectedWithStableSignatureCode()
+    {
+        using var files = new RepairTestFiles();
+        var manifestPath = Path.Combine(files.EvidenceDirectory, "manifest.json");
+        var node = JsonNode.Parse(File.ReadAllBytes(manifestPath))!.AsObject();
+        node.Remove("signingKeyIdentity").Should().BeTrue();
+        files.WriteSignedEvidenceManifestBytes(CanonicalJson.Canonicalize(
+            Encoding.UTF8.GetBytes(node.ToJsonString())));
+
+        var action = () => DqaEvidenceVerifier.VerifyAsync(
+            files.EvidenceDirectory, files.EvidencePublicKeyFile,
+            files.Plan.Evidence,
+            VerifiedPhysicalRepairTarget.FromLiveTrust(files.Plan.Target), default);
+
+        var rejected = (await action.Should().ThrowAsync<RepairRejectedException>()).Which;
+        rejected.Code.Should().Be("evidence_manifest_invalid");
+        rejected.ExitCode.Should().Be(RepairExitCodes.SignatureFailure);
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

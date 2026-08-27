@@ -27,13 +27,52 @@ public sealed class MigrationRunnerIntegrationTests
 
         result.Applied.Should().Be(1);
         (await database.ScalarAsync<string>("""
-            SELECT state FROM public.schema_migrations WHERE version='023_impact_test'
+            SELECT state FROM public.schema_migrations WHERE version='026_impact_test'
             """)).Should().Be("succeeded");
         (await database.ScalarAsync<bool>("""
             SELECT indisvalid AND indisready
               FROM pg_catalog.pg_index
              WHERE indexrelid='public.ix_dbm004_fixture_marker'::pg_catalog.regclass
             """)).Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public async Task ImpactPreflight_RestoresPreexistingSessionTimeouts()
+    {
+        var admin = IntegrationEnvironment.RequirePrimary();
+        await using var database = await TestDatabase.CreateAsync(admin);
+        await RunAsync(database.ConnectionString);
+        await CreateImpactFixtureTableAsync(database, rowCount: 4);
+        using var package = ImpactTestPackage.Create(
+            database,
+            "CREATE INDEX ix_timeout_restore_probe ON public.dbm004_fixture(marker);\n",
+            "transactional", ["create-index-nonconcurrent"], "public.dbm004_fixture",
+            postconditionKind: "index-valid", postconditionIndex: "ix_timeout_restore_probe");
+        var options = database.Options(
+            package.MigrationsDirectory, impactConfiguration: package.Configuration);
+        var definition = package.Manifest.Migrations.Single(
+            migration => migration.Version == "026_impact_test");
+        var impact = MigrationImpactSet.LoadAndVerify(
+            package.Manifest, MigratorMigrationTrustRoot.Versions.Count, package.Configuration)
+            .For(definition.Version);
+        await using var connection = new NpgsqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using (var setLock = new NpgsqlCommand("SET lock_timeout='321ms'", connection))
+            await setLock.ExecuteNonQueryAsync();
+        await using (var setStatement = new NpgsqlCommand(
+                         "SET statement_timeout='6543ms'", connection))
+            await setStatement.ExecuteNonQueryAsync();
+
+        await MigrationImpactPreflight.VerifyAsync(
+            connection, options, definition, impact, CancellationToken.None);
+
+        await using var current = new NpgsqlCommand(
+            "SELECT current_setting('lock_timeout'),current_setting('statement_timeout')", connection);
+        await using var reader = await current.ExecuteReaderAsync();
+        (await reader.ReadAsync()).Should().BeTrue();
+        reader.GetString(0).Should().Be("321ms");
+        reader.GetString(1).Should().Be("6543ms");
+        (await reader.ReadAsync()).Should().BeFalse();
     }
 
     [SkippableFact]
@@ -157,7 +196,7 @@ public sealed class MigrationRunnerIntegrationTests
         var options = database.Options(
             package.MigrationsDirectory, impactConfiguration: package.Configuration);
         var interrupted = async () => await new MigrationRunner(
-            options, TextWriter.Null, new CancelAfterFirstOnlineCommit("023_impact_test")).RunAsync();
+            options, TextWriter.Null, new CancelAfterFirstOnlineCommit("026_impact_test")).RunAsync();
 
         await interrupted.Should().ThrowAsync<OperationCanceledException>();
         var afterKill = await database.ScalarAsync<long>(
@@ -185,15 +224,43 @@ public sealed class MigrationRunnerIntegrationTests
             .Should().Be(rowCount);
         (await database.ScalarAsync<long>("""
             SELECT processed_rows FROM public.saydin_online_migration_checkpoints
-             WHERE migration_version='023_impact_test' AND state='succeeded'
+             WHERE migration_version='026_impact_test' AND state='succeeded'
             """)).Should().Be(rowCount);
 
         var duplicate = await new MigrationRunner(options, TextWriter.Null).RunAsync();
         duplicate.Applied.Should().Be(0);
-        duplicate.AlreadyApplied.Should().Be(25);
+        duplicate.AlreadyApplied.Should().Be(27);
         (await database.ScalarAsync<long>(
             "SELECT count(*) FROM public.dbm004_fixture WHERE marker='redacted'"))
             .Should().Be(rowCount);
+    }
+
+    [SkippableFact]
+    public async Task ImpactOnline_ForeignLeaseNonceAfterCommit_IsRejectedBeforeNextBatch()
+    {
+        var admin = IntegrationEnvironment.RequirePrimary();
+        await using var database = await TestDatabase.CreateAsync(admin);
+        await RunAsync(database.ConnectionString);
+        await CreateImpactFixtureTableAsync(database, rowCount: 90);
+        var plan = OnlineFixturePlan("public.dbm004_fixture", batchSize: 30);
+        using var package = ImpactTestPackage.Create(
+            database, "-- bounded generated execution only\n",
+            "resumable-online", ["resumable-online"], "public.dbm004_fixture", plan,
+            postconditionKind: "column-no-null", postconditionColumn: "marker");
+        var options = database.Options(
+            package.MigrationsDirectory, impactConfiguration: package.Configuration);
+
+        var action = async () => await new MigrationRunner(
+            options, TextWriter.Null,
+            new ReplaceOnlineLeaseAfterFirstBody("026_impact_test")).RunAsync();
+
+        var failure = (await action.Should().ThrowAsync<MigratorRejectedException>()).Which;
+        failure.Code.Should().Be("migration_online_failed");
+        failure.InnerException.Should().BeOfType<MigratorRejectedException>()
+            .Which.Code.Should().Be("migration_online_lease_lost");
+        (await database.ScalarAsync<long>(
+            "SELECT count(*) FROM public.dbm004_fixture WHERE marker='redacted'"))
+            .Should().Be(30);
     }
 
     [SkippableFact]
@@ -214,7 +281,7 @@ public sealed class MigrationRunnerIntegrationTests
         var options = database.Options(
             package.MigrationsDirectory, impactConfiguration: package.Configuration);
         var interrupted = async () => await new MigrationRunner(
-            options, TextWriter.Null, new CancelAfterFirstOnlineCommit("023_impact_test")).RunAsync();
+            options, TextWriter.Null, new CancelAfterFirstOnlineCommit("026_impact_test")).RunAsync();
 
         await interrupted.Should().ThrowAsync<OperationCanceledException>();
         (await database.ScalarAsync<bool>("""
@@ -278,7 +345,7 @@ public sealed class MigrationRunnerIntegrationTests
         var final = await new MigrationRunner(
             Options(database.ConnectionString, TestPaths.MigrationsDirectory), TextWriter.Null).RunAsync();
         final.BackupPostBootstrapRequired.Should().BeFalse();
-        final.AlreadyApplied.Should().Be(24);
+        final.AlreadyApplied.Should().Be(27);
 
         var verifyExit = await MigratorApplication.RunAsync(
             ["--verify-only"], ApplicationEnvironment(database.ConnectionString),
@@ -297,7 +364,7 @@ public sealed class MigrationRunnerIntegrationTests
             Options(database.ConnectionString, TestPaths.MigrationsDirectory, legacyCutover: true),
             TextWriter.Null).RunAsync();
 
-        first.Applied.Should().Be(8);
+        first.Applied.Should().Be(10);
         first.BackupPostBootstrapRequired.Should().BeTrue();
         (await database.ScalarAsync<bool>($"""
             SELECT EXISTS(
@@ -314,7 +381,7 @@ public sealed class MigrationRunnerIntegrationTests
         var final = await new MigrationRunner(
             Options(database.ConnectionString, TestPaths.MigrationsDirectory), TextWriter.Null).RunAsync();
         final.BackupPostBootstrapRequired.Should().BeFalse();
-        final.AlreadyApplied.Should().Be(24);
+        final.AlreadyApplied.Should().Be(27);
 
         var verifyExit = await MigratorApplication.RunAsync(
             ["--verify-only"], ApplicationEnvironment(database.ConnectionString),
@@ -326,8 +393,17 @@ public sealed class MigrationRunnerIntegrationTests
     public async Task BackupRotation_V1AndV2RemainPhysicalOnlyAndMigratorVerificationStaysStable()
     {
         var admin = IntegrationEnvironment.RequirePrimary();
-        await using var database = await TestDatabase.CreateAsync(admin);
-        await RunAsync(database.ConnectionString);
+        await using var database = await TestDatabase.CreateHbaBoundAsync(
+            admin, HbaBoundTestFixture.BackupRotation);
+        var migrated = await new MigrationRunner(
+            Options(database.ConnectionString, TestPaths.MigrationsDirectory), TextWriter.Null).RunAsync();
+        migrated.BackupPostBootstrapRequired.Should().BeTrue();
+
+        await database.EnsureRolesThroughApplicationAsync();
+        var postBootstrap = await new MigrationRunner(
+            Options(database.ConnectionString, TestPaths.MigrationsDirectory), TextWriter.Null).RunAsync();
+        postBootstrap.BackupPostBootstrapRequired.Should().BeFalse();
+        postBootstrap.AlreadyApplied.Should().Be(27);
 
         var rotated = await database.RotateBackupV2Async();
         var v1 = database.Contract.BackupLogin(1, database.BackupV1ValidUntilUtc);
@@ -369,14 +445,14 @@ public sealed class MigrationRunnerIntegrationTests
             await using var sql = new NpgsqlConnection(builder.ConnectionString);
             var connect = async () => await sql.OpenAsync();
             (await connect.Should().ThrowAsync<PostgresException>()).Which.SqlState
-                .Should().Be(PostgresErrorCodes.InsufficientPrivilege,
-                    "backup identities have physical replication auth but no target SQL CONNECT");
+                .Should().Be(PostgresErrorCodes.InvalidAuthorizationSpecification,
+                    "the exact backup HBA admits physical replication and rejects every SQL database connection");
         }
 
         var verify = await new MigrationRunner(
             Options(database.ConnectionString, TestPaths.MigrationsDirectory), TextWriter.Null).RunAsync();
         verify.BackupPostBootstrapRequired.Should().BeFalse();
-        verify.AlreadyApplied.Should().Be(24);
+        verify.AlreadyApplied.Should().Be(27);
     }
 
     [SkippableTheory]
@@ -427,18 +503,18 @@ public sealed class MigrationRunnerIntegrationTests
     }
 
     [SkippableFact]
-    public async Task BlankDatabase_AppliesTwentyFourVersionsAndCreatesTwoHypertables()
+    public async Task BlankDatabase_AppliesTwentyFiveVersionsAndCreatesTwoHypertables()
     {
         var admin = IntegrationEnvironment.RequirePrimary();
         await using var database = await TestDatabase.CreateAsync(admin);
 
         var result = await RunAsync(database.ConnectionString);
 
-        result.Applied.Should().Be(24);
+        result.Applied.Should().Be(27);
         (await database.ScalarAsync<long>("SELECT COUNT(*) FROM schema_migrations WHERE state IN ('succeeded','skipped_optional')"))
-            .Should().Be(24);
+            .Should().Be(27);
         (await database.ScalarAsync<long>("SELECT COUNT(*) FROM schema_migrations WHERE checksum IS NOT NULL"))
-            .Should().Be(24);
+            .Should().Be(27);
         (await database.ScalarAsync<long>("""
             SELECT COUNT(*) FROM timescaledb_information.hypertables
             WHERE hypertable_schema='public' AND hypertable_name IN ('price_points','activity_logs')
@@ -582,7 +658,7 @@ public sealed class MigrationRunnerIntegrationTests
             await database.ExecuteAsync($"""
                 GRANT USAGE ON SCHEMA _timescaledb_internal TO {Quote(foreignRole)}
                 """);
-            var driftedEnsure = () => database.EnsureRolesAsync();
+            var driftedEnsure = () => database.EnsureRolesThroughApplicationAsync();
             (await driftedEnsure.Should().ThrowAsync<InvalidOperationException>())
                 .Which.Message.Should().Contain("timescale_transition_not_consumed");
             await database.ExecuteAsync($"""
@@ -607,6 +683,33 @@ public sealed class MigrationRunnerIntegrationTests
 
         static string Quote(string identifier) =>
             new NpgsqlCommandBuilder().QuoteIdentifier(identifier);
+    }
+
+    [SkippableFact]
+    public async Task BlankDatabase_WithSignedTail_AppliesCanonicalPrefixBeforeImpactPreflight()
+    {
+        var admin = IntegrationEnvironment.RequirePrimary();
+        await using var database = await TestDatabase.CreateAsync(admin);
+        using var package = ImpactTestPackage.Create(
+            database,
+            "CREATE INDEX ix_blank_signed_tail ON public.schema_migrations(state);\n",
+            "transactional", ["create-index-nonconcurrent"], "public.schema_migrations",
+            postconditionKind: "index-valid", postconditionIndex: "ix_blank_signed_tail");
+
+        var result = await new MigrationRunner(
+            database.Options(package.MigrationsDirectory,
+                impactConfiguration: package.Configuration), TextWriter.Null,
+            allowCanonicalPrefixFixture: true).RunAsync();
+
+        result.Applied.Should().Be(27);
+        (await database.ScalarAsync<string>(
+            "SELECT state FROM schema_migrations WHERE version='026_impact_test'"))
+            .Should().Be("succeeded");
+        (await database.ScalarAsync<bool>("""
+            SELECT indisvalid AND indisready
+              FROM pg_catalog.pg_index
+             WHERE indexrelid='public.ix_blank_signed_tail'::regclass
+            """)).Should().BeTrue();
     }
 
     [SkippableFact]
@@ -694,7 +797,7 @@ public sealed class MigrationRunnerIntegrationTests
     }
 
     [SkippableFact]
-    public async Task MigratorV2Rotation_PreservesStableContractAndV1WhileV2VerifyAndNoOpPass()
+    public async Task MigratorV2RotationAndV1Retirement_PreserveStableContractAndVerifyPasses()
     {
         var admin = IntegrationEnvironment.RequirePrimary();
         await using var database = await TestDatabase.CreateAsync(admin);
@@ -710,7 +813,7 @@ public sealed class MigrationRunnerIntegrationTests
             database.Options(TestPaths.MigrationsDirectory, loginVersion: 2),
             TextWriter.Null).RunAsync();
         v2Result.Applied.Should().Be(0);
-        v2Result.AlreadyApplied.Should().Be(24);
+        v2Result.AlreadyApplied.Should().Be(27);
         var verifyExit = await MigratorApplication.RunAsync(
             ["--verify-only"], database.ApplicationEnvironment(loginVersion: 2),
             TextWriter.Null, TextWriter.Null);
@@ -727,6 +830,20 @@ public sealed class MigrationRunnerIntegrationTests
                                '{database.Contract.Login(LoginPurpose.Migrator, 2).Name}')
                AND rolcanlogin
             """)).Should().Be(2, "rotation must not retire the still-valid v1 login");
+
+        await database.RetireMigratorV1Async();
+        var postRetirement = await new MigrationRunner(
+            database.Options(TestPaths.MigrationsDirectory, loginVersion: 2),
+            TextWriter.Null).RunAsync();
+        postRetirement.Applied.Should().Be(0);
+        postRetirement.AlreadyApplied.Should().Be(27);
+        (await MigratorApplication.RunAsync(
+            ["--verify-only"], database.ApplicationEnvironment(loginVersion: 2),
+            TextWriter.Null, TextWriter.Null)).Should().Be(0);
+        (await database.ScalarAsync<long>($"""
+            SELECT count(*) FROM pg_roles
+             WHERE rolname='{database.Contract.Login(LoginPurpose.Migrator, 1).Name}'
+            """)).Should().Be(0);
     }
 
     [SkippableTheory]
@@ -763,6 +880,7 @@ public sealed class MigrationRunnerIntegrationTests
 
         exit.Should().Be(3);
         error.ToString().Should().Contain("code=schema_fingerprint_mismatch");
+        error.ToString().Should().Contain("fingerprint=ingestion_write_fence_missing");
     }
 
     [SkippableFact]
@@ -1159,12 +1277,12 @@ public sealed class MigrationRunnerIntegrationTests
 
         var result = await RunAsync(database.ConnectionString, legacyCutover: true);
 
-        result.Applied.Should().Be(8, "015 through 022 must be applied after the verified 014 baseline");
+        result.Applied.Should().Be(10, "015 through 024 must be applied after the verified 014 baseline");
         (await database.ScalarAsync<string>("""
             SELECT md5(string_agg(symbol || ':' || source, ',' ORDER BY symbol)) FROM assets
             """)).Should().Be(before);
         (await database.ScalarAsync<long>("SELECT COUNT(*) FROM schema_migrations WHERE checksum IS NOT NULL"))
-            .Should().Be(24);
+            .Should().Be(27);
         (await database.ScalarAsync<bool>(
             "SELECT to_regclass('public.ingestion_windows') IS NOT NULL"))
             .Should().BeTrue();
@@ -1241,6 +1359,7 @@ public sealed class MigrationRunnerIntegrationTests
     [InlineData("database_acl")]
     [InlineData("schema_acl")]
     [InlineData("pg_control_acl")]
+    [InlineData("pg_parameter_acl")]
     [InlineData("table_acl")]
     [InlineData("column_acl")]
     [InlineData("type_acl")]
@@ -1257,6 +1376,7 @@ public sealed class MigrationRunnerIntegrationTests
             "database_acl" => $"GRANT TEMPORARY ON DATABASE {database.Name} TO {database.Contract.ApiCapability.Name}",
             "schema_acl" => $"GRANT CREATE ON SCHEMA public TO {database.Contract.ApiCapability.Name}",
             "pg_control_acl" => $"GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {database.Contract.ApiCapability.Name}",
+            "pg_parameter_acl" => $"GRANT SET ON PARAMETER session_replication_role TO {database.Contract.ApiCapability.Name}",
             "table_acl" => "GRANT SELECT ON TABLE public.assets TO PUBLIC",
             "column_acl" => $"GRANT UPDATE(email) ON TABLE public.users TO {database.Contract.ApiCapability.Name}",
             "type_acl" => $"GRANT USAGE ON TYPE public.asset_category TO {database.Contract.AuditCapability.Name}",
@@ -1265,18 +1385,27 @@ public sealed class MigrationRunnerIntegrationTests
             "row_security" => "ALTER TABLE public.price_points ENABLE ROW LEVEL SECURITY",
             _ => throw new ArgumentOutOfRangeException(nameof(drift)),
         };
-        await database.ExecuteAsync(sql);
-        var error = new StringWriter();
+        try
+        {
+            await database.ExecuteAsync(sql);
+            var error = new StringWriter();
 
-        var exit = await MigratorApplication.RunAsync(
-            ["--verify-only"], ApplicationEnvironment(database.ConnectionString),
-            TextWriter.Null, error);
+            var exit = await MigratorApplication.RunAsync(
+                ["--verify-only"], ApplicationEnvironment(database.ConnectionString),
+                TextWriter.Null, error);
 
-        exit.Should().Be(3);
-        error.ToString().Should().Contain("code=");
-        (await database.ScalarAsync<string>(
-            "SELECT state FROM saydin_migration_control WHERE singleton=1")).Should().Be("ready",
-            "verify-only must never mutate control state");
+            exit.Should().Be(3);
+            error.ToString().Should().Contain("code=schema_fingerprint_mismatch");
+            (await database.ScalarAsync<string>(
+                "SELECT state FROM saydin_migration_control WHERE singleton=1")).Should().Be("ready",
+                "verify-only must never mutate control state");
+        }
+        finally
+        {
+            if (drift == "pg_parameter_acl")
+                await database.ExecuteAsync(
+                    $"REVOKE ALL PRIVILEGES ON PARAMETER session_replication_role FROM {database.Contract.ApiCapability.Name}");
+        }
     }
 
     [SkippableTheory]
@@ -1371,6 +1500,8 @@ public sealed class MigrationRunnerIntegrationTests
     [InlineData("index_definition")]
     [InlineData("function_body")]
     [InlineData("function_acl")]
+    [InlineData("rehash_function_body")]
+    [InlineData("rehash_function_acl")]
     [InlineData("trigger_disabled")]
     [InlineData("unexpected_catalog_trigger")]
     [InlineData("catalog_hash")]
@@ -1404,6 +1535,18 @@ public sealed class MigrationRunnerIntegrationTests
                 """,
             "function_acl" =>
                 "GRANT EXECUTE ON FUNCTION public.resolve_installation(bytea,smallint) TO PUBLIC",
+            "rehash_function_body" => """
+                CREATE OR REPLACE FUNCTION public.resolve_installation_and_rehash(
+                    p_secret_hash bytea,p_key_version smallint,
+                    p_active_secret_hash bytea,p_active_key_version smallint)
+                RETURNS TABLE(principal_id uuid,credential_id uuid,generation integer,
+                    tier varchar,principal_status varchar,credential_state varchar)
+                LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+                SET search_path=pg_catalog,pg_temp
+                AS $$ BEGIN RETURN; END $$
+                """,
+            "rehash_function_acl" =>
+                "GRANT EXECUTE ON FUNCTION public.resolve_installation_and_rehash(bytea,smallint,bytea,smallint) TO PUBLIC",
             "trigger_disabled" =>
                 "ALTER TABLE public.assets DISABLE TRIGGER trg_asset_catalog_revision_update",
             "unexpected_catalog_trigger" => """
@@ -1438,6 +1581,276 @@ public sealed class MigrationRunnerIntegrationTests
         (await database.ScalarAsync<string>(
             "SELECT state FROM saydin_migration_control WHERE singleton=1")).Should().Be("ready",
             "verify-only must report drift without mutating the control plane");
+    }
+
+    [SkippableTheory]
+    [InlineData("constraint_definition")]
+    [InlineData("trigger_disabled")]
+    [InlineData("function_body")]
+    [InlineData("public_acl")]
+    public async Task VerifyOnly_RejectsEveryApiSecurityAdmissionFingerprintDrift(string drift)
+    {
+        var admin = IntegrationEnvironment.RequirePrimary();
+        await using var database = await TestDatabase.CreateAsync(admin);
+        await RunAsync(database.ConnectionString);
+        var sql = drift switch
+        {
+            "constraint_definition" => $"""
+                SET ROLE "{database.Contract.TimescaleScheduler.Name}";
+                ALTER TABLE public.activity_logs SET (timescaledb.compress=false);
+                ALTER TABLE public.activity_logs ADD CONSTRAINT chk_activity_action
+                    CHECK (action IS NOT NULL) NOT VALID;
+                RESET ROLE;
+                """,
+            "trigger_disabled" => $"""
+                SET ROLE "{database.Contract.TimescaleScheduler.Name}";
+                DROP TRIGGER trg_activity_action_allowlist ON public.activity_logs;
+                RESET ROLE;
+                """,
+            "function_body" => """
+                CREATE OR REPLACE FUNCTION public.installation_verifier_matches(
+                    p_expected bytea,p_candidate bytea)
+                RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+                SET search_path=pg_catalog,pg_temp
+                AS $$ BEGIN RETURN true; END $$
+                """,
+            "public_acl" => """
+                GRANT EXECUTE ON FUNCTION
+                    public.resolve_installation_rotation_commit(uuid,bytea,smallint) TO PUBLIC
+                """,
+            _ => throw new ArgumentOutOfRangeException(nameof(drift)),
+        };
+        await database.ExecuteAsync(sql);
+        var error = new StringWriter();
+
+        var exit = await MigratorApplication.RunAsync(
+            ["--verify-only"], ApplicationEnvironment(database.ConnectionString),
+            TextWriter.Null, error);
+
+        exit.Should().Be(3);
+        error.ToString().Should().Contain("code=schema_fingerprint_mismatch");
+        (await database.ScalarAsync<string>(
+            "SELECT state FROM saydin_migration_control WHERE singleton=1"))
+            .Should().Be("ready");
+    }
+
+    [SkippableFact]
+    public async Task ApiSecurityAdmissionUpgrade_RejectsPermissiveNamedPredecessor()
+    {
+        var admin = IntegrationEnvironment.RequirePrimary();
+        await using var database = await TestDatabase.CreateAsync(admin);
+        using var through022 = MigrationDirectoryThrough(
+            "023_installation_lifecycle_admission.sql");
+        (await RunAsync(database.ConnectionString, through022.Path)).Applied.Should().Be(24);
+        await database.ExecuteAsync($"""
+            SET ROLE "{database.Contract.TimescaleScheduler.Name}";
+            ALTER TABLE public.activity_logs SET (timescaledb.compress=false);
+            ALTER TABLE public.activity_logs DROP CONSTRAINT chk_activity_action;
+            ALTER TABLE public.activity_logs ADD CONSTRAINT chk_activity_action
+                CHECK (action IS NOT NULL);
+            RESET ROLE;
+            """);
+
+        var action = async () => await RunAsync(database.ConnectionString);
+
+        var failure = (await action.Should().ThrowAsync<MigratorRejectedException>()).Which;
+        failure.Code.Should().Be("migration_failed");
+        failure.InnerException.Should().BeOfType<PostgresException>()
+            .Which.SqlState.Should().Be(PostgresErrorCodes.InsufficientPrivilege);
+        (await database.ScalarAsync<bool>("""
+            SELECT pg_catalog.to_regprocedure(
+                       'public.resolve_installation_rotation_commit(uuid,bytea,smallint)') IS NULL
+               AND (SELECT state='failed' FROM public.schema_migrations
+                     WHERE version='023_installation_lifecycle_admission')
+            """)).Should().BeTrue("the rejected migration transaction must leave no partial objects");
+    }
+
+    [SkippableFact]
+    public async Task PendingCommitResolver_IsRotationBoundAndActiveRetryIsExact()
+    {
+        var admin = IntegrationEnvironment.RequirePrimary();
+        await using var database = await TestDatabase.CreateAsync(admin);
+        await RunAsync(database.ConnectionString);
+        const string principal = "a0230000-0000-7000-8000-000000000001";
+        const string activeCredential = "a0230000-0000-7000-8000-000000000002";
+        const string pendingCredential = "a0230000-0000-7000-8000-000000000003";
+        const string rotation = "a0230000-0000-7000-8000-000000000004";
+        const string otherPrincipal = "a0230000-0000-7000-8000-000000000011";
+        const string otherCredential = "a0230000-0000-7000-8000-000000000012";
+        await database.ExecuteAsync($"""
+            SELECT * FROM public.register_installation(
+                '{principal}','{activeCredential}',decode(repeat('11',32),'hex'),1::smallint);
+            SELECT * FROM public.begin_installation_rotation(
+                decode(repeat('11',32),'hex'),1::smallint,'{rotation}',
+                '{pendingCredential}',decode(repeat('22',32),'hex'),1::smallint);
+            SELECT * FROM public.register_installation(
+                '{otherPrincipal}','{otherCredential}',decode(repeat('33',32),'hex'),1::smallint);
+            """);
+
+        (await database.ScalarAsync<long>($"""
+            SELECT count(*) FROM public.resolve_installation(
+                decode(repeat('22',32),'hex'),1::smallint)
+            """)).Should().Be(0,
+            "pending credentials must remain inaccessible to active business endpoints");
+        (await database.ScalarAsync<bool>($"""
+            SELECT count(*)=1 AND bool_and(principal_id='{principal}'::uuid
+                                           AND credential_id='{pendingCredential}'::uuid
+                                           AND credential_state='pending')
+              FROM public.resolve_installation_rotation_commit(
+                  '{rotation}',decode(repeat('22',32),'hex'),1::smallint)
+            """)).Should().BeTrue();
+        (await database.ScalarAsync<bool>($"""
+            SELECT (SELECT count(*)=0 FROM public.resolve_installation_rotation_commit(
+                       gen_random_uuid(),decode(repeat('22',32),'hex'),1::smallint))
+               AND (SELECT count(*)=0 FROM public.resolve_installation_rotation_commit(
+                       '{rotation}',decode(repeat('23',32),'hex'),1::smallint))
+               AND (SELECT count(*)=0 FROM public.resolve_installation_rotation_commit(
+                       '{rotation}',decode(repeat('33',32),'hex'),1::smallint))
+            """)).Should().BeTrue("rotation id, verifier, and principal binding are all exact");
+
+        await database.ExecuteAsync($"""
+            SELECT * FROM public.commit_installation_rotation(
+                '{rotation}',decode(repeat('22',32),'hex'),1::smallint)
+            """);
+
+        (await database.ScalarAsync<bool>($"""
+            SELECT count(*)=1 AND bool_and(principal_id='{principal}'::uuid
+                                           AND credential_id='{pendingCredential}'::uuid
+                                           AND credential_state='active')
+              FROM public.resolve_installation_rotation_commit(
+                  '{rotation}',decode(repeat('22',32),'hex'),1::smallint)
+            """)).Should().BeTrue(
+            "an ACK-loss retry is admitted only by the same rotation id and new active verifier");
+        (await database.ScalarAsync<bool>($"""
+            SELECT (SELECT count(*)=0 FROM public.resolve_installation_rotation_commit(
+                       gen_random_uuid(),decode(repeat('22',32),'hex'),1::smallint))
+               AND (SELECT count(*)=0 FROM public.resolve_installation_rotation_commit(
+                       '{rotation}',decode(repeat('11',32),'hex'),1::smallint))
+               AND (SELECT count(*)=0 FROM public.resolve_installation_rotation_commit(
+                       '{rotation}',decode(repeat('33',32),'hex'),1::smallint))
+               AND NOT has_function_privilege(
+                       '{database.Contract.ApiCapability.Name}',
+                       'public.installation_verifier_matches(bytea,bytea)','EXECUTE')
+               AND has_function_privilege(
+                       '{database.Contract.ApiCapability.Name}',
+                       'public.resolve_installation_rotation_commit(uuid,bytea,smallint)','EXECUTE')
+               AND NOT has_function_privilege(
+                       '{database.Contract.AuditCapability.Name}',
+                       'public.resolve_installation_rotation_commit(uuid,bytea,smallint)','EXECUTE')
+            """)).Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public async Task ApiSecurityAdmissionUpgrade_PreservesCompressedHistoricalChunks()
+    {
+        var admin = IntegrationEnvironment.RequirePrimary();
+        await using var database = await TestDatabase.CreateAsync(admin);
+        using var through022 = MigrationDirectoryThrough(
+            "023_installation_lifecycle_admission.sql");
+        (await RunAsync(database.ConnectionString, through022.Path)).Applied.Should().Be(24);
+        await database.ExecuteAsync($"""
+            INSERT INTO public.activity_logs(
+                id,user_id,device_id,action,status_code,created_at)
+            VALUES ('a0230000-0000-7000-8000-000000000021',NULL,
+                    'compressed-023-upgrade','config_fetch',200,'2023-01-03T12:00:00Z');
+            DO $compress$
+            DECLARE old_chunk regclass;
+            BEGIN
+                SELECT activity.tableoid INTO STRICT old_chunk
+                  FROM public.activity_logs activity
+                 WHERE activity.id='a0230000-0000-7000-8000-000000000021';
+                EXECUTE pg_catalog.format('SET LOCAL ROLE %I',
+                    '{database.Contract.TimescaleScheduler.Name}');
+                PERFORM public.compress_chunk(old_chunk,if_not_compressed=>true);
+                RESET ROLE;
+            END
+            $compress$;
+            """);
+
+        (await RunAsync(database.ConnectionString)).Applied.Should().Be(2);
+
+        await database.ExecuteAsync($"""
+            SET ROLE "{database.Contract.ApiCapability.Name}";
+            INSERT INTO public.activity_logs(
+                id,user_id,device_id,action,status_code,created_at)
+            VALUES
+                ('a0230000-0000-7000-8000-000000000022',NULL,
+                 'new-action-023','installation_register',201,clock_timestamp()),
+                ('a0230000-0000-7000-8000-000000000023',NULL,
+                 'new-action-023','installation_rotation_begin',200,clock_timestamp()),
+                ('a0230000-0000-7000-8000-000000000024',NULL,
+                 'new-action-023','installation_rotation_commit',204,clock_timestamp()),
+                ('a0230000-0000-7000-8000-000000000025',NULL,
+                 'new-action-023','installation_revoke',204,'2032-01-03T12:00:00Z')
+            ;
+            RESET ROLE;
+            """);
+        var invalidInsert = async () => await database.ExecuteAsync($"""
+            SET ROLE "{database.Contract.ApiCapability.Name}";
+            INSERT INTO public.activity_logs(
+                id,user_id,device_id,action,status_code,created_at)
+            VALUES ('a0230000-0000-7000-8000-000000000026',NULL,
+                    'invalid-action-023','unknown_action',200,clock_timestamp())
+            """);
+        (await invalidInsert.Should().ThrowAsync<PostgresException>()).Which.SqlState
+            .Should().Be(PostgresErrorCodes.CheckViolation);
+        var invalidUpdate = async () => await database.ExecuteAsync($"""
+            SET ROLE "{database.Contract.TimescaleScheduler.Name}";
+            UPDATE public.activity_logs SET action='unknown_action'
+             WHERE id='a0230000-0000-7000-8000-000000000022'
+            """);
+        (await invalidUpdate.Should().ThrowAsync<PostgresException>()).Which.SqlState
+            .Should().Be(PostgresErrorCodes.CheckViolation);
+
+        (await database.ScalarAsync<bool>($"""
+            SELECT (SELECT count(*)=5 FROM public.activity_logs
+                     WHERE id::text LIKE 'a0230000-0000-7000-8000-00000000002%')
+               AND EXISTS (
+                       SELECT 1 FROM timescaledb_information.chunks chunk
+                        WHERE chunk.hypertable_schema='public'
+                          AND chunk.hypertable_name='activity_logs'
+                          AND chunk.is_compressed
+                          AND '2023-01-03T12:00:00Z'::timestamptz>=chunk.range_start
+                          AND '2023-01-03T12:00:00Z'::timestamptz<chunk.range_end)
+               AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_constraint
+                     WHERE conrelid='public.activity_logs'::regclass
+                       AND conname='chk_activity_action')
+               AND (SELECT count(*)=1 AND bool_and(job.scheduled
+                           AND job.config->>'compress_after'='7 days')
+                      FROM timescaledb_information.jobs job
+                     WHERE job.hypertable_schema='public'
+                       AND job.hypertable_name='activity_logs'
+                       AND job.proc_name='policy_compression')
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM timescaledb_information.chunks chunk
+                      JOIN pg_catalog.pg_namespace namespace
+                        ON namespace.nspname=chunk.chunk_schema
+                      JOIN pg_catalog.pg_class relation
+                        ON relation.relnamespace=namespace.oid
+                       AND relation.relname=chunk.chunk_name
+                     WHERE chunk.hypertable_schema='public'
+                       AND chunk.hypertable_name='activity_logs'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM pg_catalog.pg_trigger trigger
+                            WHERE trigger.tgrelid=relation.oid
+                              AND trigger.tgname='trg_activity_action_allowlist'
+                              AND trigger.tgenabled='O' AND trigger.tgtype=23
+                              AND NOT trigger.tgisinternal))
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM timescaledb_information.chunks chunk
+                      JOIN pg_catalog.pg_namespace namespace
+                        ON namespace.nspname=chunk.chunk_schema
+                      JOIN pg_catalog.pg_class relation
+                        ON relation.relnamespace=namespace.oid
+                       AND relation.relname=chunk.chunk_name
+                     WHERE chunk.hypertable_schema='public'
+                       AND chunk.hypertable_name='activity_logs'
+                       AND pg_catalog.has_table_privilege(
+                           '{database.Contract.Owner.Name}',relation.oid,'TRIGGER'))
+            """)).Should().BeTrue();
     }
 
     [SkippableTheory]
@@ -1645,7 +2058,7 @@ public sealed class MigrationRunnerIntegrationTests
         pre022Failure.Which.SqlState.Should().Be(PostgresErrorCodes.InsufficientPrivilege);
 
         var result = await RunAsync(database.ConnectionString);
-        result.Applied.Should().Be(1);
+        result.Applied.Should().Be(3);
         result.AlreadyApplied.Should().Be(23);
 
         (await database.ScalarAsync<bool>($"""
@@ -1696,7 +2109,9 @@ public sealed class MigrationRunnerIntegrationTests
                 ('{database.Contract.TimescaleScheduler.Name}',
                  '{database.Contract.TimescaleScheduler.Name}','SELECT',false),
                 ('{database.Contract.TimescaleScheduler.Name}',
-                 '{database.Contract.TimescaleScheduler.Name}','UPDATE',false)),
+                 '{database.Contract.TimescaleScheduler.Name}','UPDATE',false),
+                ('{database.Contract.TimescaleScheduler.Name}',
+                 '{database.Contract.TimescaleScheduler.Name}','TRIGGER',false)),
             actual_acl AS (
                 SELECT relation.oid,grantee.rolname,grantor.rolname,
                        acl.privilege_type,acl.is_grantable
@@ -1900,7 +2315,7 @@ public sealed class MigrationRunnerIntegrationTests
             """)).Should().BeTrue();
 
         var rerun = await RunAsync(database.ConnectionString);
-        rerun.Applied.Should().Be(1);
+        rerun.Applied.Should().Be(3);
         rerun.AlreadyApplied.Should().Be(23);
         var verifyExit = await MigratorApplication.RunAsync(
             ["--verify-only"], ApplicationEnvironment(database.ConnectionString),
@@ -1909,7 +2324,7 @@ public sealed class MigrationRunnerIntegrationTests
     }
 
     [SkippableFact]
-    public async Task UnknownTailMigration_IsRejectedBeforeConnectionOrDdl()
+    public async Task UnsignedTailMigration_IsRejectedBeforeConnectionOrDdl()
     {
         var admin = IntegrationEnvironment.RequirePrimary();
         await using var database = await TestDatabase.CreateAsync(admin);
@@ -1921,7 +2336,7 @@ public sealed class MigrationRunnerIntegrationTests
             database.Options(migrations.Path), TextWriter.Null).RunAsync();
 
         var failure = await act.Should().ThrowAsync<MigratorRejectedException>();
-        failure.Which.Code.Should().Be("historical_manifest_mismatch");
+        failure.Which.Code.Should().Be("migration_impact_configuration_required");
         (await database.ScalarAsync<bool>(
             "SELECT to_regclass('public.must_never_execute') IS NULL")).Should().BeTrue();
         (await database.ScalarAsync<bool>(
@@ -2306,12 +2721,16 @@ public sealed class MigrationRunnerIntegrationTests
     {
         var admin = IntegrationEnvironment.RequirePrimary();
         await using var database = await TestDatabase.CreateAsync(admin);
-        using var migrations = MigrationDirectoryWith("900_concurrency_probe.sql", """
-            CREATE TABLE migration_concurrency_probe(value integer NOT NULL);
-            SELECT pg_sleep(0.5);
-            INSERT INTO migration_concurrency_probe(value) VALUES (1);
-            """);
-        var options = Options(database.ConnectionString, migrations.Path);
+        await RunAsync(database.ConnectionString);
+        using var package = ImpactTestPackage.Create(
+            database,
+            "CREATE INDEX ix_migration_concurrency_probe ON public.schema_migrations(state);\n",
+            "transactional", ["create-index-nonconcurrent"], "public.schema_migrations",
+            postconditionKind: "index-valid",
+            postconditionIndex: "ix_migration_concurrency_probe",
+            migrationVersion: "900_concurrency_probe");
+        var options = database.Options(
+            package.MigrationsDirectory, impactConfiguration: package.Configuration);
         var first = new MigrationRunner(
             options, TextWriter.Null, allowCanonicalPrefixFixture: true).RunAsync();
         var second = new MigrationRunner(
@@ -2319,9 +2738,12 @@ public sealed class MigrationRunnerIntegrationTests
 
         await Task.WhenAll(first, second);
 
-        (await database.ScalarAsync<long>("SELECT COUNT(*) FROM migration_concurrency_probe"))
-            .Should().Be(1);
-        new[] { first.Result.Applied, second.Result.Applied }.Should().BeEquivalentTo([0, 25]);
+        (await database.ScalarAsync<bool>("""
+            SELECT indisvalid AND indisready
+              FROM pg_catalog.pg_index
+             WHERE indexrelid='public.ix_migration_concurrency_probe'::regclass
+            """)).Should().BeTrue();
+        new[] { first.Result.Applied, second.Result.Applied }.Should().BeEquivalentTo([0, 1]);
     }
 
     [SkippableFact]
@@ -2330,24 +2752,32 @@ public sealed class MigrationRunnerIntegrationTests
         var admin = IntegrationEnvironment.RequirePrimary();
         await using var database = await TestDatabase.CreateAsync(admin);
         await RunAsync(database.ConnectionString);
-        using var migrations = MigrationDirectoryWith("900_kill_probe.sql", """
-            CREATE TABLE migration_kill_probe(value integer NOT NULL);
-            INSERT INTO migration_kill_probe(value) VALUES (1);
-            """);
+        using var package = ImpactTestPackage.Create(
+            database,
+            "CREATE INDEX ix_migration_kill_probe ON public.schema_migrations(state);\n",
+            "transactional", ["create-index-nonconcurrent"], "public.schema_migrations",
+            postconditionKind: "index-valid", postconditionIndex: "ix_migration_kill_probe",
+            migrationVersion: "900_kill_probe");
         var fault = new TerminateSessionAfterBodyFault(admin, "900_kill_probe");
 
         var act = () => new MigrationRunner(
-            Options(database.ConnectionString, migrations.Path), TextWriter.Null, fault,
+            database.Options(package.MigrationsDirectory,
+                impactConfiguration: package.Configuration), TextWriter.Null, fault,
             allowCanonicalPrefixFixture: true).RunAsync();
 
         await act.Should().ThrowAsync<MigratorRejectedException>();
         await database.WaitUntilReachableAsync();
-        (await database.ScalarAsync<bool>("SELECT to_regclass('public.migration_kill_probe') IS NOT NULL"))
+        (await database.ScalarAsync<bool>(
+            "SELECT to_regclass('public.ix_migration_kill_probe') IS NOT NULL"))
             .Should().BeFalse("the killed session's transaction must roll back");
 
-        var rerun = await RunAsync(database.ConnectionString, migrations.Path);
+        var rerun = await new MigrationRunner(
+            database.Options(package.MigrationsDirectory,
+                impactConfiguration: package.Configuration), TextWriter.Null,
+            allowCanonicalPrefixFixture: true).RunAsync();
         rerun.Applied.Should().Be(1);
-        (await database.ScalarAsync<long>("SELECT COUNT(*) FROM migration_kill_probe")).Should().Be(1);
+        (await database.ScalarAsync<bool>(
+            "SELECT to_regclass('public.ix_migration_kill_probe') IS NOT NULL")).Should().BeTrue();
         (await database.ScalarAsync<string>("SELECT state FROM schema_migrations WHERE version='900_kill_probe'"))
             .Should().Be("succeeded");
     }
@@ -2358,27 +2788,34 @@ public sealed class MigrationRunnerIntegrationTests
         var admin = IntegrationEnvironment.RequirePrimary();
         await using var database = await TestDatabase.CreateAsync(admin);
         await RunAsync(database.ConnectionString);
-        using var migrations = MigrationDirectoryWith("900_transaction_probe.sql", """
-            BEGIN;
-            CREATE TABLE migration_transaction_probe(value integer NOT NULL);
-            INSERT INTO migration_transaction_probe(value) VALUES (1);
-            COMMIT;
-            """);
+        using var package = ImpactTestPackage.Create(
+            database,
+            "CREATE INDEX ix_migration_transaction_probe ON public.schema_migrations(state);\n",
+            "transactional", ["create-index-nonconcurrent"], "public.schema_migrations",
+            postconditionKind: "index-valid",
+            postconditionIndex: "ix_migration_transaction_probe",
+            migrationVersion: "900_transaction_probe");
         var fault = new ThrowAfterBodyFault("900_transaction_probe");
 
         var act = () => new MigrationRunner(
-            Options(database.ConnectionString, migrations.Path), TextWriter.Null, fault,
+            database.Options(package.MigrationsDirectory,
+                impactConfiguration: package.Configuration), TextWriter.Null, fault,
             allowCanonicalPrefixFixture: true).RunAsync();
 
         await act.Should().ThrowAsync<MigratorRejectedException>();
-        (await database.ScalarAsync<bool>("SELECT to_regclass('public.migration_transaction_probe') IS NOT NULL"))
+        (await database.ScalarAsync<bool>(
+            "SELECT to_regclass('public.ix_migration_transaction_probe') IS NOT NULL"))
             .Should().BeFalse();
         (await database.ScalarAsync<string>("SELECT state FROM schema_migrations WHERE version='900_transaction_probe'"))
             .Should().Be("failed");
 
-        var rerun = await RunAsync(database.ConnectionString, migrations.Path);
+        var rerun = await new MigrationRunner(
+            database.Options(package.MigrationsDirectory,
+                impactConfiguration: package.Configuration), TextWriter.Null,
+            allowCanonicalPrefixFixture: true).RunAsync();
         rerun.Applied.Should().Be(1);
-        (await database.ScalarAsync<long>("SELECT COUNT(*) FROM migration_transaction_probe")).Should().Be(1);
+        (await database.ScalarAsync<bool>(
+            "SELECT to_regclass('public.ix_migration_transaction_probe') IS NOT NULL")).Should().BeTrue();
     }
 
     [SkippableFact]
@@ -2387,27 +2824,35 @@ public sealed class MigrationRunnerIntegrationTests
         var admin = IntegrationEnvironment.RequirePrimary();
         await using var database = await TestDatabase.CreateAsync(admin);
         await RunAsync(database.ConnectionString);
-        using var migrations = MigrationDirectoryWith("900_commit_probe.sql", """
-            CREATE TABLE migration_commit_probe(value integer NOT NULL);
-            INSERT INTO migration_commit_probe(value) VALUES (1);
-            """);
+        using var package = ImpactTestPackage.Create(
+            database,
+            "CREATE INDEX ix_migration_commit_probe ON public.schema_migrations(state);\n",
+            "transactional", ["create-index-nonconcurrent"], "public.schema_migrations",
+            postconditionKind: "index-valid", postconditionIndex: "ix_migration_commit_probe",
+            migrationVersion: "900_commit_probe");
         var fault = new ThrowAfterCommitFault("900_commit_probe");
 
         var first = await new MigrationRunner(
-            Options(database.ConnectionString, migrations.Path), TextWriter.Null, fault,
+            database.Options(package.MigrationsDirectory,
+                impactConfiguration: package.Configuration), TextWriter.Null, fault,
             allowCanonicalPrefixFixture: true).RunAsync();
-        var rerun = await RunAsync(database.ConnectionString, migrations.Path);
+        var rerun = await new MigrationRunner(
+            database.Options(package.MigrationsDirectory,
+                impactConfiguration: package.Configuration), TextWriter.Null,
+            allowCanonicalPrefixFixture: true).RunAsync();
 
         first.Applied.Should().Be(1);
         rerun.Applied.Should().Be(0);
-        (await database.ScalarAsync<long>("SELECT COUNT(*) FROM migration_commit_probe")).Should().Be(1);
+        (await database.ScalarAsync<bool>(
+            "SELECT to_regclass('public.ix_migration_commit_probe') IS NOT NULL")).Should().BeTrue();
     }
 
     [SkippableFact]
     public async Task Legacy019WireCommitAcknowledgementLoss_NewProcessWithSameCutoverArgumentsReconciles()
     {
         var admin = IntegrationEnvironment.RequirePrimary();
-        await using var database = await TestDatabase.CreateAsync(admin);
+        await using var database = await TestDatabase.CreateHbaBoundAsync(
+            admin, HbaBoundTestFixture.LegacyAck);
         await database.PrepareLegacy014Async();
         using var pre019 = Pre019Directory();
         await RunAsync(database.ConnectionString, pre019.Path, legacyCutover: true);
@@ -2456,9 +2901,17 @@ public sealed class MigrationRunnerIntegrationTests
             "the same cutover arguments must reconcile after the lost acknowledgement; stdout={0}; stderr={1}",
             reconciled.StandardOutput, reconciled.StandardError);
         reconciled.StandardOutput.Should().NotContain("applied: 019_privilege_separation.sql");
+        reconciled.StandardOutput.Should().Contain("backup_postbootstrap_required=true");
         (await database.ScalarAsync<string>(
             "SELECT state FROM saydin_migration_control WHERE singleton=1")).Should().Be("ready");
         await AssertPublicRegexOperatorWasIsolatedAsync(database);
+
+        await database.EnsureRolesThroughApplicationAsync();
+        var converged = await new MigrationRunner(
+            Options(database.ConnectionString, TestPaths.MigrationsDirectory), TextWriter.Null).RunAsync();
+        converged.Applied.Should().Be(0);
+        converged.AlreadyApplied.Should().Be(27);
+        converged.BackupPostBootstrapRequired.Should().BeFalse();
 
         var verifyExit = await MigratorApplication.RunAsync(
             ["--verify-only"], ApplicationEnvironment(database.ConnectionString),
@@ -2533,8 +2986,9 @@ public sealed class MigrationRunnerIntegrationTests
         IReadOnlyList<string> arguments,
         IReadOnlyDictionary<string, string?> environment)
     {
-        var assembly = Path.Combine(TestPaths.RepositoryRoot, "src", "Saydin.DatabaseMigrator",
-            "bin", "Release", "net10.0", "Saydin.DatabaseMigrator.dll");
+        var assembly = Path.Combine(AppContext.BaseDirectory, "Saydin.DatabaseMigrator.dll");
+        File.Exists(assembly).Should().BeTrue(
+            "the child must execute the migrator built in the active test configuration");
         var start = new ProcessStartInfo("dotnet")
         {
             UseShellExecute = false,
@@ -2659,7 +3113,7 @@ public sealed class MigrationRunnerIntegrationTests
             """)).Should().Be("ready");
         (await database.ScalarAsync<bool>("""
             SELECT NOT EXISTS (
-                SELECT 1 FROM public.schema_migrations WHERE version='023_impact_test')
+                SELECT 1 FROM public.schema_migrations WHERE version='026_impact_test')
                AND pg_catalog.to_regclass('public.ix_dbm004_fixture_marker') IS NULL
                AND pg_catalog.to_regclass('public.saydin_online_migration_checkpoints') IS NULL
             """)).Should().BeTrue();
@@ -2780,6 +3234,34 @@ public sealed class MigrationRunnerIntegrationTests
             }
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class ReplaceOnlineLeaseAfterFirstBody(string version) : IMigrationFaultInjector
+    {
+        private bool replaced;
+
+        public async ValueTask AfterBodyAsync(
+            MigrationDefinition migration,
+            NpgsqlConnection connection,
+            NpgsqlTransaction transaction,
+            CancellationToken cancellationToken)
+        {
+            if (replaced || migration.Version != version)
+                return;
+            replaced = true;
+            await using var command = new NpgsqlCommand("""
+                UPDATE public.saydin_online_migration_checkpoints
+                   SET lease_nonce=pg_catalog.gen_random_uuid(),
+                       lease_expires_at=pg_catalog.clock_timestamp()+INTERVAL '1 hour'
+                 WHERE migration_version=$1
+                """, connection, transaction);
+            command.Parameters.AddWithValue(version);
+            (await command.ExecuteNonQueryAsync(cancellationToken)).Should().Be(1);
+        }
+
+        public ValueTask AfterCommitAsync(
+            MigrationDefinition migration,
+            CancellationToken cancellationToken) => ValueTask.CompletedTask;
     }
 
     private sealed class ThrowAfterBodyFault(string version) : IMigrationFaultInjector

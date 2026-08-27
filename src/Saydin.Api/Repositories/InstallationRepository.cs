@@ -17,13 +17,38 @@ public sealed class InstallationRepository(NpgsqlDataSource dataSource) : IInsta
 
     public async Task<InstallationPrincipal?> ResolveAsync(
         IReadOnlyList<CredentialHashCandidate> candidates,
+        short activeKeyVersion,
+        CancellationToken ct)
+    {
+        var active = candidates.SingleOrDefault(candidate => candidate.KeyVersion == activeKeyVersion)
+            ?? throw new InvalidOperationException(
+                "Installation credential keyring omitted its active verifier.");
+        foreach (var candidate in candidates)
+        {
+            var resolved = await ExecuteOptionalAsync(
+                "SELECT * FROM public.resolve_installation_and_rehash($1, $2, $3, $4)",
+                [
+                    Bytes(candidate.SecretHash), SmallInt(candidate.KeyVersion),
+                    Bytes(active.SecretHash), SmallInt(active.KeyVersion),
+                ],
+                ct);
+            if (resolved is not null)
+                return resolved;
+        }
+
+        return null;
+    }
+
+    public async Task<InstallationPrincipal?> ResolvePendingRotationAsync(
+        Guid rotationId,
+        IReadOnlyList<CredentialHashCandidate> candidates,
         CancellationToken ct)
     {
         foreach (var candidate in candidates)
         {
             var resolved = await ExecuteOptionalAsync(
-                "SELECT * FROM public.resolve_installation($1, $2)",
-                [Bytes(candidate.SecretHash), SmallInt(candidate.KeyVersion)],
+                "SELECT * FROM public.resolve_installation_rotation_commit($1, $2, $3)",
+                [Uuid(rotationId), Bytes(candidate.SecretHash), SmallInt(candidate.KeyVersion)],
                 ct);
             if (resolved is not null)
                 return resolved;
@@ -54,8 +79,9 @@ public sealed class InstallationRepository(NpgsqlDataSource dataSource) : IInsta
             [Uuid(rotationId), Bytes(newCredential.SecretHash), SmallInt(newCredential.KeyVersion)],
             ct);
 
-    public async Task RevokeAsync(CredentialHashCandidate currentCredential, CancellationToken ct)
-        => _ = await ExecuteRequiredAsync(
+    public Task<InstallationPrincipal> RevokeAsync(
+        CredentialHashCandidate currentCredential,
+        CancellationToken ct) => ExecuteRequiredAsync(
             "SELECT * FROM public.revoke_installation($1, $2)",
             [Bytes(currentCredential.SecretHash), SmallInt(currentCredential.KeyVersion)],
             ct);

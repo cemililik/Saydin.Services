@@ -1,6 +1,9 @@
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Localization;
+using Saydin.Api;
 using Saydin.Api.Exceptions;
 using Saydin.Api.Services;
 
@@ -14,7 +17,7 @@ public sealed class QuotaUnavailableExceptionHandlerTests
         var context = new DefaultHttpContext();
         context.TraceIdentifier = "quota-trace";
         context.Response.Body = new MemoryStream();
-        var handler = new QuotaUnavailableExceptionHandler();
+        var handler = new QuotaUnavailableExceptionHandler(CreateLocalizer());
 
         var handled = await handler.TryHandleAsync(
             context, new QuotaUnavailableException(), CancellationToken.None);
@@ -33,11 +36,20 @@ public sealed class QuotaUnavailableExceptionHandlerTests
     public async Task UnrelatedException_IsNotHandled()
     {
         var context = new DefaultHttpContext();
-        var handler = new QuotaUnavailableExceptionHandler();
+        var handler = new QuotaUnavailableExceptionHandler(CreateLocalizer());
 
         var handled = await handler.TryHandleAsync(
             context, new InvalidOperationException("sentinel"), CancellationToken.None);
 
         handled.Should().BeFalse();
+    }
+
+    private static IStringLocalizer<ErrorMessages> CreateLocalizer()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddLocalization();
+        return services.BuildServiceProvider()
+            .GetRequiredService<IStringLocalizer<ErrorMessages>>();
     }
 }

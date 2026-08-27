@@ -55,6 +55,12 @@ public class InflationRepositoryIntegrationTests(DatabaseFixture db)
         exact.Values.Should().OnlyContain(index =>
             index.Authority.PriceKind == "cpi_index"
             && index.Authority.AuthorityContractVersion == 1);
+
+        var terminal = await repository.GetLatestFinalIndexValueAsync(
+            new DateOnly(2024, 4, 1), CancellationToken.None);
+        terminal.Should().NotBeNull();
+        terminal!.PeriodDate.Should().Be(AuthorityObservationScenario.LastFinalCpiMonth);
+        terminal.IndexValue.Should().Be(204m);
     }
 
     [SkippableFact]

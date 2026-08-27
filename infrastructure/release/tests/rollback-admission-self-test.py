@@ -93,7 +93,7 @@ exit 99
             "v1.2.4", "v1.2.3", "saydin/services", "e" * 40, "c" * 40,
         ]
         result = subprocess.run(
-            command, cwd=ROOT, env=environment, capture_output=True, text=True, check=False)
+            command, cwd=temp, env=environment, capture_output=True, text=True, check=False)
         log = cosign_log.read_text(encoding="utf-8") if cosign_log.exists() else ""
         passed = (
             result.returncode == 78

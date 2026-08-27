@@ -7,6 +7,7 @@ using FluentAssertions;
 
 namespace Saydin.DataQualityAudit.IntegrationTests;
 
+[Collection(AuditDatabaseCollection.Name)]
 public sealed class KmsFakeServiceIntegrationTests
 {
     private const string KeyId = "ocid1.key.oc1.eu-frankfurt-1.fake-service";
@@ -25,7 +26,8 @@ public sealed class KmsFakeServiceIntegrationTests
             await File.WriteAllTextAsync(publicKeyFile, key.ExportSubjectPublicKeyInfoPem());
             var evidenceKeyId = AuditCryptography.PublicKeyId(publicKeyFile);
             await using var service = await FakeKmsService.StartAsync(key);
-            using var client = new FakeHttpKmsSigningClient(service.Endpoint);
+            using var httpClient = new HttpClient { BaseAddress = service.Endpoint };
+            using var client = new FakeHttpKmsSigningClient(httpClient);
             var options = new OciKmsSignerConfiguration(
                 KeyId,
                 KeyVersionId,
@@ -53,10 +55,8 @@ public sealed class KmsFakeServiceIntegrationTests
         }
     }
 
-    private sealed class FakeHttpKmsSigningClient(Uri endpoint) : IOciKmsSigningClient
+    private sealed class FakeHttpKmsSigningClient(HttpClient client) : IOciKmsSigningClient
     {
-        private readonly HttpClient client = new() { BaseAddress = endpoint };
-
         public async Task<OciKmsSignatureResponse> SignDigestAsync(
             string keyId,
             string keyVersionId,
@@ -74,7 +74,7 @@ public sealed class KmsFakeServiceIntegrationTests
                    throw new InvalidOperationException("fake KMS response missing");
         }
 
-        public void Dispose() => client.Dispose();
+        public void Dispose() { }
     }
 
     private sealed class FakeKmsService : IAsyncDisposable
@@ -83,6 +83,9 @@ public sealed class KmsFakeServiceIntegrationTests
         private readonly ECDsa key;
         private readonly CancellationTokenSource stop = new();
         private readonly Task serverTask;
+        private int observedRequests;
+        private string? observedKeyId;
+        private string? observedKeyVersionId;
 
         private FakeKmsService(TcpListener listener, ECDsa key)
         {
@@ -94,9 +97,9 @@ public sealed class KmsFakeServiceIntegrationTests
         }
 
         public Uri Endpoint { get; }
-        public int ObservedRequests { get; private set; }
-        public string? ObservedKeyId { get; private set; }
-        public string? ObservedKeyVersionId { get; private set; }
+        public int ObservedRequests => Volatile.Read(ref observedRequests);
+        public string? ObservedKeyId => Volatile.Read(ref observedKeyId);
+        public string? ObservedKeyVersionId => Volatile.Read(ref observedKeyVersionId);
 
         public static Task<FakeKmsService> StartAsync(ECDsa key)
         {
@@ -113,12 +116,13 @@ public sealed class KmsFakeServiceIntegrationTests
                 await using var stream = connection.GetStream();
                 var headerBytes = new List<byte>();
                 var suffix = new byte[] { 13, 10, 13, 10 };
+                var nextBuffer = new byte[1];
                 while (!EndsWith(headerBytes, suffix))
                 {
-                    var next = stream.ReadByte();
-                    if (next < 0 || headerBytes.Count >= 16 * 1024)
+                    var read = await stream.ReadAsync(nextBuffer, stop.Token);
+                    if (read == 0 || headerBytes.Count >= 16 * 1024)
                         throw new InvalidOperationException("fake KMS request headers invalid");
-                    headerBytes.Add((byte)next);
+                    headerBytes.Add(nextBuffer[0]);
                 }
                 var headers = Encoding.ASCII.GetString(headerBytes.ToArray());
                 var contentLengthLine = headers.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)
@@ -132,9 +136,9 @@ public sealed class KmsFakeServiceIntegrationTests
                 await stream.ReadExactlyAsync(body, stop.Token);
                 var request = JsonSerializer.Deserialize<FakeSignRequest>(body) ??
                     throw new InvalidOperationException("fake KMS request body invalid");
-                ObservedRequests++;
-                ObservedKeyId = request.KeyId;
-                ObservedKeyVersionId = request.KeyVersionId;
+                Interlocked.Increment(ref observedRequests);
+                Volatile.Write(ref observedKeyId, request.KeyId);
+                Volatile.Write(ref observedKeyVersionId, request.KeyVersionId);
                 var digest = Convert.FromBase64String(request.Base64Digest);
                 if (digest.Length != 32)
                     throw new InvalidOperationException("fake KMS digest invalid");

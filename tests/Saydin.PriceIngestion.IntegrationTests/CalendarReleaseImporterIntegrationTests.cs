@@ -292,14 +292,6 @@ public sealed class CalendarReleaseImporterIntegrationTests(IngestionDatabaseFix
     {
         public Task<IReadOnlyList<Asset>> GetActiveAssetsBySourceAsync(
             string source, CancellationToken ct) => throw new NotSupportedException();
-        public Task UpsertPricePointsAsync(
-            IReadOnlyList<PricePoint> pricePoints, CancellationToken ct) =>
-            throw new NotSupportedException();
-        public Task<DateOnly?> GetLatestPriceDateAsync(Guid assetId, CancellationToken ct) =>
-            throw new NotSupportedException();
-        public Task<IReadOnlySet<DateOnly>> GetExistingDatesAsync(
-            Guid assetId, DateOnly from, DateOnly to, CancellationToken ct) =>
-            throw new NotSupportedException();
         public Task<IReadOnlySet<DateOnly>> GetMarketHolidaysAsync(
             Guid assetId, DateOnly from, DateOnly to, CancellationToken ct) =>
             Task.FromResult<IReadOnlySet<DateOnly>>(new HashSet<DateOnly>());

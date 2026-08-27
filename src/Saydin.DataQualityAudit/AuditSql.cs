@@ -7,7 +7,7 @@ internal static class AuditSql
             SELECT base.*,
                    greatest(base.range_start,$2::date) AS audit_start,
                    least(base.range_end,$3::date) AS audit_end,
-                   base.range_start=$2::date AND base.range_end=$3::date AS full_window
+                   base.range_start >= $2::date AND base.range_end <= $3::date AS full_window
             FROM public.ingestion_windows base WHERE id = $1
         ),
         expected AS (
@@ -85,7 +85,7 @@ internal static class AuditSql
             SELECT base.*,
                    greatest(base.range_start,$2::date) AS audit_start,
                    least(base.range_end,$3::date) AS audit_end,
-                   base.range_start=$2::date AND base.range_end=$3::date AS full_window
+                   base.range_start >= $2::date AND base.range_end <= $3::date AS full_window
             FROM public.ingestion_windows base WHERE id = $1
         ),
         expected AS (
@@ -452,7 +452,9 @@ internal static class AuditSql
           SELECT 'orphan_fetch_payload' AS violation_code,
                  payload.provider_source||'|'||encode(payload.payload_sha256,'hex') AS business_key
             FROM public.provider_fetch_payloads payload
-           WHERE NOT EXISTS (SELECT 1 FROM public.price_observation_attributions price
+           WHERE payload.provider_source=ANY($2::text[])
+             AND payload.first_observed_at BETWEEN $3 AND $4
+             AND NOT EXISTS (SELECT 1 FROM public.price_observation_attributions price
                               WHERE price.provider_source=payload.provider_source
                                 AND price.payload_sha256=payload.payload_sha256)
              AND NOT EXISTS (SELECT 1 FROM public.inflation_observation_attributions inflation
@@ -461,7 +463,8 @@ internal static class AuditSql
           UNION ALL
           SELECT 'forged_price_attribution',asset_id::text||'|'||price_date::text||'|'||ingestion_window_id::text
             FROM public.price_observation_attributions attribution
-           WHERE NOT EXISTS (SELECT 1 FROM public.price_points point
+           WHERE attribution.ingestion_window_id=ANY($1::uuid[])
+             AND NOT EXISTS (SELECT 1 FROM public.price_points point
                               WHERE point.asset_id=attribution.asset_id
                                 AND point.price_date=attribution.price_date
                                 AND point.provider_source=attribution.provider_source
@@ -471,15 +474,17 @@ internal static class AuditSql
           UNION ALL
           SELECT 'forged_inflation_attribution',period_date::text||'|'||source||'|'||ingestion_window_id::text
             FROM public.inflation_observation_attributions attribution
-           WHERE NOT EXISTS (SELECT 1 FROM public.inflation_rates rate
+           WHERE attribution.ingestion_window_id=ANY($1::uuid[])
+             AND NOT EXISTS (SELECT 1 FROM public.inflation_rates rate
                               WHERE rate.period_date=attribution.period_date
                                 AND rate.source=attribution.source
                                 AND rate.provider_source=attribution.provider_source
                                 AND rate.source_observation_id=attribution.source_observation_id
                                 AND rate.observation_sha256=attribution.observation_sha256
-                                AND rate.authority_contract_version=attribution.authority_contract_version))
+                                AND rate.authority_contract_version=attribution.authority_contract_version)),
+        bounded AS (SELECT * FROM violations ORDER BY violation_code,business_key LIMIT $5 + 1)
         SELECT violation_code,business_key,count(*) OVER()::bigint AS total_count
-          FROM violations ORDER BY violation_code,business_key LIMIT $1
+          FROM bounded ORDER BY violation_code,business_key LIMIT $6
         """;
 
     public const string JobWindowState = """
@@ -640,6 +645,7 @@ internal static class AuditSql
                    max(d.calendar_date) AS actual_through
             FROM public.market_calendar_releases r
             LEFT JOIN public.market_calendar_days d ON d.release_id=r.id
+            WHERE r.id=ANY($1::uuid[])
             GROUP BY r.id
         ), violations AS (
             SELECT 'active_release_missing_or_unsealed' AS violation_code,
@@ -647,7 +653,8 @@ internal static class AuditSql
             FROM public.market_calendar_active_releases active
             LEFT JOIN public.market_calendar_releases release
               ON release.calendar_code=active.calendar_code AND release.id=active.release_id
-            WHERE release.id IS NULL OR release.sealed_at IS NULL
+            WHERE active.release_id=ANY($1::uuid[])
+              AND (release.id IS NULL OR release.sealed_at IS NULL)
             UNION ALL
             SELECT 'calendar_release_row_or_range_mismatch',id::text
             FROM rollup WHERE actual_count<>row_count OR actual_from IS DISTINCT FROM coverage_from
@@ -655,22 +662,24 @@ internal static class AuditSql
             UNION ALL
             SELECT 'asset_calendar_binding_source_mismatch',binding.asset_id::text
             FROM public.asset_market_calendars binding JOIN public.assets asset ON asset.id=binding.asset_id
-            WHERE asset.source IS DISTINCT FROM binding.source
+            WHERE binding.asset_id=ANY($2::uuid[]) AND asset.source IS DISTINCT FROM binding.source
             UNION ALL
             SELECT 'active_calendar_release_pointer_missing', calendar.code
             FROM public.market_calendars calendar
             LEFT JOIN public.market_calendar_active_releases active
               ON active.calendar_code=calendar.code
-            WHERE active.calendar_code IS NULL
+            WHERE calendar.code IN (SELECT binding.calendar_code FROM public.asset_market_calendars binding
+                                     WHERE binding.asset_id=ANY($2::uuid[]))
+              AND active.calendar_code IS NULL
             UNION ALL
             SELECT 'eligible_asset_calendar_binding_missing', asset.id::text
             FROM public.assets asset
             LEFT JOIN public.asset_market_calendars binding ON binding.asset_id=asset.id
-            WHERE asset.is_active AND asset.source IN ('tcmb','twelvedata')
+            WHERE asset.id=ANY($2::uuid[]) AND asset.is_active AND asset.source IN ('tcmb','twelvedata')
               AND binding.asset_id IS NULL
         )
         SELECT violation_code,business_key,count(*) OVER ()::bigint AS total_count
-        FROM violations ORDER BY violation_code,business_key LIMIT $1
+        FROM violations ORDER BY violation_code,business_key LIMIT $3
         """;
 
     public const string CalendarWindowCoverage = """

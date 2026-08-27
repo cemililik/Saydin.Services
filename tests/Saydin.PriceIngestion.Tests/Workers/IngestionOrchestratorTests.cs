@@ -9,14 +9,13 @@ namespace Saydin.PriceIngestion.Tests.Workers;
 public sealed class IngestionOrchestratorTests
 {
     [Fact]
-    public async Task PermanentFatal_CancelsSibling_LogsIdentity_SetsExitOne_AndRethrows()
+    public async Task InfrastructureFatal_CancelsSibling_LogsIdentity_SetsExitOne_AndRethrows()
     {
         var siblingStarted = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var siblingCancelled = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        var fatal = new PermanentIngestionWindowException(
-            "tcmb", Guid.CreateVersion7(), new(2040, 1, 1), new(2040, 1, 1), "auth_rejected");
+        var fatal = new FatalTestException();
         var sink = new CaptureExitCodeSink();
         var logger = new CaptureLogger<IngestionOrchestrator>();
         var orchestrator = Create(
@@ -43,7 +42,7 @@ public sealed class IngestionOrchestratorTests
             Enabled("Tcmb", "CoinGecko"), sink, logger);
 
         var run = () => orchestrator.RunForTestAsync(CancellationToken.None);
-        var failure = await run.Should().ThrowAsync<PermanentIngestionWindowException>();
+        var failure = await run.Should().ThrowAsync<FatalTestException>();
 
         failure.Which.Should().BeSameAs(fatal);
         await siblingCancelled.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -77,7 +76,7 @@ public sealed class IngestionOrchestratorTests
     }
 
     [Fact]
-    public async Task NormalHostCancellation_CancelsWorker_CompletesQuietly_AndSetsExitZero()
+    public async Task NormalHostCancellation_CancelsWorker_AndPreservesExistingNonZeroExit()
     {
         var workerStarted = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -97,7 +96,7 @@ public sealed class IngestionOrchestratorTests
         shutdown.Cancel();
         await execution.WaitAsync(TimeSpan.FromSeconds(1));
 
-        sink.ExitCode.Should().Be(0);
+        sink.ExitCode.Should().Be(7);
         logger.Entries.Should().NotContain(entry => entry.Level >= LogLevel.Error);
     }
 

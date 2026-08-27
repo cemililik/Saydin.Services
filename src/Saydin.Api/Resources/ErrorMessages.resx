@@ -30,6 +30,7 @@
   <data name="DailyLimitExceededDetail"><value>G&#x00FC;nl&#x00FC;k {0} hesaplama limitine ula&#x15F;t&#x131;n&#x131;z. Yar&#x131;n tekrar deneyin.</value></data>
   <data name="CompareSymbolCount"><value>Kar&#x15F;&#x131;la&#x15F;t&#x131;rma i&#x00E7;in 2 ile 5 aras&#x131;nda sembol gereklidir.</value></data>
   <data name="BuyDateAfterSellDate"><value>Al&#x131;&#x15F; tarihi sat&#x131;&#x15F; tarihinden sonra olamaz.</value></data>
+  <data name="CalculationEndDateCannotBeInFuture"><value>Hesaplama biti&#x15F; tarihi gelecekte olamaz.</value></data>
   <data name="InvalidAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. Beklenen: try, units, grams</value></data>
   <data name="InvalidPeriod"><value>Ge&#x00E7;ersiz periyod: '{0}'. Beklenen: weekly, monthly</value></data>
   <data name="InvalidDcaAmountType"><value>Ge&#x00E7;ersiz amountType: '{0}'. DCA hesaplamas&#x131; yaln&#x131;zca 'try' destekler.</value></data>
@@ -48,6 +49,13 @@
   <data name="AmountMustBePositive"><value>Tutar 0'dan b&#x00FC;y&#x00FC;k olmal&#x131;d&#x131;r.</value></data>
   <data name="RateLimited"><value>&#x00C7;ok fazla istek</value></data>
   <data name="RateLimitedDetail"><value>{0} saniyede en fazla {1} istek yap&#x131;labilir. L&#x00FC;tfen biraz sonra tekrar deneyin.</value></data>
+  <data name="SecurityRateLimitedDetail"><value>Bu istemciden &#x00E7;ok fazla istek al&#x131;nd&#x131;. L&#x00FC;tfen belirtilen s&#x00FC;re sonunda tekrar deneyin.</value></data>
+  <data name="SecurityLimiterUnavailable"><value>&#x130;stek kabul hizmeti kullan&#x131;lam&#x131;yor</value></data>
+  <data name="SecurityLimiterUnavailableDetail"><value>&#x130;stek g&#x00FC;venli bir &#x15F;ekilde kabul edilemiyor. L&#x00FC;tfen daha sonra tekrar deneyin.</value></data>
+  <data name="SecurityClientAddressUntrusted"><value>&#x130;stemci adresine g&#x00FC;venilemiyor</value></data>
+  <data name="SecurityClientAddressUntrustedDetail"><value>Proxy zinciri tek ve g&#x00FC;venilir bir istemci adresi sa&#x11F;lamad&#x131;. Yeniden denemeden &#x00F6;nce a&#x11F; yolunu d&#x00FC;zeltin.</value></data>
+  <data name="QuotaUnavailable"><value>Kota hizmeti kullan&#x131;lam&#x131;yor</value></data>
+  <data name="QuotaUnavailableDetail"><value>Hesaplama kotas&#x131; &#x15F;u anda g&#x00FC;venli bir &#x15F;ekilde do&#x11F;rulanam&#x131;yor. L&#x00FC;tfen daha sonra tekrar deneyin.</value></data>
   <data name="PayloadTooLarge"><value>&#x130;stek g&#x00F6;vdesi &#x00E7;ok b&#x00FC;y&#x00FC;k</value></data>
   <data name="PayloadTooLargeDetail"><value>&#x130;stek g&#x00F6;vdesi en fazla {0} UTF-8 byte olabilir.</value></data>
   <data name="UnsupportedJsonContentType"><value>Desteklenmeyen i&#x00E7;erik t&#x00FC;r&#x00FC;</value></data>
@@ -97,4 +105,6 @@
   <data name="Asset_GARAN"><value>Garanti BBVA</value></data>
   <data name="InstallationCredentialInvalid"><value>Kurulum kimlik bilgisi gerekli</value></data>
   <data name="InstallationCredentialInvalidDetail"><value>Installation yetkilendirme &#x15F;emas&#x131; kullan&#x131;larak ge&#x00E7;erli bir kurulum kimlik bilgisi g&#x00F6;nderilmelidir.</value></data>
+  <data name="RouteNotFound"><value>Kaynak bulunamad&#x131;</value></data>
+  <data name="RouteNotFoundDetail"><value>&#x130;stenen kaynak bu ba&#x11F;lant&#x131; &#x00FC;zerinden kullan&#x131;lam&#x131;yor.</value></data>
 </root>

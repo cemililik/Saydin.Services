@@ -63,6 +63,59 @@ public sealed class ScenarioExtraDataValidatorTests
     }
 
     [Fact]
+    public void GetStorageUtf8Size_LiteralEmojiAndEscapedSurrogatePair_AreEquivalent()
+    {
+        var literal = Parse("{\"emoji\":\"🙂\"}");
+        var escaped = Parse("{\"emoji\":\"\\uD83D\\uDE42\"}");
+        var postgresText = "{\"emoji\": \"🙂\"}";
+
+        ScenarioExtraDataValidator.GetStorageUtf8Size(literal)
+            .Should().Be(Encoding.UTF8.GetByteCount(postgresText));
+        ScenarioExtraDataValidator.GetStorageUtf8Size(escaped)
+            .Should().Be(Encoding.UTF8.GetByteCount(postgresText));
+    }
+
+    [Fact]
+    public void GetStorageUtf8Size_ControlCharacters_UsesPostgresEscapes()
+    {
+        var value = Parse("{\"c\":\"\\u0001\\b\\f\\n\\r\\t\\\"\\\\\"}");
+        var postgresText = "{\"c\": \"\\u0001\\b\\f\\n\\r\\t\\\"\\\\\"}";
+
+        ScenarioExtraDataValidator.GetStorageUtf8Size(value)
+            .Should().Be(Encoding.UTF8.GetByteCount(postgresText));
+    }
+
+    [Fact]
+    public void GetStorageUtf8Size_EmojiPropertyName_UsesDecodedUtf8()
+    {
+        var literal = Parse("{\"🙂\":true}");
+        var escaped = Parse("{\"\\uD83D\\uDE42\":true}");
+        var postgresText = "{\"🙂\": true}";
+
+        ScenarioExtraDataValidator.GetStorageUtf8Size(literal)
+            .Should().Be(Encoding.UTF8.GetByteCount(postgresText));
+        ScenarioExtraDataValidator.GetStorageUtf8Size(escaped)
+            .Should().Be(Encoding.UTF8.GetByteCount(postgresText));
+    }
+
+    [Theory]
+    [InlineData("1.2300", "1.2300")]
+    [InlineData("1.2300e2", "123.00")]
+    [InlineData("1e-2", "0.01")]
+    [InlineData("1.0e-2", "0.010")]
+    [InlineData("1E+3", "1000")]
+    [InlineData("-0.00", "0.00")]
+    [InlineData("1e-100", "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001")]
+    [InlineData("123456789012345678901234567890.125", "123456789012345678901234567890.125")]
+    public void GetStorageUtf8Size_DecimalAndExponent_UsesPostgresNumericText(
+        string json,
+        string postgresText)
+    {
+        ScenarioExtraDataValidator.GetStorageUtf8Size(Parse(json))
+            .Should().Be(Encoding.UTF8.GetByteCount(postgresText));
+    }
+
+    [Fact]
     public void Validate_StringUtf8Bytes_Exact2048Accepts_OverBoundaryRejects()
     {
         // U+015F UTF-8'de iki byte: sınırın karakter değil gerçek UTF-8 byte
@@ -151,7 +204,6 @@ public sealed class ScenarioExtraDataValidatorTests
     [Theory]
     [InlineData("what_if", "{\"includeInflation\":\"true\"}")]
     [InlineData("comparison", "{\"winnerReturn\":\"12.5\"}")]
-    [InlineData("comparison", "{\"winnerReturn\":1e10000}")]
     [InlineData("dca", "{\"period\":[]}")]
     [InlineData("portfolio", "{\"items\":{}}")]
     public void Validate_AllowlistedFieldWithWrongJsonType_Rejects(string type, string json)
@@ -160,6 +212,18 @@ public sealed class ScenarioExtraDataValidatorTests
 
         act.Should().Throw<ValidationException>()
             .Where(ex => ex.Detail == "ExtraDataInvalidFieldType");
+    }
+
+    [Fact]
+    public void Validate_NumberOutsideBoundedDecimalDomain_RejectsFailClosed()
+    {
+        var act = () => ScenarioExtraDataValidator.Validate(
+            Parse("{\"winnerReturn\":1e10000}"),
+            "comparison",
+            _localizer);
+
+        act.Should().Throw<ValidationException>()
+            .Where(ex => ex.Detail == "ExtraDataTooLarge");
     }
 
     [Theory]

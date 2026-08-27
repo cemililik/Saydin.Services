@@ -8,6 +8,11 @@ route:
   group_interval: 5m
   repeat_interval: 4h
   routes:
+    - matchers: ['severity="watchdog"']
+      receiver: external-watchdog
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
     - matchers: ['severity="critical"']
       receiver: operator-critical
       repeat_interval: 30m
@@ -22,6 +27,10 @@ receivers:
   - name: operator-warning
     webhook_configs:
       - url: https://example.invalid/CHANGE_ME_WARNING_RECEIVER
+        send_resolved: true
+  - name: external-watchdog
+    webhook_configs:
+      - url: https://example.invalid/CHANGE_ME_WATCHDOG_RECEIVER
         send_resolved: true
 
 inhibit_rules:

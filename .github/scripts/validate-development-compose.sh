@@ -24,6 +24,7 @@ render() {
     SAYDIN_CALENDAR_IMPORTER_LOGIN=saydin_dev_aaaaaaaaaaaaaaaaaaaaaaaa_calendar_importer_login_v1 \
     SAYDIN_EXPORTER_LOGIN=saydin_dev_aaaaaaaaaaaaaaaaaaaaaaaa_exporter_login_v1 \
     SAYDIN_AUDIT_LOGIN=saydin_dev_aaaaaaaaaaaaaaaaaaaaaaaa_audit_login_v1 \
+    SAYDIN_BACKUP_V1_VALID_UNTIL=2099-01-01T00:00:00Z \
     PGADMIN_PASSWORD=config-validation-only \
     REDIS_PASSWORD=config-validation-only \
     SAYDIN_INGESTION_HEARTBEAT_PATH="$heartbeat" \

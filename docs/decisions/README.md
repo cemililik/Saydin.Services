@@ -43,6 +43,7 @@ flowchart TD
 | [ADR-008](ADR-008-scenario-payload-pagination.md) | Scenario payload pagination and size boundary | Kabul edildi |
 | [ADR-009](ADR-009-provider-observation-authority.md) | Provider observation authority and immutable fetch attribution | Önerilen / expand uygulandı |
 | [ADR-010](ADR-010-installation-principal.md) | Sunucu üretimli installation principal, credential rotation, legacy karantina ve audit-preserving retention | Kabul edildi / 021–022 uygulandı |
+| [ADR-011](ADR-011-prometheus-exporter-prerelease.md) | OpenTelemetry Prometheus exporter için bounded prerelease istisnası ve OTLP çıkış koşulları | Kabul edildi (geçici istisna) |
 
 ## Yeni ADR ekleme
 

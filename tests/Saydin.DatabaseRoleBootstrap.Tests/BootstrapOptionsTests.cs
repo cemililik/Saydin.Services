@@ -102,16 +102,54 @@ public sealed class BootstrapOptionsTests
     [Theory]
     [InlineData("1")]
     [InlineData("3")]
-    [InlineData("not-a-version")]
-    public void Rotate_accepts_only_version_two(string version)
+    [InlineData("32")]
+    public void Rotate_accepts_every_contract_allowed_login_version(string version)
     {
         var args = Common("rotate").Concat(new[]
         {
             "--login", "api", "--login-version", version, "--password-file", "/run/secrets/api_v2",
         }).ToArray();
 
+        var options = BootstrapOptions.Parse(args);
+
+        Assert.Equal(int.Parse(version, System.Globalization.CultureInfo.InvariantCulture),
+            options.RotateVersion);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("33")]
+    [InlineData("not-a-version")]
+    public void Rotate_rejects_versions_outside_the_contract_set(string version)
+    {
+        var args = Common("rotate").Concat(new[]
+        {
+            "--login", "api", "--login-version", version, "--password-file", "/run/secrets/api",
+        }).ToArray();
+
         var exception = Assert.Throws<BootstrapRejectedException>(() => BootstrapOptions.Parse(args));
-        Assert.Equal("rotate_version_must_be_v2", exception.Code);
+        Assert.Equal("login_version_invalid", exception.Code);
+    }
+
+    [Fact]
+    public void Reset_and_retire_have_distinct_bounded_arguments()
+    {
+        var reset = BootstrapOptions.Parse(Common("reset-password").Concat(new[]
+        {
+            "--login", "api", "--login-version", "3",
+            "--password-file", "/run/secrets/api-current",
+        }).ToArray());
+        var retire = BootstrapOptions.Parse(Common("retire").Concat(new[]
+        {
+            "--login", "api", "--login-version", "2",
+            "--replacement-version", "3", "--drain-timeout-seconds", "17",
+        }).ToArray());
+
+        Assert.Equal(BootstrapCommand.ResetPassword, reset.Command);
+        Assert.Equal(BootstrapCommand.Retire, retire.Command);
+        Assert.Equal(3, retire.ReplacementVersion);
+        Assert.Equal(TimeSpan.FromSeconds(17), retire.DrainTimeout);
+        Assert.Null(retire.RotatePasswordFile);
     }
 
     [Fact]

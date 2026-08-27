@@ -25,8 +25,6 @@ internal static class LinuxSecretFile
     private const long OpenAt2SystemCall = 437;
     private const ulong ResolveNoSymlinks = 0x04;
 
-    internal static Action? AfterOpenBeforeReadForTests { get; set; }
-    internal static Func<SecretFileObservationStage, ulong, ulong>? MountIdForTests { get; set; }
     internal static uint RequestedMaskForTests => RequestedMask;
     internal static uint RequiredMaskForTests => RequiredMask;
     internal static int OpenHowSizeForTests => Marshal.SizeOf<OpenHow>();
@@ -34,24 +32,45 @@ internal static class LinuxSecretFile
     internal static int MountIdOffsetForTests => checked((int)Marshal.OffsetOf<FileStatus>(nameof(FileStatus.MountId)));
 
     public static byte[] Read(string path, int minimumBytes, int maximumBytes, string rejectionCode)
+        => ReadCore(path, minimumBytes, maximumBytes, rejectionCode, probe: null);
+
+    internal static byte[] ReadForTests(
+        string path,
+        int minimumBytes,
+        int maximumBytes,
+        string rejectionCode,
+        LinuxSecretFileTestProbe probe)
+        => ReadCore(path, minimumBytes, maximumBytes, rejectionCode,
+            probe ?? throw new ArgumentNullException(nameof(probe)));
+
+    private static byte[] ReadCore(
+        string path,
+        int minimumBytes,
+        int maximumBytes,
+        string rejectionCode,
+        LinuxSecretFileTestProbe? probe)
     {
         var parent = Path.GetDirectoryName(path);
         if (parent is null || Statx(CurrentWorkingDirectory, parent, AtSymlinkNoFollow,
-                RequestedMask, out var parentStat) != 0 ||
+                RequestedMask, out var parentStat) != 0)
+            throw Rejected(rejectionCode);
+        ObserveMount(ref parentStat, SecretFileObservationStage.ParentBefore, probe);
+        if (
             (parentStat.Mode & FileTypeMask) != DirectoryFile ||
             (parentStat.Mode & PermissionMask) != DirectoryMode0700 ||
             parentStat.UserId != GetEffectiveUserId() || !HasRequiredFields(parentStat))
             throw Rejected(rejectionCode);
-        ObserveMount(ref parentStat, SecretFileObservationStage.ParentBefore);
 
-        if (Statx(CurrentWorkingDirectory, path, AtSymlinkNoFollow, RequestedMask, out var before) != 0 ||
+        if (Statx(CurrentWorkingDirectory, path, AtSymlinkNoFollow, RequestedMask, out var before) != 0)
+            throw Rejected(rejectionCode);
+        ObserveMount(ref before, SecretFileObservationStage.PathBefore, probe);
+        if (
             (before.Mode & FileTypeMask) != RegularFile ||
             !IsAcceptedSecretMode(before.Mode) ||
             before.UserId != GetEffectiveUserId() || before.HardLinks != 1 ||
             !HasRequiredFields(before) || before.Size < (ulong)minimumBytes ||
             before.Size > (ulong)maximumBytes)
             throw Rejected(rejectionCode);
-        ObserveMount(ref before, SecretFileObservationStage.PathBefore);
 
         var openHow = new OpenHow { Flags = ReadOnly | CloseOnExec | NoFollow, Resolve = ResolveNoSymlinks };
         var descriptorResult = OpenAt2(
@@ -60,14 +79,14 @@ internal static class LinuxSecretFile
         using var handle = new SafeFileHandle((IntPtr)(int)descriptorResult, ownsHandle: true);
         if (Statx((int)descriptorResult, string.Empty, AtEmptyPath, RequestedMask, out var opened) != 0)
             throw Rejected(rejectionCode);
-        ObserveMount(ref opened, SecretFileObservationStage.OpenedHandle);
+        ObserveMount(ref opened, SecretFileObservationStage.OpenedHandle, probe);
         if (
             !SameIdentity(before, opened) || !IsAcceptedSecretMode(opened.Mode) ||
             opened.UserId != GetEffectiveUserId() || opened.HardLinks != 1 || !HasRequiredFields(opened))
             throw Rejected(rejectionCode);
 
         var bytes = new byte[checked((int)opened.Size)];
-        AfterOpenBeforeReadForTests?.Invoke();
+        probe?.AfterOpenBeforeRead?.Invoke();
         using (var stream = new FileStream(handle, FileAccess.Read, bufferSize: 4096, isAsync: false))
         {
             stream.ReadExactly(bytes);
@@ -76,9 +95,9 @@ internal static class LinuxSecretFile
                 Statx((int)descriptorResult, string.Empty, AtEmptyPath, RequestedMask, out var afterHandle) != 0 ||
                 Statx(CurrentWorkingDirectory, parent, AtSymlinkNoFollow, RequestedMask, out var afterParent) != 0)
                 throw Rejected(rejectionCode);
-            ObserveMount(ref afterPath, SecretFileObservationStage.PathAfter);
-            ObserveMount(ref afterHandle, SecretFileObservationStage.HandleAfter);
-            ObserveMount(ref afterParent, SecretFileObservationStage.ParentAfter);
+            ObserveMount(ref afterPath, SecretFileObservationStage.PathAfter, probe);
+            ObserveMount(ref afterHandle, SecretFileObservationStage.HandleAfter, probe);
+            ObserveMount(ref afterParent, SecretFileObservationStage.ParentAfter, probe);
             if (
                 !SameIdentity(parentStat, afterParent) || !SameIdentity(before, afterPath) ||
                 !SameIdentity(before, afterHandle) || afterHandle.Size != (ulong)bytes.Length ||
@@ -96,9 +115,15 @@ internal static class LinuxSecretFile
     private static bool IsAcceptedSecretMode(uint mode) =>
         (mode & PermissionMask) is FileMode0400 or FileMode0600;
 
-    private static void ObserveMount(ref FileStatus status, SecretFileObservationStage stage)
+    private static void ObserveMount(
+        ref FileStatus status,
+        SecretFileObservationStage stage,
+        LinuxSecretFileTestProbe? probe)
     {
-        if (MountIdForTests is { } transform) status.MountId = transform(stage, status.MountId);
+        if (probe?.TransformMountId is { } transform)
+            status.MountId = transform(stage, status.MountId);
+        if (probe?.TransformUserId is { } transformUserId)
+            status.UserId = transformUserId(stage, status.UserId);
     }
 
     private static bool SameIdentity(FileStatus left, FileStatus right) =>
@@ -168,6 +193,11 @@ internal static class LinuxSecretFile
     [DllImport("libc", EntryPoint = "geteuid")]
     private static extern uint GetEffectiveUserId();
 }
+
+internal sealed record LinuxSecretFileTestProbe(
+    Action? AfterOpenBeforeRead = null,
+    Func<SecretFileObservationStage, ulong, ulong>? TransformMountId = null,
+    Func<SecretFileObservationStage, uint, uint>? TransformUserId = null);
 
 internal enum SecretFileObservationStage
 {

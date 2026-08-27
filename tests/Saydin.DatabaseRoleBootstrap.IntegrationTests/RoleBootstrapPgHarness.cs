@@ -142,7 +142,8 @@ internal sealed class RoleBootstrapPgHarness : IAsyncDisposable
         string? systemHash = null,
         string? prefix = null,
         string? adminFile = null,
-        string? timescaleVersion = null)
+        string? timescaleVersion = null,
+        DateTimeOffset? backupV1ValidUntilUtc = null)
     {
         var actualPasswords = passwords ?? v1Passwords;
         var actualDeployment = deployment ?? DeploymentId;
@@ -161,7 +162,8 @@ internal sealed class RoleBootstrapPgHarness : IAsyncDisposable
             // Invalid caller input is never promoted into a cleanup selector.
         }
         var args = CommonArgs("ensure", actualDeployment, actualDatabase, actualHash,
-            actualPrefix, adminFile ?? Path.Combine(directory, "admin"), timescaleVersion).ToList();
+            actualPrefix, adminFile ?? Path.Combine(directory, "admin"), timescaleVersion,
+            backupV1ValidUntilUtc).ToList();
         foreach (var purpose in Enum.GetValues<LoginPurpose>())
         {
             var path = Write($"run-{Guid.NewGuid():N}-{RoleContract.PurposeName(purpose)}",
@@ -176,27 +178,103 @@ internal sealed class RoleBootstrapPgHarness : IAsyncDisposable
         return result;
     }
 
-    public async Task<RunResult> RunVerifyAsync(string? deployment = null)
+    public async Task<RunResult> RunVerifyAsync(
+        string? deployment = null,
+        DateTimeOffset? backupV1ValidUntilUtc = null)
     {
         var actualDeployment = deployment ?? DeploymentId;
         var prefix = RoleContract.DerivePrefix(actualDeployment, TargetDatabase, SystemHash);
         var result = await RunAsync(CommonArgs("verify", actualDeployment, TargetDatabase, SystemHash,
-            prefix, Path.Combine(directory, "admin")));
+            prefix, Path.Combine(directory, "admin"),
+            backupV1ValidUntilUtc: backupV1ValidUntilUtc));
         AssertRedacted(result, []);
         return result;
     }
 
-    public async Task<RunResult> RunRotateAsync(LoginPurpose purpose, string password)
+    public async Task EnsureBackupRoleAsync(DateTimeOffset validUntilUtc)
+    {
+        var options = new BootstrapOptions(
+            Command: BootstrapCommand.Ensure,
+            AdminConnectionFile: Path.Combine(directory, "admin"),
+            Contract: Contract,
+            TimescaleVersion: TimescaleVersion,
+            UuidOsspVersion: UuidVersion,
+            Timeouts: new BootstrapTimeouts(
+                TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20),
+                TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(90)),
+            PasswordFiles: new Dictionary<LoginPurpose, string>(),
+            BackupPasswordFile: Path.Combine(directory, "backup-v1"),
+            BackupV1ValidUntilUtc: validUntilUtc,
+            RotatePurpose: null,
+            RotateBackup: false,
+            RotateVersion: null,
+            RotatePasswordFile: null,
+            RotateBackupValidUntilUtc: null);
+        var runner = new RoleBootstrapRunner(options, TextWriter.Null);
+        await using var connection = await OpenAdminAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await runner.EnsureRoleAsync(
+            connection, transaction, Contract.BackupLogin(1, validUntilUtc),
+            PostgresScramSha256Verifier.Create(Encoding.UTF8.GetBytes(backupV1Password)),
+            CancellationToken.None, allowBackupValidityExtension: true);
+        await transaction.CommitAsync();
+    }
+
+    public async Task<RunResult> RunRotateAsync(
+        LoginPurpose purpose,
+        string password,
+        int version = 2)
     {
         var result = await RunAsync(CommonArgs("rotate", DeploymentId, TargetDatabase, SystemHash,
                 Contract.Prefix, Path.Combine(directory, "admin"))
             .Concat(new[]
             {
                 "--login", RoleContract.PurposeName(purpose).Replace('_', '-'),
-                "--login-version", "2",
+                "--login-version", version.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 "--password-file", Write($"rotate-{Guid.NewGuid():N}", password),
             }).ToArray());
         AssertRedacted(result, [password]);
+        return result;
+    }
+
+    public async Task<RunResult> RunResetPasswordAsync(
+        LoginPurpose purpose,
+        int version,
+        string password)
+    {
+        var result = await RunAsync(CommonArgs(
+                "reset-password", DeploymentId, TargetDatabase, SystemHash,
+                Contract.Prefix, Path.Combine(directory, "admin"))
+            .Concat(new[]
+            {
+                "--login", RoleContract.PurposeName(purpose).Replace('_', '-'),
+                "--login-version", version.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--password-file", Write($"reset-{Guid.NewGuid():N}", password),
+            }).ToArray());
+        AssertRedacted(result, [password]);
+        return result;
+    }
+
+    public async Task<RunResult> RunRetireAsync(
+        LoginPurpose purpose,
+        int retiredVersion,
+        int replacementVersion,
+        int drainTimeoutSeconds = 2)
+    {
+        var result = await RunAsync(CommonArgs(
+                "retire", DeploymentId, TargetDatabase, SystemHash,
+                Contract.Prefix, Path.Combine(directory, "admin"))
+            .Concat(new[]
+            {
+                "--login", RoleContract.PurposeName(purpose).Replace('_', '-'),
+                "--login-version", retiredVersion.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--replacement-version", replacementVersion.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--drain-timeout-seconds", drainTimeoutSeconds.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+            }).ToArray());
+        AssertRedacted(result, []);
         return result;
     }
 
@@ -225,6 +303,7 @@ internal sealed class RoleBootstrapPgHarness : IAsyncDisposable
     }
 
     public string V1Password(LoginPurpose purpose) => v1Passwords[purpose];
+    public IReadOnlyCollection<string> V1Passwords => v1Passwords.Values;
 
     public async Task<long> CountRolesAsync(string prefix)
     {
@@ -314,7 +393,8 @@ internal sealed class RoleBootstrapPgHarness : IAsyncDisposable
         string systemHash,
         string prefix,
         string adminFile,
-        string? timescaleVersion = null) =>
+        string? timescaleVersion = null,
+        DateTimeOffset? backupV1ValidUntilUtc = null) =>
     [
         command,
         "--admin-connection-file", adminFile,
@@ -324,7 +404,8 @@ internal sealed class RoleBootstrapPgHarness : IAsyncDisposable
         "--role-prefix", prefix,
         "--timescaledb-version", timescaleVersion ?? TimescaleVersion,
         "--uuid-ossp-version", UuidVersion,
-        "--backup-v1-valid-until", RoleContract.FormatBackupValidUntil(BackupV1ValidUntilUtc),
+        "--backup-v1-valid-until", RoleContract.FormatBackupValidUntil(
+            backupV1ValidUntilUtc ?? BackupV1ValidUntilUtc),
         "--connect-timeout-seconds", "5",
         "--lock-timeout-seconds", "20",
         "--statement-timeout-seconds", "30",

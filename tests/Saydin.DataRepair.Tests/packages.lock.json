@@ -236,6 +236,14 @@
           "Npgsql": "[10.0.3, )"
         }
       },
+      "saydin.dataqualityaudit": {
+        "type": "Project",
+        "dependencies": {
+          "Npgsql": "[10.0.3, )",
+          "OCI.DotNetSDK.Keymanagement": "[140.0.0, )",
+          "Saydin.DatabaseSecurity": "[1.0.0, )"
+        }
+      },
       "saydin.datarepair": {
         "type": "Project",
         "dependencies": {

@@ -32,6 +32,10 @@ real SQL-deny and immediate `pg_basebackup` acceptance; CI additionally runs bou
 two-connection limit. Production retains an exact 8 GB fetch WAL window and caps the
 physical slot at 8 GB. Object storage uses a short-lived web-identity token and
 KMS-materialized Restic key; no long-lived cloud access key is accepted.
+The external WAL spool must provide at least 96 GiB free at admission
+(`SAYDIN_BACKUP_WAL_SPOOL_MIN_FREE_BYTES=103079215104`); this covers the approximately
+63 GiB 14-day worst-case completed-segment set at the fixed 300-second rotation bound,
+plus Restic/filesystem headroom.
 
 ## Secret and configuration contract
 
@@ -42,16 +46,34 @@ volume. The bootstrap one-shot is the only service that may see the admin connec
 and all managed-role bootstrap passwords.
 
 Required private directories are `0700`; files are regular, owner-exact, link-count
-one and `0400` or `0600`. Run `validate-private-material.py` inside the materializer
-namespace before attaching a volume. It emits stable codes and never prints paths or
-values.
+one and `0400` or `0600`. `deploy-release.sh` mounts every pre-created secret volume
+read-only into a networkless, capability-free validator container and runs
+`validate-private-material.py` before starting any service. The validator emits stable
+codes and never prints paths or values. A missing volume is rejected before Docker can
+implicitly create it.
+
+Writable external volume roots are also pre-provisioned as `0700` with exact runtime
+ownership and are admission-checked without mutation: PostgreSQL `70`, Redis `999`,
+Caddy `1000`, Prometheus/Alertmanager `65534`, Collector/Tempo/Loki `10001`, and
+calendar/audit/backup artifacts `1001`. The blackbox target volume is owner `65534`,
+contains only `blackbox.json`, and may name exactly
+`https://<SAYDIN_PUBLIC_HOST>/health/live`; arbitrary probe targets are rejected.
+
+DataRepair's input and persistent receipt roots are also `0700`, uid `1001`. Its secret volume
+contains only the managed `ingestion-current` and `audit-current` password files. The input and secret
+mounts are read-only; the receipt mount is writable, external, exclusive to DataRepair and is
+never removed by a release or rollback. See the canonical
+[`../../docs/runbooks/data-repair.md`](../../docs/runbooks/data-repair.md) preflight and retention
+procedure.
 
 The PostgreSQL material contains `password`, `server.crt`, and `server.key`. The
 bootstrap material additionally contains only `admin-connection`, the six application
 passwords, and `backup-v1`; `admin-connection` must target `postgres-backup:5432` with
-`SSL Mode=Require`. The audit material contains `password`, `evidence-hmac`, and the
-exact SubjectPublicKeyInfo `evidence-public.pem`; a production evidence private key is
-forbidden. DQA signs through OCI instance principal and the allowlisted KMS key/version.
+`SSL Mode=Require`. The audit material contains `password`, `evidence-hmac`, the exact
+SubjectPublicKeyInfo `evidence-public.pem`, and the 32-byte `production-target` authority; a
+production evidence private key is forbidden. DQA signs through OCI instance principal and the
+allowlisted KMS key/version. Generate the target binding with the canonical
+[`../../docs/runbooks/data-quality-audit.md`](../../docs/runbooks/data-quality-audit.md) procedure.
 
 API and ingestion require private `appsettings.Production.json` files because their
 current Redis/provider configuration is read by the standard .NET configuration
@@ -99,24 +121,50 @@ nonsecret but remains operator-owned so the repository has no guessed domain.
 1. Verify the signed release and materialize/validate exact private volumes.
 2. Start PostgreSQL/Redis/OTel; install and reload the managed backup HBA block on the
    dedicated private `/28` backup network.
-3. Run phase-aware pre-bootstrap and Migrator (24 migrations). If the backup role was
+3. Run phase-aware pre-bootstrap and Migrator (27 migrations). If the backup role was
    deferred, rerun bootstrap after migration; in every case require final
    `backup_postbootstrap_required=false` from bootstrap and Migrator verify-only.
 4. Run physical-backup ordinary-SQL deny, immediate base backup, WAL scheduler, and OCI
    KMS-backed DQA; archive signed evidence.
-5. Start telemetry/exporters and API; run readiness and contract smoke.
+5. Validate candidate Prometheus, Alertmanager, Collector, Tempo and Loki configs with
+   their digest-pinned binaries; then force-recreate telemetry/exporters and API. From
+   the Prometheus container on internal networks, require every monitoring readiness
+   endpoint, the exact repository alert-name inventory, exactly one healthy target for
+   every configured job, the allowlisted blackbox instance, and live metric name/label
+   contracts before a deployment receipt can be written.
 6. Start ingestion only with its explicit profile and a verified worker.
 7. Admit Caddy traffic only after smoke succeeds.
 
 Outbound access is split as narrowly as Compose permits: only ingestion joins
-`provider-egress`, only Alertmanager joins `alert-egress`, only DQA joins `kms-egress`,
-and only backup joins `backup-egress`. PostgreSQL and the backup jobs share a dedicated
+`provider-egress`, only Alertmanager joins `alert-egress`, only blackbox-exporter joins
+`probe-egress`, only DQA joins `kms-egress`, only the dormant DataRepair service joins
+`data-repair-kms-egress`, and only backup joins `backup-egress`.
+Applications send OTLP only on `telemetry-ingest`; Prometheus scrapes them/exporters on
+`monitoring-scrape`; Alertmanager/Loki/Tempo stay on `monitoring-core`; blackbox control
+and host-root metrics each have a dedicated internal segment. PostgreSQL and the backup jobs share a dedicated
 internal `backup-db` network solely for TLS physical replication; normal consumers use
 `data`. Host firewall/DNS policy must restrict each egress network to its approved
 destinations.
 
-Calendar and DQA are one-shot profiles. WAL archiving and the daily base-backup
+Calendar and DQA are one-shot profiles. DataRepair is a separate `data-repair-operator` profile
+with a non-operational default command; normal deploy/rollback never starts it. Dry-run, apply or
+rollback requires the explicit command in
+[`../../docs/runbooks/data-repair.md`](../../docs/runbooks/data-repair.md). WAL archiving and the daily base-backup
 scheduler are continuous; deployment additionally requires one immediate verified
-base backup. A rollback changes only application
+base backup. The base job uses the separately provisioned external
+`SAYDIN_BACKUP_BASE_STAGING_VOLUME` at the exact private mount documented in
+`infrastructure/backup/README.md`; `/tmp` remains a bounded 64 MiB artifact area.
+PostgreSQL's 300-second `archive_timeout`, the uploader's fixed 300-second scan, and its
+completed-segment watermark reserve a nominal five-minute transfer/lock budget within
+the 15-minute RPO. Provider or lock delays can exceed that residual and must surface via
+the freshness alert. The signal records the off-host segment's completion time, so
+uploading an old backlog cannot manufacture a fresh recovery point. A rollback
+changes only application
 digests to a previously signed schema-compatible release; migrations are never
 automatically reversed.
+
+Node exporter keeps the host root bind because host filesystem pressure cannot be
+measured from the container overlay. The exception is exact and machine-enforced:
+`/:/host:ro,rslave`, UID 65534, no host PID/IPC/UTS/user namespace, no capabilities,
+and an allowlist of CPU/filesystem/load/memory/stat/textfile/time/uname collectors.
+Every other host-root or Docker-socket bind is rejected.

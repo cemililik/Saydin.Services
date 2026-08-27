@@ -262,7 +262,8 @@ internal sealed class OnlineMigrationExecutor(
         {
             await SetLocalContractAsync(connection, transaction, impact, cancellationToken);
             await using (var checkpoint = new NpgsqlCommand("""
-                SELECT last_key,processed_rows,state,lease_nonce
+                SELECT last_key,processed_rows,state,lease_nonce,
+                       lease_nonce=$4 AND lease_expires_at>pg_catalog.clock_timestamp()
                   FROM public.saydin_online_migration_checkpoints
                  WHERE migration_version=$1 AND manifest_sha256=$2 AND plan_kind=$3
                  FOR UPDATE
@@ -271,15 +272,22 @@ internal sealed class OnlineMigrationExecutor(
                 checkpoint.Parameters.AddWithValue(migration.Version);
                 checkpoint.Parameters.AddWithValue(impact.ManifestSha256);
                 checkpoint.Parameters.AddWithValue(plan.PlanKind);
+                checkpoint.Parameters.AddWithValue(leaseNonce);
                 await using var reader = await checkpoint.ExecuteReaderAsync(cancellationToken);
                 if (!await reader.ReadAsync(cancellationToken))
                     throw new MigratorRejectedException("migration_online_checkpoint_missing");
                 expectedCursor = reader.IsDBNull(0) ? null : reader.GetGuid(0);
                 expectedProcessed = reader.GetInt64(1);
                 var state = reader.GetString(2);
+                var persistedLeaseNonce = reader.GetGuid(3);
+                var leaseIsCurrent = reader.GetBoolean(4);
                 if (state == "succeeded") return true;
-                if (state != "running" || await reader.ReadAsync(cancellationToken))
+                if (state != "running" || !leaseIsCurrent)
+                    throw new MigratorRejectedException("migration_online_lease_lost");
+                if (persistedLeaseNonce != leaseNonce)
                     throw new MigratorRejectedException("migration_online_checkpoint_contract_mismatch");
+                if (await reader.ReadAsync(cancellationToken))
+                    throw new MigratorRejectedException("migration_online_lease_lost");
             }
 
             var batch = await ExecuteGeneratedBatchAsync(
@@ -422,6 +430,7 @@ internal sealed class OnlineMigrationExecutor(
                    updated_at=pg_catalog.clock_timestamp()
              WHERE migration_version=$5 AND manifest_sha256=$6 AND state='running'
                AND last_key IS NOT DISTINCT FROM $7 AND processed_rows=$8
+               AND lease_nonce=$3 AND lease_expires_at>pg_catalog.clock_timestamp()
             """, connection, transaction);
         command.Parameters.AddWithValue(nextCursor);
         command.Parameters.AddWithValue(selected);
@@ -456,6 +465,7 @@ internal sealed class OnlineMigrationExecutor(
                    updated_at=pg_catalog.clock_timestamp()
              WHERE migration_version=$2 AND manifest_sha256=$3 AND state='running'
                AND last_key IS NOT DISTINCT FROM $4 AND processed_rows=$5
+               AND lease_nonce=$1 AND lease_expires_at>pg_catalog.clock_timestamp()
             """, connection, transaction))
         {
             checkpoint.Parameters.AddWithValue(leaseNonce);

@@ -186,7 +186,7 @@ public sealed class AssetService(
         return price;
     }
 
-    public async Task<IReadOnlyList<PricePoint>> GetNearestPricesAsync(
+    public async Task<IReadOnlyList<PricePoint?>> GetNearestPricesAsync(
         string symbol,
         IReadOnlyList<DateOnly> dates,
         CancellationToken ct)
@@ -206,13 +206,13 @@ public sealed class AssetService(
         if (prices.Count != dates.Count)
             throw new InvalidOperationException("nearest_price_batch_cardinality_invalid");
 
-        var result = new PricePoint[prices.Count];
+        var result = new PricePoint?[prices.Count];
         for (var index = 0; index < prices.Count; index++)
         {
             var point = prices[index];
-            if (point is null || !FinalObservationAuthority.IsCompleteFinal(point))
-                throw new PriceNotFoundException(symbol, dates[index]);
-            result[index] = point;
+            result[index] = point is not null && FinalObservationAuthority.IsCompleteFinal(point)
+                ? point
+                : null;
         }
 
         return result;

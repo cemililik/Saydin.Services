@@ -22,7 +22,10 @@ public static class CoinGeckoMapper
         int? payloadByteLength = null)
     {
         using var doc = JsonDocument.Parse(json);
-        var prices = doc.RootElement.GetProperty("prices");
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new ProviderContractException("contract_value_kind_invalid");
+        var prices = root.GetProperty("prices");
 
         var payloadHash = payloadSha256 ?? SHA256.HashData(Encoding.UTF8.GetBytes(json));
         var daily = new Dictionary<DateOnly, PricePoint>();
@@ -30,12 +33,17 @@ public static class CoinGeckoMapper
         foreach (var pair in prices.EnumerateArray())
         {
             if (pair.ValueKind != JsonValueKind.Array || pair.GetArrayLength() != 2
-                || !pair[0].TryGetInt64(out var timestampMs)
-                || !pair[1].TryGetDecimal(out var price) || price <= 0)
+                || pair[0].ValueKind != JsonValueKind.Number)
+                throw new ProviderContractException("contract_invalid_price_pair");
+            if (!pair[0].TryGetInt64(out var timestampMs))
                 throw new ProviderContractException("contract_invalid_price_pair");
             var utcMoment   = DateTimeOffset.FromUnixTimeMilliseconds(timestampMs);
             var date        = DateOnly.FromDateTime(utcMoment.UtcDateTime);
             if (date < from || date > to) continue;
+            if (pair[1].ValueKind != JsonValueKind.Number)
+                throw new ProviderContractException("contract_value_kind_invalid");
+            if (!pair[1].TryGetDecimal(out var price) || price <= 0)
+                throw new ProviderContractException("contract_invalid_price_pair");
             var midnight = new DateTimeOffset(date.Year, date.Month, date.Day, 0, 0, 0, TimeSpan.Zero);
             if (utcMoment != midnight) continue;
             if (daily.ContainsKey(date))

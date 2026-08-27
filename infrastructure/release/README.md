@@ -1,7 +1,7 @@
 # Immutable release and promotion control plane
 
-The release workflow builds API, ingestion, database control, calendar, DQA, backup,
-and the hardened Caddy derivative once. Each OCI index contains only `linux/amd64` and
+The release workflow builds API, ingestion, database control, calendar, DataRepair, DQA,
+backup, and the hardened Caddy derivative once. Each OCI index contains only `linux/amd64` and
 `linux/arm64`; the workflow signs the index and both platform manifests, creates and
 attests per-platform SPDX/CycloneDX SBOMs, scans each platform for High/Critical
 vulnerabilities and license findings, and publishes GitHub/BuildKit provenance.
@@ -9,8 +9,10 @@ vulnerabilities and license findings, and publishes GitHub/BuildKit provenance.
 `release-manifest.json` is canonical JSON. It binds source commit/workflow, terminal
 migration and Migrator trust-root hash, compatible schema range, the immediately
 previous manifest hash, all first-party index/platform digests and SBOM hashes, and
-every third-party production image digest. The external runtime-image lock is a
-nonsecret absolute file on the release runner; use `runtime-images.lock.example.json`
+every third-party production image digest. The exact 12-key `runtimeImages` authority contains
+11 reviewed external entries plus `data_repair`, which is derived from and must equal the signed
+first-party `data_repair` record's `reference@digest`. The external runtime-image lock is an
+exact 11-key nonsecret absolute file on the release runner; use `runtime-images.lock.example.json`
 as its shape. Placeholder, tag, duplicate/unknown field, missing platform, policy
 drift, and a non-adjacent rollback are rejected.
 
@@ -61,6 +63,10 @@ infrastructure/deployment/validate-production.sh \
   "$PWD/infrastructure/deployment/tests/production.validation.env"
 ```
 
-Use Actionlint against all five workflow files and build the DQA/backup Dockerfiles on
+Use Actionlint against all five workflow files and build the DataRepair/DQA/backup Dockerfiles on
 both target platforms before enabling release. Local validation never signs, pushes,
 deploys, initializes a repository, or touches a production Docker context.
+
+Production repair is not part of deployment or rollback service startup. Follow the
+operator-only [`../../docs/runbooks/data-repair.md`](../../docs/runbooks/data-repair.md) procedure;
+it verifies the same signed manifest binding before an explicit one-shot command.

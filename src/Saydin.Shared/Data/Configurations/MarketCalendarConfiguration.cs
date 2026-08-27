@@ -8,11 +8,17 @@ public sealed class MarketCalendarConfiguration : IEntityTypeConfiguration<Marke
 {
     public void Configure(EntityTypeBuilder<MarketCalendar> builder)
     {
-        builder.ToTable("market_calendars");
+        builder.ToTable("market_calendars", table =>
+        {
+            table.HasCheckConstraint("chk_market_calendars_code", "code ~ '^[a-z0-9_]+$'");
+            table.HasCheckConstraint(
+                "chk_market_calendars_time_zone", "time_zone = 'Europe/Istanbul'");
+        });
         builder.HasKey(calendar => calendar.Code);
         builder.Property(calendar => calendar.Code).HasMaxLength(60);
         builder.Property(calendar => calendar.Authority).HasMaxLength(120).IsRequired();
         builder.Property(calendar => calendar.TimeZone).HasMaxLength(60).IsRequired();
+        builder.Property(calendar => calendar.CreatedAt).HasDefaultValueSql("NOW()");
     }
 }
 
@@ -20,12 +26,24 @@ public sealed class MarketCalendarReleaseConfiguration : IEntityTypeConfiguratio
 {
     public void Configure(EntityTypeBuilder<MarketCalendarRelease> builder)
     {
-        builder.ToTable("market_calendar_releases");
+        builder.ToTable("market_calendar_releases", table =>
+        {
+            table.HasCheckConstraint("chk_market_calendar_releases_version", "release_version > 0");
+            table.HasCheckConstraint(
+                "chk_market_calendar_releases_coverage", "coverage_from <= coverage_through");
+            table.HasCheckConstraint(
+                "chk_market_calendar_releases_row_count",
+                "row_count = coverage_through - coverage_from + 1");
+            table.HasCheckConstraint(
+                "chk_market_calendar_releases_hashes",
+                "normalized_sha256 ~ '^[0-9a-f]{64}$' AND source_bundle_sha256 ~ '^[0-9a-f]{64}$'");
+        });
         builder.HasKey(release => release.Id);
         builder.Property(release => release.CalendarCode).HasMaxLength(60).IsRequired();
         builder.Property(release => release.SnapshotSetId).HasMaxLength(100).IsRequired();
         builder.Property(release => release.NormalizedSha256).HasMaxLength(64).IsFixedLength().IsRequired();
         builder.Property(release => release.SourceBundleSha256).HasMaxLength(64).IsFixedLength().IsRequired();
+        builder.Property(release => release.CreatedAt).HasDefaultValueSql("NOW()");
         builder.HasOne(release => release.Calendar)
             .WithMany(calendar => calendar.Releases)
             .HasForeignKey(release => release.CalendarCode)
@@ -43,7 +61,17 @@ public sealed class MarketCalendarReleaseSourceConfiguration
 {
     public void Configure(EntityTypeBuilder<MarketCalendarReleaseSource> builder)
     {
-        builder.ToTable("market_calendar_release_sources");
+        builder.ToTable("market_calendar_release_sources", table =>
+        {
+            table.HasCheckConstraint(
+                "chk_market_calendar_release_sources_role",
+                "source_role IN ('authority','discovery','policy')");
+            table.HasCheckConstraint(
+                "chk_market_calendar_release_sources_hash", "raw_sha256 ~ '^[0-9a-f]{64}$'");
+            table.HasCheckConstraint(
+                "chk_market_calendar_release_sources_month",
+                "source_month IS NULL OR source_month BETWEEN 1 AND 12");
+        });
         builder.HasKey(source => new { source.ReleaseId, source.SourceId });
         builder.Property(source => source.SourceId).HasMaxLength(100);
         builder.Property(source => source.SourceKind).HasMaxLength(50).IsRequired();
@@ -66,7 +94,15 @@ public sealed class MarketCalendarDayConfiguration : IEntityTypeConfiguration<Ma
 {
     public void Configure(EntityTypeBuilder<MarketCalendarDay> builder)
     {
-        builder.ToTable("market_calendar_days");
+        builder.ToTable("market_calendar_days", table =>
+        {
+            table.HasCheckConstraint(
+                "chk_market_calendar_days_state",
+                "market_state IN ('publication','no_publication','full_session','partial_session','closed')");
+            table.HasCheckConstraint(
+                "chk_market_calendar_days_semantics",
+                "(observation_expected AND market_state IN ('publication','full_session','partial_session')) OR (NOT observation_expected AND market_state IN ('no_publication','closed'))");
+        });
         builder.HasKey(day => new { day.ReleaseId, day.CalendarDate });
         builder.Property(day => day.MarketState).HasMaxLength(30).IsRequired();
         builder.Property(day => day.ReasonCode).HasMaxLength(60).IsRequired();
@@ -89,10 +125,13 @@ public sealed class AssetMarketCalendarConfiguration : IEntityTypeConfiguration<
 {
     public void Configure(EntityTypeBuilder<AssetMarketCalendar> builder)
     {
-        builder.ToTable("asset_market_calendars");
+        builder.ToTable("asset_market_calendars", table => table.HasCheckConstraint(
+            "chk_asset_market_calendars_source",
+            "(source = 'tcmb' AND calendar_code = 'tcmb_indicative_fx') OR (source = 'twelvedata' AND calendar_code = 'bist_pay_xist')"));
         builder.HasKey(binding => binding.AssetId);
         builder.Property(binding => binding.Source).HasMaxLength(30).IsRequired();
         builder.Property(binding => binding.CalendarCode).HasMaxLength(60).IsRequired();
+        builder.Property(binding => binding.BoundAt).HasDefaultValueSql("NOW()");
         builder.HasOne(binding => binding.Asset).WithOne()
             .HasForeignKey<AssetMarketCalendar>(binding => binding.AssetId)
             .OnDelete(DeleteBehavior.Restrict)
@@ -112,6 +151,7 @@ public sealed class MarketCalendarActiveReleaseConfiguration
         builder.ToTable("market_calendar_active_releases");
         builder.HasKey(active => active.CalendarCode);
         builder.Property(active => active.CalendarCode).HasMaxLength(60);
+        builder.Property(active => active.ActivatedAt).HasDefaultValueSql("NOW()");
         builder.HasIndex(active => active.ReleaseId).IsUnique();
         builder.HasOne(active => active.Release).WithOne()
             .HasForeignKey<MarketCalendarActiveRelease>(

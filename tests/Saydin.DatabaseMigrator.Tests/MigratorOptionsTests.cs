@@ -3,6 +3,7 @@ using Saydin.DatabaseSecurity;
 
 namespace Saydin.DatabaseMigrator.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class MigratorOptionsTests
 {
     private const string SystemHash =
@@ -32,6 +33,8 @@ public sealed class MigratorOptionsTests
             $"host=postgres;port=5433;database=saydin;user={options.ExpectedLogin}");
         options.ToString().ToLowerInvariant().Should().NotContain("password");
         options.Contract.TargetLockSha256.Should().HaveLength(64);
+        options.SslMode.Should().Be(Npgsql.SslMode.Require,
+            "missing TLS configuration must fail closed to encrypted transport");
     }
 
     [Theory]

@@ -25,15 +25,31 @@ public sealed class TcmbWorker(
     // 16:30 Türkiye = 13:30 UTC (Türkiye UTC+3, DST kullanmıyor — 2016'dan beri)
     protected override TimeOnly DefaultDailyRunUtcTime => new(13, 30, 0);
 
+    // TCMB policy snapshot states that same-day indicative rates are published
+    // after checks between 16:00 and 16:30 Europe/Istanbul. The database target
+    // is still selected from the active, sealed authoritative calendar.
     protected override DateOnly TargetDate(DateTime utcNow) =>
-        IstanbulDate(new DateTimeOffset(DateTime.SpecifyKind(utcNow, DateTimeKind.Utc))).AddDays(-1);
+        ProviderCutoff(new DateTimeOffset(DateTime.SpecifyKind(utcNow, DateTimeKind.Utc)));
 
     protected override DateOnly BackfillThrough(DateTimeOffset utcNow) =>
-        IstanbulDate(utcNow).AddDays(-1);
+        ProviderCutoff(utcNow);
 
-    private static DateOnly IstanbulDate(DateTimeOffset utcNow)
+    protected override Task<MarketCalendarTargetResolution> ResolveBackfillThroughAsync(
+        DateTimeOffset utcNow,
+        CancellationToken ct) =>
+        Windows.ResolveLatestExpectedObservationAsync(
+            CalendarDataGeneratorCode, ProviderCutoff(utcNow), ct);
+
+    private const string CalendarDataGeneratorCode = "tcmb_indicative_fx";
+
+    private static DateOnly ProviderCutoff(DateTimeOffset utcNow)
     {
         var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Istanbul");
-        return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(utcNow, zone).DateTime);
+        var local = TimeZoneInfo.ConvertTime(utcNow, zone);
+        var today = DateOnly.FromDateTime(local.DateTime);
+        return TimeOnly.FromDateTime(local.DateTime) >= new TimeOnly(16, 30)
+            ? today
+            : today.AddDays(-1);
     }
+
 }

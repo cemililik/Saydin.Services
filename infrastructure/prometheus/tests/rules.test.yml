@@ -93,6 +93,91 @@ tests:
               summary: The encrypted off-host backup job failed
               runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
 
+  - name: quiet_database_caught_up_wal_observation_stays_fresh
+    interval: 1m
+    input_series:
+      - series: 'saydin_backup_last_success_timestamp_seconds{kind="wal"}'
+        values: '0+60x40'
+      - series: 'saydin_backup_wal_last_segment_timestamp_seconds'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: SaydinWalBackupStale
+        exp_alerts: []
+
+  - name: backup_login_validity_healthy
+    interval: 1m
+    input_series:
+      - series: 'saydin_backup_login_valid_until_timestamp_seconds'
+        values: '3888000x40'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: SaydinBackupLoginExpiring
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: SaydinBackupLoginExpired
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: SaydinBackupLoginValidityMetricMissing
+        exp_alerts: []
+
+  - name: backup_login_expiring
+    interval: 1m
+    input_series:
+      - series: 'saydin_backup_login_valid_until_timestamp_seconds'
+        values: '2592000x40'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SaydinBackupLoginExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, service: backup}
+            exp_annotations:
+              summary: Backup login expires within 30 days
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-login-renewal.md
+
+  - name: backup_login_expired
+    interval: 1m
+    input_series:
+      - series: 'saydin_backup_login_valid_until_timestamp_seconds'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SaydinBackupLoginExpired
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup}
+            exp_annotations:
+              summary: Backup login validity has expired
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-login-renewal.md
+
+  - name: backup_login_validity_missing
+    interval: 1m
+    input_series:
+      - series: 'up{job="unrelated-validity"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: SaydinBackupLoginValidityMetricMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup}
+            exp_annotations:
+              summary: Backup login validity signal is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-login-renewal.md
+
+  - name: wal_spool_capacity_low
+    interval: 1m
+    input_series:
+      - series: 'saydin_backup_wal_spool_free_bytes'
+        values: '100x10'
+      - series: 'saydin_backup_wal_spool_capacity_floor_bytes'
+        values: '200x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SaydinWalSpoolCapacityLow
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: wal}
+            exp_annotations:
+              summary: WAL spool free space is below its recovery-chain floor
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
   - name: monthly_ingestion_has_distinct_40_day_slo
     interval: 1m
     input_series:

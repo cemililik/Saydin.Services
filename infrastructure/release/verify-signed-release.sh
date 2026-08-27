@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+
 if [ "$#" -ne 6 ]; then
   echo "release_verify_usage" >&2
   exit 64
@@ -22,7 +24,7 @@ test -f "$release_dir/release-manifest.json" || { echo "release_manifest_missing
 test -f "$release_dir/release-manifest.sig" || { echo "release_signature_missing" >&2; exit 65; }
 test -f "$release_dir/release-manifest.pem" || { echo "release_certificate_missing" >&2; exit 65; }
 
-python3 infrastructure/release/release_manifest.py verify \
+python3 "$script_dir/release_manifest.py" verify \
   --manifest "$release_dir/release-manifest.json" >/dev/null
 
 cosign verify-blob \

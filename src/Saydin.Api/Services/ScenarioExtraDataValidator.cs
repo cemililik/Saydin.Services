@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
 using Microsoft.Extensions.Localization;
 using Saydin.Shared.Constants;
@@ -19,12 +18,6 @@ internal static class ScenarioExtraDataValidator
     internal const int MaxNodes = 256;
     internal const int MaxArrayItems = 128;
     internal const int MaxStringUtf8Bytes = 2048;
-
-    private static readonly JsonSerializerOptions StorageJsonOptions = new()
-    {
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        WriteIndented = false,
-    };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> RootFields =
         new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal)
@@ -138,35 +131,292 @@ internal static class ScenarioExtraDataValidator
     /// representation keeps the application limit compatible with migration 018's
     /// planned <c>octet_length(extra_data::text)</c> CHECK.
     /// </summary>
-    internal static int GetStorageUtf8Size(JsonElement element) =>
-        JsonSerializer.SerializeToUtf8Bytes(element, StorageJsonOptions).Length
-        + CountPostgresJsonbFormattingSpaces(element);
-
-    private static int CountPostgresJsonbFormattingSpaces(JsonElement element)
+    internal static int GetStorageUtf8Size(JsonElement element)
     {
-        var spaces = 0;
-        if (element.ValueKind == JsonValueKind.Object)
+        var counter = new PostgresJsonbTextSizeCounter();
+        counter.Write(element);
+        return counter.ByteCount;
+    }
+
+    /// <summary>
+    /// Counts PostgreSQL's compact <c>jsonb::text</c> representation without
+    /// materializing a second serialized payload. The counter saturates one byte
+    /// above the application limit, so oversized or unrepresentable values remain
+    /// fail-closed without attacker-controlled output allocations.
+    /// </summary>
+    private ref struct PostgresJsonbTextSizeCounter
+    {
+        private const int ExceededLimit = MaxUtf8Bytes + 1;
+        private int _byteCount;
+
+        public readonly int ByteCount => _byteCount;
+
+        public void Write(JsonElement element)
         {
-            var count = 0;
+            if (_byteCount == ExceededLimit)
+                return;
+
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    WriteObject(element);
+                    break;
+                case JsonValueKind.Array:
+                    WriteArray(element);
+                    break;
+                case JsonValueKind.String:
+                    WriteString(element.GetString()!);
+                    break;
+                case JsonValueKind.Number:
+                    WriteNumber(element);
+                    break;
+                case JsonValueKind.True:
+                    Add(4);
+                    break;
+                case JsonValueKind.False:
+                    Add(5);
+                    break;
+                case JsonValueKind.Null:
+                    Add(4);
+                    break;
+                default:
+                    ExceedLimit();
+                    break;
+            }
+        }
+
+        private void WriteObject(JsonElement element)
+        {
+            Add(1); // {
+            var first = true;
             foreach (var property in element.EnumerateObject())
             {
-                count++;
-                spaces += CountPostgresJsonbFormattingSpaces(property.Value);
+                if (_byteCount == ExceededLimit)
+                    return;
+                if (!first)
+                    Add(2); // , + space
+                WriteString(property.Name);
+                Add(2); // : + space
+                Write(property.Value);
+                first = false;
             }
-            spaces += count; // `: ` after every property name.
-            spaces += Math.Max(0, count - 1); // `, ` between properties.
+            Add(1); // }
         }
-        else if (element.ValueKind == JsonValueKind.Array)
+
+        private void WriteArray(JsonElement element)
         {
-            var count = 0;
+            Add(1); // [
+            var first = true;
             foreach (var item in element.EnumerateArray())
             {
-                count++;
-                spaces += CountPostgresJsonbFormattingSpaces(item);
+                if (_byteCount == ExceededLimit)
+                    return;
+                if (!first)
+                    Add(2); // , + space
+                Write(item);
+                first = false;
             }
-            spaces += Math.Max(0, count - 1); // `, ` between array items.
+            Add(1); // ]
         }
-        return spaces;
+
+        private void WriteString(string value)
+        {
+            Add(1); // opening quote
+            for (var i = 0; i < value.Length && _byteCount != ExceededLimit; i++)
+            {
+                var current = value[i];
+                switch (current)
+                {
+                    case '\"':
+                    case '\\':
+                    case '\b':
+                    case '\f':
+                    case '\n':
+                    case '\r':
+                    case '\t':
+                        Add(2);
+                        break;
+                    case '\0':
+                        // PostgreSQL jsonb rejects U+0000 even when it is escaped.
+                        ExceedLimit();
+                        break;
+                    default:
+                        if (current < 0x20)
+                        {
+                            Add(6); // \u00xx
+                        }
+                        else if (current < 0x80)
+                        {
+                            Add(1);
+                        }
+                        else if (current < 0x800)
+                        {
+                            Add(2);
+                        }
+                        else if (char.IsHighSurrogate(current))
+                        {
+                            if (i + 1 >= value.Length || !char.IsLowSurrogate(value[i + 1]))
+                            {
+                                ExceedLimit();
+                                break;
+                            }
+                            Add(4);
+                            i++;
+                        }
+                        else if (char.IsLowSurrogate(current))
+                        {
+                            ExceedLimit();
+                        }
+                        else
+                        {
+                            Add(3);
+                        }
+                        break;
+                }
+            }
+            Add(1); // closing quote
+        }
+
+        private void WriteNumber(JsonElement element)
+        {
+            // Parsing through System.Decimal is not exact: for example TryGetDecimal
+            // silently underflows 1e-100 to zero. Count the original JSON numeric
+            // lexeme instead so PostgreSQL's scale/exponent expansion is preserved.
+            // ScenarioRequestBodyReader caps the source at 32 KiB; the counter also
+            // refuses a single numeric token larger than the storage budget.
+            var rawText = element.GetRawText();
+            if (rawText.Length > MaxUtf8Bytes)
+            {
+                ExceedLimit();
+                return;
+            }
+
+            var raw = rawText.AsSpan();
+            var coefficientStart = raw[0] == '-' ? 1 : 0;
+            var exponentStart = raw.Length;
+            var decimalPoint = -1;
+            for (var i = coefficientStart; i < raw.Length; i++)
+            {
+                if (raw[i] == '.')
+                    decimalPoint = i;
+                else if (raw[i] is 'e' or 'E')
+                {
+                    exponentStart = i;
+                    break;
+                }
+            }
+
+            var integerDigits = (decimalPoint >= 0 ? decimalPoint : exponentStart)
+                - coefficientStart;
+            var fractionDigits = decimalPoint >= 0 ? exponentStart - decimalPoint - 1 : 0;
+            var totalDigits = integerDigits + fractionDigits;
+            var firstNonZero = totalDigits;
+            var digitPosition = 0;
+            for (var i = coefficientStart; i < exponentStart; i++)
+            {
+                if (raw[i] == '.')
+                    continue;
+                if (firstNonZero == totalDigits && raw[i] != '0')
+                    firstNonZero = digitPosition;
+                digitPosition++;
+            }
+
+            if (!TryReadExponent(raw, exponentStart, out var exponent))
+            {
+                ExceedLimit();
+                return;
+            }
+
+            long scale;
+            try
+            {
+                scale = checked((long)fractionDigits - exponent);
+            }
+            catch (OverflowException)
+            {
+                ExceedLimit();
+                return;
+            }
+            var isZero = firstNonZero == totalDigits;
+            if (isZero)
+            {
+                if (scale <= 0)
+                    Add(1);
+                else if (scale > MaxUtf8Bytes)
+                    ExceedLimit();
+                else
+                    Add((int)scale + 2); // 0. + scale digits
+                return;
+            }
+
+            if (scale is > MaxUtf8Bytes or < -MaxUtf8Bytes)
+            {
+                ExceedLimit();
+                return;
+            }
+
+            var decimalPosition = totalDigits - scale;
+            var renderedIntegerDigits = decimalPosition > firstNonZero
+                ? decimalPosition - firstNonZero
+                : 1;
+            if (renderedIntegerDigits > MaxUtf8Bytes)
+            {
+                ExceedLimit();
+                return;
+            }
+
+            var renderedFractionBytes = scale > 0 ? scale + 1 : 0; // dot + scale digits
+            var renderedBytes = (raw[0] == '-' ? 1L : 0)
+                + renderedIntegerDigits
+                + renderedFractionBytes;
+            if (renderedBytes > MaxUtf8Bytes)
+                ExceedLimit();
+            else
+                Add((int)renderedBytes);
+        }
+
+        private static bool TryReadExponent(
+            ReadOnlySpan<char> raw,
+            int exponentStart,
+            out long exponent)
+        {
+            exponent = 0;
+            if (exponentStart == raw.Length)
+                return true;
+
+            var index = exponentStart + 1;
+            var isNegative = false;
+            if (raw[index] is '+' or '-')
+            {
+                isNegative = raw[index] == '-';
+                index++;
+            }
+
+            for (; index < raw.Length; index++)
+            {
+                var digit = raw[index] - '0';
+                if (exponent > (long.MaxValue - digit) / 10)
+                    return false;
+                exponent = (exponent * 10) + digit;
+            }
+            if (isNegative)
+                exponent = -exponent;
+            return true;
+        }
+
+        private void Add(int bytes)
+        {
+            if (_byteCount == ExceededLimit)
+                return;
+            if (bytes > MaxUtf8Bytes - _byteCount)
+            {
+                ExceedLimit();
+                return;
+            }
+            _byteCount += bytes;
+        }
+
+        private void ExceedLimit() => _byteCount = ExceededLimit;
     }
 
     private static bool ValidateWhatIfField(JsonProperty property) => property.Name switch

@@ -121,6 +121,15 @@ public sealed class DailyLimitGuardIntegrationTests(RedisFixture redis)
         {
             Free = new TierOptions { DailyCalculationLimit = limit },
         }),
+        new FixedQuotaSubjectPseudonymizer(),
         TimeProvider.System,
         NullLogger<DailyLimitGuard>.Instance);
+
+    private sealed class FixedQuotaSubjectPseudonymizer : IQuotaSubjectPseudonymizer
+    {
+        public string PseudonymizeQuotaSubject(string subject) =>
+            "q1:" + Convert.ToHexStringLower(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(subject))).Substring(0, 32);
+    }
 }

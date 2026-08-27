@@ -2,11 +2,13 @@ using System.Diagnostics;
 using System.Net.Mime;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Localization;
 using Saydin.Api.Services;
 
 namespace Saydin.Api.Exceptions;
 
-public sealed class QuotaUnavailableExceptionHandler : IExceptionHandler
+public sealed class QuotaUnavailableExceptionHandler(
+    IStringLocalizer<ErrorMessages> localizer) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
         HttpContext context,
@@ -19,11 +21,12 @@ public sealed class QuotaUnavailableExceptionHandler : IExceptionHandler
         await context.Response.WriteAsJsonAsync(new ProblemDetails
         {
             Type = "https://saydin.app/errors/quota-unavailable",
-            Title = "Quota service unavailable.",
+            Title = localizer["QuotaUnavailable"],
+            Detail = localizer["QuotaUnavailableDetail"],
             Status = StatusCodes.Status503ServiceUnavailable,
             Extensions =
             {
-                ["code"] = QuotaUnavailableException.ErrorCode,
+                ["code"] = ApiErrorCodes.QuotaUnavailable,
                 ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
             },
         }, options: null, contentType: MediaTypeNames.Application.ProblemJson,

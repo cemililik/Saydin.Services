@@ -4,6 +4,8 @@ using Oci.Common.Auth;
 using Oci.KeymanagementService;
 using Oci.KeymanagementService.Models;
 using Oci.KeymanagementService.Requests;
+using Saydin.DatabaseSecurity;
+using System.Text;
 
 namespace Saydin.DataQualityAudit;
 
@@ -72,7 +74,7 @@ internal interface IOciKmsSigningClient : IDisposable
 
 internal sealed class OciSdkKmsSigningClient : IOciKmsSigningClient
 {
-    private readonly KmsCryptoClient client;
+    private readonly IOciKmsSdkTransport transport;
 
     public OciSdkKmsSigningClient(OciKmsSignerConfiguration options)
     {
@@ -80,7 +82,7 @@ internal sealed class OciSdkKmsSigningClient : IOciKmsSigningClient
         // metadata/federation. No customer KMS private key enters this process.
         IBasicAuthenticationDetailsProvider authentication =
             new InstancePrincipalsAuthenticationDetailsProvider();
-        client = new KmsCryptoClient(
+        var client = new KmsCryptoClient(
             authentication,
             new ClientConfiguration
             {
@@ -90,7 +92,11 @@ internal sealed class OciSdkKmsSigningClient : IOciKmsSigningClient
                 RetryConfiguration = null,
             },
             options.CryptoEndpoint);
+        transport = new OciKmsSdkTransport(client);
     }
+
+    internal OciSdkKmsSigningClient(IOciKmsSdkTransport transport) =>
+        this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
 
     public async Task<OciKmsSignatureResponse> SignDigestAsync(
         string keyId,
@@ -98,7 +104,7 @@ internal sealed class OciSdkKmsSigningClient : IOciKmsSigningClient
         ReadOnlyMemory<byte> sha256Digest,
         CancellationToken cancellationToken)
     {
-        var response = await client.Sign(new SignRequest
+        return await transport.SignAsync(new SignRequest
         {
             SignDataDetails = new SignDataDetails
             {
@@ -112,10 +118,34 @@ internal sealed class OciSdkKmsSigningClient : IOciKmsSigningClient
                     ["component"] = "saydin-data-quality-audit",
                 },
             },
-        }, retryConfiguration: null, cancellationToken).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public void Dispose() => transport.Dispose();
+
+    private static AuditRejectedException EvidenceFailure(string code) =>
+        new(code, AuditExitCodes.EvidenceFailure);
+}
+
+internal interface IOciKmsSdkTransport : IDisposable
+{
+    Task<OciKmsSignatureResponse> SignAsync(
+        SignRequest request,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class OciKmsSdkTransport(KmsCryptoClient client) : IOciKmsSdkTransport
+{
+    public async Task<OciKmsSignatureResponse> SignAsync(
+        SignRequest request,
+        CancellationToken cancellationToken)
+    {
+        var response = await client.Sign(
+            request, retryConfiguration: null, cancellationToken).ConfigureAwait(false);
         var signed = response.SignedData;
         return signed is null
-            ? throw EvidenceFailure("kms_signature_response_invalid")
+            ? throw new AuditRejectedException(
+                "kms_signature_response_invalid", AuditExitCodes.EvidenceFailure)
             : new OciKmsSignatureResponse(
                 signed.KeyId,
                 signed.KeyVersionId,
@@ -124,9 +154,6 @@ internal sealed class OciSdkKmsSigningClient : IOciKmsSigningClient
     }
 
     public void Dispose() => client.Dispose();
-
-    private static AuditRejectedException EvidenceFailure(string code) =>
-        new(code, AuditExitCodes.EvidenceFailure);
 }
 
 internal sealed class OciKmsEvidenceSigner : IEvidenceSigner
@@ -198,6 +225,10 @@ internal sealed class OciKmsEvidenceSigner : IEvidenceSigner
         {
             throw EvidenceFailure("kms_sign_timeout");
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
         catch (AuditRejectedException)
         {
             throw;
@@ -234,8 +265,10 @@ internal static class EvidenceSignerFactory
             (scan.EvidencePrivateKeyFile is { } path
                 ? new LocalPemSignerConfiguration(path)
                 : throw Invalid("signer_configuration_missing"));
-        var production = string.Equals(
+        var manifestClaimsProduction = string.Equals(
             input.Manifest.Target.Environment, "production", StringComparison.OrdinalIgnoreCase);
+        var production = ValidateProductionTargetAuthority(
+            scan.ProductionTargetAuthorityFile, input.Manifest.Target, manifestClaimsProduction);
         if (production)
         {
             RejectProductionRawKeyEnvironment(environment);
@@ -272,6 +305,45 @@ internal static class EvidenceSignerFactory
             throw Invalid("evidence_key_id_mismatch");
         }
         return signer;
+    }
+
+    private static bool ValidateProductionTargetAuthority(
+        string? authorityFile,
+        AuditTarget target,
+        bool manifestClaimsProduction)
+    {
+        if (authorityFile is null)
+        {
+            if (manifestClaimsProduction)
+                throw Invalid("production_target_authority_missing");
+            return false;
+        }
+
+        byte[]? configured = null;
+        byte[]? expected = null;
+        try
+        {
+            configured = SecureSecretFile.ReadBytes(
+                authorityFile, 32, 32, "production_target_authority_file_rejected");
+            expected = SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"saydin-dqa-production-target/v1\0{target.Database}\0{target.SystemIdentifierSha256}"));
+            if (!CryptographicOperations.FixedTimeEquals(configured, expected))
+                throw Invalid("production_target_authority_mismatch");
+            if (!manifestClaimsProduction)
+                throw Invalid("production_target_manifest_mismatch");
+            return true;
+        }
+        catch (DatabaseSecurityRejectedException)
+        {
+            throw Invalid("production_target_authority_file_rejected");
+        }
+        finally
+        {
+            if (configured is not null)
+                CryptographicOperations.ZeroMemory(configured);
+            if (expected is not null)
+                CryptographicOperations.ZeroMemory(expected);
+        }
     }
 
     private static void RejectProductionRawKeyEnvironment(Func<string, string?> environment)

@@ -9,6 +9,18 @@ namespace Saydin.DataQualityAudit.Tests;
 public sealed class CanonicalAndSignatureTests
 {
     [Fact]
+    public void P1363Signature_WithLeadingZeroComponents_NormalizesToCanonicalDer()
+    {
+        var raw = new byte[64];
+        raw[31] = 0x80;
+        raw[63] = 0x80;
+
+        var normalized = AuditCryptography.NormalizeP256Signature(raw);
+
+        normalized.Should().Equal(Convert.FromHexString("30080202008002020080"));
+    }
+
+    [Fact]
     public void Canonicalize_SortsObjects_AndPreservesArrayOrder()
     {
         var first = CanonicalJson.Canonicalize("""{"z":2,"a":{"y":true,"b":[2,1]}}"""u8);
@@ -45,13 +57,13 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(signed.Manifest, signed.Signature,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var verified = SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var verified = SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
         verified.Manifest.Should().BeEquivalentTo(manifest);
 
         var text = File.ReadAllText(signed.Manifest);
         File.WriteAllText(signed.Manifest, text.Replace(
             "integration", "integratioN", StringComparison.Ordinal));
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
         action.Should().Throw<AuditRejectedException>()
             .Where(exception => exception.Code == "input_manifest_signature_invalid");
     }
@@ -61,7 +73,17 @@ public sealed class CanonicalAndSignatureTests
     {
         using var files = new TestFiles();
         var now = DateTimeOffset.UtcNow;
-        var manifest = files.ValidManifest(now) with
+        var baseline = files.ValidManifest(now);
+        var unsupported = files.WriteSignedInput(baseline with { SchemaVersion = 1 });
+        var unsupportedOptions = new ScanOptions(
+            unsupported.Manifest, unsupported.Signature, files.InputPublicKeyPath,
+            files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
+        var unsupportedAction = () => SignedAuditInput.LoadAndVerify(
+            unsupportedOptions, new FixedTimeProvider(now));
+        unsupportedAction.Should().Throw<AuditRejectedException>()
+            .Which.Code.Should().Be("input_manifest_schema_unsupported");
+
+        var manifest = baseline with
         {
             ExpiresAtUtc = now.AddSeconds(-1),
         };
@@ -69,7 +91,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(signed.Manifest, signed.Signature,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
         action.Should().Throw<AuditRejectedException>()
             .Where(exception => exception.Code == "input_manifest_lifetime_invalid");
     }
@@ -90,7 +112,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(signed.Manifest, signed.Signature,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
         action.Should().Throw<AuditRejectedException>()
             .Where(exception => exception.Code == "input_scope_duplicate_lane");
     }
@@ -109,7 +131,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(signed.Manifest, signed.Signature,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         action.Should().Throw<AuditRejectedException>()
             .Which.Code.Should().Be("input_scope_overlapping_lane");
@@ -135,7 +157,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(signed.Manifest, signed.Signature,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         action.Should().Throw<AuditRejectedException>().Which.Code.Should().Be("input_lane_invalid");
     }
@@ -152,7 +174,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(signed.Manifest, signed.Signature,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         action.Should().Throw<AuditRejectedException>().Which.Code.Should().Be("input_key_id_mismatch");
     }
@@ -177,7 +199,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(manifestPath, signaturePath,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         action.Should().Throw<AuditRejectedException>()
             .Where(exception => exception.Code == "input_manifest_contract_invalid" &&
@@ -195,7 +217,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(manifestPath, signaturePath,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         action.Should().Throw<AuditRejectedException>()
             .Where(exception => exception.Code == "input_manifest_too_large" &&
@@ -241,7 +263,7 @@ public sealed class CanonicalAndSignatureTests
         var options = new ScanOptions(manifestPath, signaturePath,
             files.InputPublicKeyPath, files.EvidencePrivateKeyPath, files.HmacKeyPath, "unused");
 
-        var action = () => SignedAuditInput.LoadAndVerify(options, TimeProvider.System);
+        var action = () => SignedAuditInput.LoadAndVerify(options, new FixedTimeProvider(DateTimeOffset.UtcNow));
 
         action.Should().Throw<AuditRejectedException>()
             .Where(exception => exception.ExitCode == AuditExitCodes.InvalidArguments);

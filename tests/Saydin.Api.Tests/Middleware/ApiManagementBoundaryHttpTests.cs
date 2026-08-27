@@ -17,8 +17,10 @@ public sealed class ApiManagementBoundaryHttpTests
     [Fact]
     public async Task KestrelListeners_FailClosedAcrossPublicAndManagementPorts()
     {
-        var publicPort = ReservePort();
-        var managementPort = ReservePort(publicPort);
+        using var publicListener = CreateBoundListener();
+        using var managementListener = CreateBoundListener();
+        var publicPort = ((IPEndPoint)publicListener.LocalEndPoint!).Port;
+        var managementPort = ((IPEndPoint)managementListener.LocalEndPoint!).Port;
         var runtime = new ApiRuntimeContract
         {
             PublicPort = publicPort,
@@ -29,17 +31,28 @@ public sealed class ApiManagementBoundaryHttpTests
         };
 
         var builder = WebApplication.CreateBuilder();
-        builder.WebHost.ConfigureKestrel(runtime.Configure);
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.ListenHandle(unchecked((ulong)publicListener.Handle.ToInt64()));
+            options.ListenHandle(unchecked((ulong)managementListener.Handle.ToInt64()));
+        });
         builder.Services.AddSingleton(runtime);
+        builder.Services.AddLocalization();
         builder.Services.AddTransient<ApiPortBoundaryMiddleware>();
+        builder.Services.AddSingleton<Microsoft.AspNetCore.Routing.MatcherPolicy,
+            ApiPortEndpointSelectorPolicy>();
         builder.Services.Configure<ForwardedHeadersOptions>(runtime.Configure);
         await using var app = builder.Build();
         app.UseForwardedHeaders();
         app.UseMiddleware<ApiPortBoundaryMiddleware>();
-        app.MapGet(ApiPortBoundary.LivePath, () => Results.Ok("live"));
-        app.MapGet(ApiPortBoundary.ReadyPath, () => Results.Ok("ready"));
-        app.MapGet(ApiPortBoundary.MetricsPath, () => Results.Text("metric 1"));
-        app.MapGet("/v1/product", () => Results.Ok("product"));
+        app.MapGet(ApiPortBoundary.LivePath, () => Results.Ok("live"))
+            .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicLiveness));
+        app.MapGet(ApiPortBoundary.ReadyPath, () => Results.Ok("ready"))
+            .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.Management));
+        app.MapGet(ApiPortBoundary.MetricsPath, () => Results.Text("metric 1"))
+            .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.Management));
+        app.MapGet("/v1/product", () => Results.Ok("product"))
+            .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicProduct));
         await app.StartAsync();
 
         using var publicClient = Client(publicPort);
@@ -48,6 +61,19 @@ public sealed class ApiManagementBoundaryHttpTests
         (await publicClient.GetAsync(ApiPortBoundary.LivePath)).StatusCode.Should().Be(HttpStatusCode.OK);
         (await publicClient.GetAsync(ApiPortBoundary.ReadyPath)).StatusCode.Should().Be(HttpStatusCode.NotFound);
         (await publicClient.GetAsync(ApiPortBoundary.MetricsPath)).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        foreach (var path in new[]
+                 {
+                     "/HEALTH/READY/",
+                     "//health//ready//",
+                     "/METRICS/",
+                     "//metrics//",
+                 })
+        {
+            using var response = await publicClient.GetAsync(
+                new Uri($"http://127.0.0.1:{publicPort}{path}"));
+            response.StatusCode.Should().Be(HttpStatusCode.NotFound,
+                $"management path variant '{path}' must not match on the public listener");
+        }
         (await publicClient.GetAsync("/v1/product")).StatusCode.Should().Be(HttpStatusCode.OK);
 
         (await managementClient.GetAsync(ApiPortBoundary.LivePath)).StatusCode.Should().Be(HttpStatusCode.NotFound);
@@ -73,16 +99,11 @@ public sealed class ApiManagementBoundaryHttpTests
         BaseAddress = new Uri($"http://127.0.0.1:{port}"),
     };
 
-    private static int ReservePort(int excluded = -1)
+    private static Socket CreateBoundListener()
     {
-        while (true)
-        {
-            var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-            listener.Stop();
-            if (port != excluded)
-                return port;
-        }
+        var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        listener.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        listener.Listen();
+        return listener;
     }
 }

@@ -11,33 +11,55 @@ namespace Saydin.PriceIngestion.IntegrationTests;
 public sealed class IngestionWriteFenceIntegrationTests(IngestionDatabaseFixture database)
 {
     [Fact]
-    public async Task LegacyRepositories_RejectTokenlessPriceAndInflationWrites()
+    public async Task RuntimeIngestionRole_RealDatabaseFenceRejectsTokenlessPriceAndInflationWrites()
     {
-        var assetId = await database.CreateAssetAsync("it-legacy-fence");
+        var assetId = await database.CreateAssetAsync(ProviderSources.CoinGecko);
+        var priceDate = new DateOnly(2097, 1, 1);
         var inflationDate = new DateOnly(2097, 1, 1);
+        const string inflationScopeSource = "evds";
         try
         {
-            var legacyPrice = new PriceIngestionRepository(database.ContextFactory);
-            var priceWrite = () => legacyPrice.UpsertPricePointsAsync(
-                [new PricePoint { AssetId = assetId, PriceDate = new(2097, 1, 1), Close = 1 }],
-                default);
-            await priceWrite.Should().ThrowAsync<InvalidOperationException>()
-                .WithMessage("window_bound_authority_repository_required");
+            var repository = database.Repository();
+            var priceScope = PriceScope(ProviderSources.CoinGecko, assetId, priceDate);
+            await repository.EnsureWindowsAsync(priceScope.Scope, [priceScope.Range], default);
+            var priceClaim = (await repository.ClaimNextAsync(
+                priceScope.Scope, "runtime-fence-price", TimeSpan.FromMinutes(1), default)).Claim!;
+            await repository.CompletePriceAsync(
+                priceClaim, PriceOutcome(assetId, priceDate), Counts(1), default);
 
-            var legacyInflation = new InflationIngestionRepository(database.ContextFactory);
-            var inflationWrite = () => legacyInflation.UpsertInflationRatesAsync(
-                [new InflationRate
-                {
-                    PeriodDate = inflationDate,
-                    IndexValue = 1,
-                    Source = InflationSources.Tuik,
-                }], default);
-            await inflationWrite.Should().ThrowAsync<InvalidOperationException>()
-                .WithMessage("window_bound_authority_repository_required");
+            var inflationScope = new IngestionWindowScope(
+                inflationScopeSource, null, IngestionJobTypes.InflationBackfill, 1);
+            await repository.EnsureWindowsAsync(inflationScope,
+                [new IngestionWindowRange(inflationDate, inflationDate)], default);
+            var inflationClaim = (await repository.ClaimNextAsync(
+                inflationScope, "runtime-fence-inflation", TimeSpan.FromMinutes(1), default)).Claim!;
+            await repository.CompleteInflationAsync(inflationClaim,
+                AdapterOutcome<InflationRate>.Data([AuthorityTestData.Evds(inflationDate)], 1),
+                Counts(1), default);
+
+            // Supplying only the authority window makes the authority trigger pass. The
+            // missing live lease token is therefore rejected by the real ingestion fence.
+            var priceWrite = () => database.ExecuteAsIngestionWithWindowOnlyAsync(
+                priceClaim.WindowId, """
+                UPDATE price_points SET close=close
+                 WHERE asset_id=@id AND price_date=@date
+                """, new NpgsqlParameter("id", assetId),
+                new NpgsqlParameter("date", priceDate));
+            (await priceWrite.Should().ThrowAsync<PostgresException>())
+                .Which.SqlState.Should().Be(PostgresErrorCodes.InsufficientPrivilege);
+
+            var inflationWrite = () => database.ExecuteAsIngestionWithWindowOnlyAsync(
+                inflationClaim.WindowId, """
+                UPDATE inflation_rates SET index_value=index_value
+                 WHERE period_date=@date AND source='tuik'
+                """, new NpgsqlParameter("date", inflationDate));
+            (await inflationWrite.Should().ThrowAsync<PostgresException>())
+                .Which.SqlState.Should().Be(PostgresErrorCodes.InsufficientPrivilege);
         }
         finally
         {
             await database.CleanupAssetAsync(assetId);
+            await database.CleanupGlobalAsync(inflationScopeSource);
             await database.ExecuteAsync(
                 "DELETE FROM inflation_rates WHERE period_date=@date AND source='tuik'",
                 new NpgsqlParameter("date", inflationDate));

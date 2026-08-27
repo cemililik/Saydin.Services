@@ -6,10 +6,13 @@ WORKDIR /app
 
 COPY Directory.Build.props Directory.Packages.props ./
 COPY src/Saydin.DatabaseSecurity/Saydin.DatabaseSecurity.csproj src/Saydin.DatabaseSecurity/
+COPY src/Saydin.DatabaseSecurity/packages.lock.json src/Saydin.DatabaseSecurity/
 COPY src/Saydin.DatabaseMigrator/Saydin.DatabaseMigrator.csproj src/Saydin.DatabaseMigrator/
+COPY src/Saydin.DatabaseMigrator/packages.lock.json src/Saydin.DatabaseMigrator/
 COPY src/Saydin.DatabaseRoleBootstrap/Saydin.DatabaseRoleBootstrap.csproj src/Saydin.DatabaseRoleBootstrap/
-RUN dotnet restore src/Saydin.DatabaseMigrator/Saydin.DatabaseMigrator.csproj
-RUN dotnet restore src/Saydin.DatabaseRoleBootstrap/Saydin.DatabaseRoleBootstrap.csproj
+COPY src/Saydin.DatabaseRoleBootstrap/packages.lock.json src/Saydin.DatabaseRoleBootstrap/
+RUN dotnet restore src/Saydin.DatabaseMigrator/Saydin.DatabaseMigrator.csproj --locked-mode
+RUN dotnet restore src/Saydin.DatabaseRoleBootstrap/Saydin.DatabaseRoleBootstrap.csproj --locked-mode
 
 COPY src/Saydin.DatabaseSecurity/ src/Saydin.DatabaseSecurity/
 COPY src/Saydin.DatabaseMigrator/ src/Saydin.DatabaseMigrator/
@@ -34,8 +37,8 @@ RUN apt-get update \
     && useradd -r -u 1001 -s /sbin/nologin appuser \
     && install -d -o appuser -g appuser -m 0700 /run/saydin-secrets
 
-COPY --from=build --chown=appuser:appuser /app/publish/ ./
-COPY --chown=appuser:appuser infrastructure/postgres/migrations/ /migrations/
+COPY --from=build /app/publish/ ./
+COPY infrastructure/postgres/migrations/ /migrations/
 
 USER appuser
 ENV SAYDIN_MIGRATIONS_DIR=/migrations

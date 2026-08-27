@@ -6,12 +6,14 @@ using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
+using Saydin.Api;
 using Saydin.Api.Security;
 using Saydin.Api.Tests.Helpers;
 using StackExchange.Redis;
@@ -157,21 +159,28 @@ public sealed class DistributedSecurityLimiterTests
             .Returns(RedisResult.Create([(RedisValue)1, (RedisValue)0]));
         using var pseudonymizer = new SecurityLimiterPseudonymizer(TestKey);
         var limiter = new DistributedSecurityLimiter(
-            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer);
+            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer,
+            NullLogger<DistributedSecurityLimiter>.Instance);
 
         var principalId = Guid.Parse("f00dbabe-0000-4000-8000-000000000001");
         var networkDecision = await limiter.TryAcquireNetworkAsync(
             IPAddress.Parse("203.0.113.97"));
         var principalDecision = await limiter.TryAcquirePrincipalAsync(principalId);
+        var ipv4CalculationDecision = await limiter.TryAcquireCalculationNetworkAsync(
+            IPAddress.Parse("203.0.113.97"));
 
         networkDecision.Outcome.Should().Be(SecurityLimiterOutcome.Allowed);
         principalDecision.Outcome.Should().Be(SecurityLimiterOutcome.Allowed);
+        ipv4CalculationDecision.Outcome.Should().Be(SecurityLimiterOutcome.Allowed);
         await database.Received(1).ScriptEvaluateAsync(
             Arg.Any<string>(),
             Arg.Is<RedisKey[]?>(keys => keys != null && keys.Length == 2 && keys.All(key =>
                 !key.ToString().Contains("203.0.113.97", StringComparison.Ordinal) &&
                 !key.ToString().Contains("f00dbabe", StringComparison.Ordinal))),
             Arg.Any<RedisValue[]?>(),
+            Arg.Any<CommandFlags>());
+        await database.Received(2).ScriptEvaluateAsync(
+            Arg.Any<string>(), Arg.Any<RedisKey[]?>(), Arg.Any<RedisValue[]?>(),
             Arg.Any<CommandFlags>());
         await database.Received(1).ScriptEvaluateAsync(
             Arg.Any<string>(),
@@ -195,11 +204,41 @@ public sealed class DistributedSecurityLimiterTests
                 ConnectionFailureType.UnableToConnect, "raw-ip-sentinel"));
         using var pseudonymizer = new SecurityLimiterPseudonymizer(TestKey);
         var limiter = new DistributedSecurityLimiter(
-            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer);
+            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer,
+            NullLogger<DistributedSecurityLimiter>.Instance);
 
         var decision = await limiter.TryAcquireNetworkAsync(IPAddress.Loopback);
 
         decision.Should().Be(SecurityLimiterDecision.Unavailable);
+    }
+
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(1, 120_000)]
+    [InlineData(0, 0)]
+    public async Task Limiter_RejectsCrossFieldInconsistentRedisReplies(
+        long allowed,
+        long retryMilliseconds)
+    {
+        var redis = Substitute.For<IConnectionMultiplexer>();
+        var database = Substitute.For<IDatabase>();
+        redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(database);
+        database.ScriptEvaluateAsync(
+                Arg.Any<string>(), Arg.Any<RedisKey[]?>(), Arg.Any<RedisValue[]?>(),
+                Arg.Any<CommandFlags>())
+            .Returns(RedisResult.Create([
+                (RedisValue)allowed,
+                (RedisValue)retryMilliseconds,
+            ]));
+        using var pseudonymizer = new SecurityLimiterPseudonymizer(TestKey);
+        var limiter = new DistributedSecurityLimiter(
+            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer,
+            NullLogger<DistributedSecurityLimiter>.Instance);
+
+        var decision = await limiter.TryAcquireNetworkAsync(IPAddress.Loopback);
+
+        decision.Should().Be(SecurityLimiterDecision.UnavailableFor(
+            SecurityLimiterReason.MalformedReply));
     }
 
     [Fact]
@@ -208,7 +247,8 @@ public sealed class DistributedSecurityLimiterTests
         var redis = Substitute.For<IConnectionMultiplexer>();
         using var pseudonymizer = new SecurityLimiterPseudonymizer(TestKey);
         var limiter = new DistributedSecurityLimiter(
-            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer);
+            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer,
+            NullLogger<DistributedSecurityLimiter>.Instance);
         using var source = new CancellationTokenSource();
         await source.CancelAsync();
 
@@ -216,6 +256,31 @@ public sealed class DistributedSecurityLimiterTests
             IPAddress.Loopback, source.Token);
 
         await action.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task RegistrationCompensation_DecrementsOnlyCurrentPseudonymousBuckets()
+    {
+        var redis = Substitute.For<IConnectionMultiplexer>();
+        var database = Substitute.For<IDatabase>();
+        redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(database);
+        database.ScriptEvaluateAsync(
+                Arg.Is<string>(script => script.Contains("count - 1", StringComparison.Ordinal)),
+                Arg.Any<RedisKey[]?>(), Arg.Any<RedisValue[]?>(), Arg.Any<CommandFlags>())
+            .Returns(RedisResult.Create((RedisValue)1));
+        using var pseudonymizer = new SecurityLimiterPseudonymizer(TestKey);
+        var limiter = new DistributedSecurityLimiter(
+            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer,
+            NullLogger<DistributedSecurityLimiter>.Instance);
+
+        await limiter.ReleaseRegistrationAsync(IPAddress.Parse("203.0.113.97"));
+
+        await database.Received(1).ScriptEvaluateAsync(
+            Arg.Is<string>(script => script.Contains("count - 1", StringComparison.Ordinal)),
+            Arg.Is<RedisKey[]?>(keys => keys != null && keys.Length == 2 && keys.All(key =>
+                !key.ToString().Contains("203.0.113.97", StringComparison.Ordinal))),
+            Arg.Is<RedisValue[]?>(windows => windows != null && windows.Length == 2),
+            Arg.Any<CommandFlags>());
     }
 
     [Fact]
@@ -232,7 +297,8 @@ public sealed class DistributedSecurityLimiterTests
             .Returns(pending.Task);
         using var pseudonymizer = new SecurityLimiterPseudonymizer(TestKey);
         var limiter = new DistributedSecurityLimiter(
-            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer);
+            redis, Microsoft.Extensions.Options.Options.Create(ValidOptions()), pseudonymizer,
+            NullLogger<DistributedSecurityLimiter>.Instance);
         using var source = new CancellationTokenSource();
 
         var operation = limiter.TryAcquireNetworkAsync(
@@ -250,7 +316,8 @@ public sealed class DistributedSecurityLimiterTests
         var logger = new TestLogger<DistributedSecurityLimiterMiddleware>();
         var middleware = new DistributedSecurityLimiterMiddleware(
             new StubLimiter(SecurityLimiterDecision.Allowed),
-            Microsoft.Extensions.Options.Options.Create(ValidOptions()), logger);
+            Microsoft.Extensions.Options.Options.Create(ValidOptions()), logger,
+            CreateLocalizer());
         var invoked = false;
 
         await middleware.InvokeAsync(context, _ =>
@@ -261,7 +328,8 @@ public sealed class DistributedSecurityLimiterTests
 
         invoked.Should().BeFalse();
         context.Response.StatusCode.Should().Be(503);
-        (await ReadCodeAsync(context)).Should().Be("security_limiter_unavailable");
+        context.Response.Headers.Should().NotContainKey("Retry-After");
+        (await ReadCodeAsync(context)).Should().Be("security_client_address_untrusted");
     }
 
     [Theory]
@@ -275,7 +343,8 @@ public sealed class DistributedSecurityLimiterTests
         var middleware = new DistributedSecurityLimiterMiddleware(
             new StubLimiter(SecurityLimiterDecision.Allowed),
             Microsoft.Extensions.Options.Options.Create(ValidOptions()),
-            NullLogger<DistributedSecurityLimiterMiddleware>.Instance);
+            NullLogger<DistributedSecurityLimiterMiddleware>.Instance,
+            CreateLocalizer());
         var invoked = false;
 
         await middleware.InvokeAsync(context, _ =>
@@ -286,7 +355,8 @@ public sealed class DistributedSecurityLimiterTests
 
         invoked.Should().BeFalse();
         context.Response.StatusCode.Should().Be(503);
-        (await ReadCodeAsync(context)).Should().Be("security_limiter_unavailable");
+        context.Response.Headers.Should().NotContainKey("Retry-After");
+        (await ReadCodeAsync(context)).Should().Be("security_client_address_untrusted");
     }
 
     [Fact]
@@ -296,11 +366,13 @@ public sealed class DistributedSecurityLimiterTests
         var middleware = new DistributedSecurityLimiterMiddleware(
             new StubLimiter(SecurityLimiterDecision.Unavailable),
             Microsoft.Extensions.Options.Options.Create(ValidOptions()),
-            NullLogger<DistributedSecurityLimiterMiddleware>.Instance);
+            NullLogger<DistributedSecurityLimiterMiddleware>.Instance,
+            CreateLocalizer());
 
         await middleware.InvokeAsync(context, _ => Task.CompletedTask);
 
         context.Response.StatusCode.Should().Be(503);
+        context.Response.Headers.RetryAfter.ToString().Should().Be("5");
         (await ReadCodeAsync(context)).Should().Be("security_limiter_unavailable");
     }
 
@@ -313,7 +385,8 @@ public sealed class DistributedSecurityLimiterTests
         var logger = new TestLogger<DistributedSecurityLimiterMiddleware>();
         var middleware = new DistributedSecurityLimiterMiddleware(
             new StubLimiter(SecurityLimiterDecision.Allowed),
-            Microsoft.Extensions.Options.Options.Create(ValidOptions()), logger);
+            Microsoft.Extensions.Options.Options.Create(ValidOptions()), logger,
+            CreateLocalizer());
 
         var invoked = false;
         await middleware.InvokeAsync(context, _ =>
@@ -338,7 +411,8 @@ public sealed class DistributedSecurityLimiterTests
         var middleware = new DistributedSecurityLimiterMiddleware(
             new StubLimiter(SecurityLimiterDecision.Limited(TimeSpan.FromMilliseconds(1100))),
             Microsoft.Extensions.Options.Options.Create(ValidOptions()),
-            NullLogger<DistributedSecurityLimiterMiddleware>.Instance);
+            NullLogger<DistributedSecurityLimiterMiddleware>.Instance,
+            CreateLocalizer());
 
         await middleware.InvokeAsync(context, _ => Task.CompletedTask);
 
@@ -365,6 +439,15 @@ public sealed class DistributedSecurityLimiterTests
         return context;
     }
 
+    private static IStringLocalizer<ErrorMessages> CreateLocalizer()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddLocalization();
+        return services.BuildServiceProvider()
+            .GetRequiredService<IStringLocalizer<ErrorMessages>>();
+    }
+
     private static async Task<string?> ReadCodeAsync(DefaultHttpContext context)
     {
         context.Response.Body.Position = 0;
@@ -381,6 +464,17 @@ public sealed class DistributedSecurityLimiterTests
 
         public ValueTask<SecurityLimiterDecision> TryAcquirePrincipalAsync(
             Guid principalId,
+            CancellationToken cancellationToken = default) => ValueTask.FromResult(decision);
+
+        public ValueTask<SecurityLimiterDecision> TryAcquireRegistrationAsync(
+            IPAddress clientAddress,
+            CancellationToken cancellationToken = default) => ValueTask.FromResult(decision);
+
+        public ValueTask ReleaseRegistrationAsync(IPAddress clientAddress) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask<SecurityLimiterDecision> TryAcquireCalculationNetworkAsync(
+            IPAddress clientAddress,
             CancellationToken cancellationToken = default) => ValueTask.FromResult(decision);
     }
 }

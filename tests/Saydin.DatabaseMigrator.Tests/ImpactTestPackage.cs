@@ -38,7 +38,9 @@ internal sealed class ImpactTestPackage : IDisposable
         Action<Dictionary<string, object?>>? mutateBudgets = null,
         Action<Dictionary<string, object?>>? mutateTarget = null,
         bool includeChunks = false,
-        bool includeCompressed = false)
+        bool includeCompressed = false,
+        string migrationVersion = "026_impact_test",
+        string? postconditionRelation = null)
     {
         var migrations = TemporaryDirectory.Create();
         var impacts = TemporaryDirectory.Create();
@@ -47,11 +49,11 @@ internal sealed class ImpactTestPackage : IDisposable
             foreach (var source in Directory.EnumerateFiles(TestPaths.MigrationsDirectory))
                 if (Path.GetExtension(source) is ".sql" or ".sh")
                     File.Copy(source, Path.Combine(migrations.Path, Path.GetFileName(source)));
-            File.WriteAllText(Path.Combine(migrations.Path, "023_impact_test.sql"), sql,
+            File.WriteAllText(Path.Combine(migrations.Path, $"{migrationVersion}.sql"), sql,
                 new UTF8Encoding(false));
             var manifest = MigrationManifest.Load(migrations.Path);
-            var migration = manifest.Migrations.Single(item => item.Version == "023_impact_test");
-            var predecessor = manifest.Migrations[23];
+            var migration = manifest.Migrations.Single(item => item.Version == migrationVersion);
+            var predecessor = manifest.Migrations[26];
             var budgets = new Dictionary<string, object?>
             {
                 ["declaredTablespaceCapacityBytes"] = 10_000_000_000_000L,
@@ -77,7 +79,7 @@ internal sealed class ImpactTestPackage : IDisposable
                 ["database"] = database.Name,
                 ["requiredPredecessorSha256"] = predecessor.Checksum,
                 ["requiredPredecessorVersion"] = predecessor.Version,
-                ["requiredSchemaManifestSha256"] = manifest.ChecksumThrough(24),
+                ["requiredSchemaManifestSha256"] = manifest.ChecksumThrough(27),
                 ["systemIdentifierSha256"] = database.Contract.SystemIdentifierSha256,
             };
             mutateTarget?.Invoke(target);
@@ -96,7 +98,7 @@ internal sealed class ImpactTestPackage : IDisposable
                         ["column"] = postconditionColumn,
                         ["index"] = postconditionIndex,
                         ["kind"] = postconditionKind,
-                        ["relation"] = relation,
+                        ["relation"] = postconditionRelation ?? relation,
                     },
                 },
                 ["relations"] = new[]
@@ -114,7 +116,7 @@ internal sealed class ImpactTestPackage : IDisposable
             };
             var canonical = CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(document));
             File.WriteAllBytes(
-                Path.Combine(impacts.Path, "023_impact_test.impact.json"), canonical);
+                Path.Combine(impacts.Path, $"{migrationVersion}.impact.json"), canonical);
             using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             var publicFile = Path.Combine(impacts.Path, "impact-public.pem");
             File.WriteAllText(publicFile, key.ExportSubjectPublicKeyInfoPem(), new UTF8Encoding(false));
@@ -123,7 +125,7 @@ internal sealed class ImpactTestPackage : IDisposable
             var signature = key.SignData(
                 canonical, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
             File.WriteAllText(
-                Path.Combine(impacts.Path, "023_impact_test.impact.sig"),
+                Path.Combine(impacts.Path, $"{migrationVersion}.impact.sig"),
                 Convert.ToBase64String(signature), new UTF8Encoding(false));
             return new ImpactTestPackage(
                 migrations,

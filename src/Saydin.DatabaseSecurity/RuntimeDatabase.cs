@@ -62,7 +62,7 @@ public sealed record RuntimeDatabaseOptions(
         var prefix = Required(environment, "SAYDIN_DATABASE_ROLE_PREFIX", 63);
         var passwordFile = Required(environment, PasswordFileEnvironment(purpose), 1024);
         var port = ParsePort(environment("PGPORT") ?? "5432");
-        var sslMode = ParseSslMode(environment("PGSSLMODE") ?? "disable");
+        var sslMode = ParseSslMode(environment("PGSSLMODE") ?? "require");
         var version = ParseLoginVersion(environment("SAYDIN_DATABASE_LOGIN_VERSION") ?? "1");
         var contract = RoleContract.Create(deployment, database, systemHash, prefix);
         var login = contract.Login(purpose, version);

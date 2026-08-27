@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
+using Saydin.Api.Helpers;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
@@ -69,6 +70,7 @@ public class DcaCalculatorTests
 
     public DcaCalculatorTests()
     {
+        _timeProvider.SetUtcNow(new DateTimeOffset(2026, 8, 19, 22, 0, 0, TimeSpan.Zero));
         _dailyLimitGuard.TryAcquireAsync(
                 Arg.Any<User?>(), Arg.Any<string>(), Arg.Any<string>(),
                 Arg.Any<int?>(), Arg.Any<CancellationToken>())
@@ -150,6 +152,107 @@ public class DcaCalculatorTests
         result.CurrentValueTry.Should().Be(6000m);
         result.ProfitLossTry.Should().Be(0m);
         result.IsProfit.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_HighUnitPriceAtBreakeven_UsesRequestedCapitalForMath()
+    {
+        SetupConstantPrice(3_000_000m);
+
+        var result = await _sut.CalculateAsync(
+            MakeRequest("USDTRY", StartDate, StartDate, 100m, "monthly"),
+            CancellationToken.None);
+
+        result.TotalUnitsAcquired.Should().Be(0.000033m);
+        result.TotalInvestedTry.Should().Be(100m);
+        result.CurrentValueTry.Should().Be(100m);
+        result.ProfitLossTry.Should().Be(0m);
+        result.ProfitLossPercent.Should().Be(0m);
+    }
+
+    [Fact]
+    public async Task CalculateAsync_OneMissingPurchasePrice_ReturnsTransparentPartialResult()
+    {
+        var start = new DateOnly(2023, 1, 1);
+        var end = new DateOnly(2023, 3, 1);
+        _assetService.GetNearestPricesAsync(
+                "USDTRY", Arg.Any<IReadOnlyList<DateOnly>>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var dates = (IReadOnlyList<DateOnly>)call[1];
+                dates[2].Should().Be(dates[3],
+                    "the terminal valuation keeps a distinct duplicate ordinal");
+                return (IReadOnlyList<PricePoint?>)
+                [
+                    AuthorityTestData.FinalPrice(dates[0], 10m, AssetId),
+                    null,
+                    AuthorityTestData.FinalPrice(dates[2], 10m, AssetId),
+                    AuthorityTestData.FinalPrice(dates[3], 10m, AssetId),
+                ];
+            });
+
+        var result = await _sut.CalculateAsync(
+            MakeRequest("USDTRY", start, end, 100m, "monthly"),
+            CancellationToken.None);
+
+        result.TotalPurchases.Should().Be(2);
+        result.TotalInvestedTry.Should().Be(200m);
+        result.SkippedPurchaseDates.Should().Equal(new DateOnly(2023, 2, 1));
+        result.Data!.DataStatus.Should().Be(AuthorityDataStatuses.Degraded);
+        result.Data.Warnings.Should().Equal(AuthorityDataWarnings.PurchasePriceUnavailable);
+        await _cache.DidNotReceive().TrySetAsync(
+            Arg.Any<string>(), Arg.Any<DcaCacheEntry>(), Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateAsync_AllPurchasePricesMissingButTerminalExists_ThrowsAndDoesNotCache()
+    {
+        var start = new DateOnly(2023, 1, 1);
+        var end = new DateOnly(2023, 3, 15);
+        _assetService.GetNearestPricesAsync(
+                "USDTRY", Arg.Any<IReadOnlyList<DateOnly>>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var dates = (IReadOnlyList<DateOnly>)call[1];
+                return (IReadOnlyList<PricePoint?>)
+                [
+                    null,
+                    null,
+                    null,
+                    AuthorityTestData.FinalPrice(dates[^1], 10m, AssetId),
+                ];
+            });
+
+        var act = () => _sut.CalculateAsync(
+            MakeRequest("USDTRY", start, end, 100m, "monthly"),
+            CancellationToken.None);
+
+        await act.Should().ThrowAsync<PriceNotFoundException>();
+        await _cache.DidNotReceive().TrySetAsync(
+            Arg.Any<string>(), Arg.Any<DcaCacheEntry>(), Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CalculateAsync_PurchaseResolvedAfterTerminalValuation_IsSkipped()
+    {
+        var start = new DateOnly(2023, 1, 1);
+        var end = new DateOnly(2023, 2, 1);
+        _assetService.GetNearestPricesAsync(
+                "USDTRY", Arg.Any<IReadOnlyList<DateOnly>>(), Arg.Any<CancellationToken>())
+            .Returns((IReadOnlyList<PricePoint?>)
+            [
+                AuthorityTestData.FinalPrice(start, 10m, AssetId),
+                AuthorityTestData.FinalPrice(end.AddDays(1), 10m, AssetId),
+                AuthorityTestData.FinalPrice(end.AddDays(-1), 10m, AssetId),
+            ]);
+
+        var result = await _sut.CalculateAsync(
+            MakeRequest("USDTRY", start, end, 100m, "monthly"),
+            CancellationToken.None);
+
+        result.TotalPurchases.Should().Be(1);
+        result.SkippedPurchaseDates.Should().Equal(end);
+        result.Data!.Warnings.Should().Equal(AuthorityDataWarnings.PurchasePriceUnavailable);
     }
 
     [Fact]
@@ -479,9 +582,12 @@ public class DcaCalculatorTests
             .Returns(callInfo =>
             {
                 var months = (IReadOnlyCollection<DateOnly>)callInfo[0];
-                months.Should().BeEquivalentTo([february, march, april]);
+                months.Should().BeEquivalentTo([february, march]);
                 return indexes;
             });
+        _inflationRepository
+            .GetLatestFinalIndexValueAsync(april, Arg.Any<CancellationToken>())
+            .Returns(indexes[april]);
 
         var request = MakeRequest("USDTRY", start, end, 100m, "monthly", includeInflation: true);
         var result  = await _sut.CalculateAsync(request, CancellationToken.None);
@@ -495,9 +601,66 @@ public class DcaCalculatorTests
         result.RealProfitLossTry.Should().Be(-31m);
         result.RealProfitLossPercent.Should().Be(-9.37m);
         result.CumulativeInflationPercent.Should().Be(21m);
-        result.RealReturnMethod.Should().Be("cashflow_cpi_terminal_v1");
+        result.RealReturnMethod.Should().Be("cashflow_cpi_lkv_terminal_v1");
         result.InflationTerminalMonth.Should().Be(april);
-        result.InflationDataAsOf.Should().Be(april);
+        result.InflationDataAsOf.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_CurrentTerminalMonthUsesLatestFinalCpi_AndReturnsUsedMonth()
+    {
+        var start = new DateOnly(2026, 6, 15);
+        var terminalDate = new DateOnly(2026, 8, 15);
+        var june = new DateOnly(2026, 6, 1);
+        var july = new DateOnly(2026, 7, 1);
+        var august = new DateOnly(2026, 8, 1);
+        SetupConstantPrice(10m);
+        _assetService.GetLatestPriceDateAsync("USDTRY", Arg.Any<CancellationToken>())
+            .Returns(terminalDate);
+        _inflationRepository.GetExactIndexValuesAsync(
+                Arg.Any<IReadOnlyCollection<DateOnly>>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                ((IReadOnlyCollection<DateOnly>)call[0]).Should().BeEquivalentTo([june]);
+                return AuthorityTestData.FinalCpi(new Dictionary<DateOnly, decimal>
+                {
+                    [june] = 100m,
+                    [july] = 110m,
+                });
+            });
+        _inflationRepository.GetLatestFinalIndexValueAsync(
+                august, Arg.Any<CancellationToken>())
+            .Returns(AuthorityTestData.FinalCpi(july, 110m));
+
+        var result = await _sut.CalculateAsync(
+            MakeRequest("USDTRY", start, null, 100m, "monthly", includeInflation: true),
+            CancellationToken.None);
+
+        result.EndDate.Should().Be(terminalDate);
+        result.InflationAdjustedInvestedTry.Should().Be(310m);
+        result.RealProfitLossTry.Should().Be(-10m);
+        result.RealProfitLossPercent.Should().Be(-3.23m);
+        result.RealReturnMethod.Should().Be("cashflow_cpi_lkv_terminal_v1");
+        result.InflationTerminalMonth.Should().Be(july);
+        result.InflationDataAsOf.Should().Be(july);
+        result.Data!.Warnings.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CalculateAsync_ExplicitFutureEndDate_IsRejectedBeforeQuota()
+    {
+        _timeProvider.SetUtcNow(new DateTimeOffset(
+            2026, 8, 19, 22, 0, 0, TimeSpan.Zero));
+        BusinessClock.TodayInIstanbul(_timeProvider).Should().Be(new DateOnly(2026, 8, 20));
+        var request = MakeRequest(
+            "USDTRY", StartDate, new DateOnly(2026, 8, 21), 100m, "monthly");
+
+        var act = () => _sut.CalculateAsync(request, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ValidationException>()
+            .Where(error => error.Field == nameof(request.EndDate));
+        await _dailyLimitGuard.DidNotReceiveWithAnyArgs().TryAcquireAsync(
+            default, default!, default!, default, default);
     }
 
     [Fact]
@@ -519,6 +682,10 @@ public class DcaCalculatorTests
                 [new DateOnly(2023, 1, 1)] = 100m,
                 [new DateOnly(2023, 2, 1)] = 120m,
             }));
+        _inflationRepository
+            .GetLatestFinalIndexValueAsync(
+                new DateOnly(2023, 2, 1), Arg.Any<CancellationToken>())
+            .Returns(AuthorityTestData.FinalCpi(new DateOnly(2023, 2, 1), 120m));
 
         var result = await _sut.CalculateAsync(
             MakeRequest("USDTRY", start, end, 100m, "monthly", includeInflation: true),
@@ -551,6 +718,9 @@ public class DcaCalculatorTests
                 Arg.Any<CancellationToken>())
             .Returns(AuthorityTestData.FinalCpi(
                 new Dictionary<DateOnly, decimal> { [date] = 100m }));
+        _inflationRepository
+            .GetLatestFinalIndexValueAsync(date, Arg.Any<CancellationToken>())
+            .Returns(AuthorityTestData.FinalCpi(date, 100m));
 
         var result = await _sut.CalculateAsync(
             MakeRequest("USDTRY", date, date, 1m, "monthly", includeInflation: true),
@@ -581,6 +751,10 @@ public class DcaCalculatorTests
                 [new DateOnly(2023, 5, 1)] = 140m,
                 [new DateOnly(2023, 6, 1)] = 150m,
             }));
+        _inflationRepository
+            .GetLatestFinalIndexValueAsync(
+                new DateOnly(2023, 6, 1), Arg.Any<CancellationToken>())
+            .Returns(AuthorityTestData.FinalCpi(new DateOnly(2023, 6, 1), 150m));
 
         var result = await _sut.CalculateAsync(
             MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly", includeInflation: true),
@@ -590,7 +764,7 @@ public class DcaCalculatorTests
         result.InflationAdjustedInvestedTry.Should().BeNull();
         result.RealProfitLossTry.Should().BeNull();
         result.RealProfitLossPercent.Should().BeNull();
-        result.RealReturnMethod.Should().Be("cashflow_cpi_terminal_v1");
+        result.RealReturnMethod.Should().Be("cashflow_cpi_lkv_terminal_v1");
         await _cache.DidNotReceive().TrySetAsync(
             Arg.Any<string>(), Arg.Any<DcaCacheEntry>(), Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>());
     }
@@ -719,6 +893,8 @@ public class DcaCalculatorTests
     [InlineData("period")]
     [InlineData("type")]
     [InlineData("inflation")]
+    [InlineData("language")]
+    [InlineData("catalog_hash")]
     public async Task CalculateAsync_CurrentKeyWrongRequestEnvelope_IsCacheMiss(string mutation)
     {
         var request = MakeRequest("USDTRY", StartDate, EndDate, 1000m, "monthly");
@@ -737,6 +913,8 @@ public class DcaCalculatorTests
             "period" => entry with { Period = "weekly" },
             "type" => entry with { AmountType = "units" },
             "inflation" => entry with { IncludeInflation = true },
+            "language" => entry with { Language = new string('x', 4_096) },
+            "catalog_hash" => entry with { CatalogHash = new string('a', 4_096) },
             _ => throw new InvalidOperationException("unknown_test_mutation"),
         };
         _cache.TryGetAsync<DcaCacheEntry>(Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -801,12 +979,12 @@ public class DcaCalculatorTests
                      .Returns(EndDate);
     }
 
-    private async Task<IReadOnlyList<PricePoint>> LoadNearestPricesFromSingleStubAsync(
+    private async Task<IReadOnlyList<PricePoint?>> LoadNearestPricesFromSingleStubAsync(
         string symbol,
         IReadOnlyList<DateOnly> dates,
         CancellationToken ct)
     {
-        var result = new PricePoint[dates.Count];
+        var result = new PricePoint?[dates.Count];
         for (var index = 0; index < dates.Count; index++)
             result[index] = await _assetService.GetNearestPriceAsync(symbol, dates[index], ct);
         return result;

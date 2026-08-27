@@ -25,9 +25,18 @@ services:
             chmod 0400 "$$target"
           fi
         }
-        for name in postgres-password migrator-v1 api-v1 ingestion-v1 calendar_importer-v1 exporter-v1 audit-v1 security-limiter-hmac; do
+        make_binary_secret() {
+          target="$$1"
+          if [ ! -s "$$target" ]; then
+            umask 077
+            dd if=/dev/urandom of="$$target" bs=32 count=1 2>/dev/null
+            chmod 0400 "$$target"
+          fi
+        }
+        for name in postgres-password migrator-v1 api-v1 ingestion-v1 calendar_importer-v1 exporter-v1 audit-v1 backup-v1 security-limiter-hmac; do
           make_secret "/source/private/$$name"
         done
+        make_binary_secret /source/private/activity-principal-hmac
         make_base64_secret /source/private/installation-hmac-v1
         if [ ! -s /source/private/admin-connection ]; then
           password="$$(dd if=/source/private/postgres-password bs=512 count=1 2>/dev/null)"
@@ -55,6 +64,7 @@ services:
         for name in admin-connection migrator-v1 api-v1 ingestion-v1 calendar_importer-v1 exporter-v1 audit-v1; do
           install -o 1001 -g 1001 -m 0400 "/source/private/$$name" "/out-bootstrap/private/$$name"
         done
+        install -o 1001 -g 1001 -m 0400 /source/private/backup-v1 /out-bootstrap/private/backup-v1
         for target in migrator api ingestion calendar audit; do
           eval "directory=/out-$$target"
           install -d -o 1001 -g 1001 -m 0700 "$$directory/private"
@@ -74,6 +84,7 @@ services:
         chmod 0400 /out-api/private/installation-keyring.json
         unset installation_key
         install -o 1001 -g 1001 -m 0400 /source/private/security-limiter-hmac /out-api/private/security-limiter-hmac
+        install -o 1001 -g 1001 -m 0400 /source/private/activity-principal-hmac /out-api/private/activity-principal-hmac
         install -d -o 65534 -g 65534 -m 0700 /out-exporter/private
         install -o 65534 -g 65534 -m 0400 /source/private/exporter-v1 /out-exporter/private/password
     volumes:
@@ -152,6 +163,8 @@ services:
         suffix="$$(printf '%s\0%s\0%s' "$$system_hash" "$$PGDATABASE" "$$SAYDIN_DEPLOYMENT_ID" | sha256sum | cut -c1-24)"
         deployment_slug="$$(printf '%s' "$$SAYDIN_DEPLOYMENT_ID" | tr '-' '_' | cut -c1-3)"
         prefix="saydin_$${deployment_slug}_$${suffix}"
+        backup_valid_until="$$(PGPASSFILE=/identity/private/pgpass psql -X -A -t -v ON_ERROR_STOP=1 \
+          -c "SELECT to_char(((clock_timestamp() AT TIME ZONE 'UTC')::date + 60)::timestamp, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
         printf '%s\n' \
           "SAYDIN_DEPLOYMENT_ID=$$SAYDIN_DEPLOYMENT_ID" \
           "SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256=$$system_hash" \
@@ -161,11 +174,85 @@ services:
           "SAYDIN_INGESTION_LOGIN=$${prefix}_ingestion_login_v1" \
           "SAYDIN_CALENDAR_IMPORTER_LOGIN=$${prefix}_calendar_importer_login_v1" \
           "SAYDIN_EXPORTER_LOGIN=$${prefix}_exporter_login_v1" \
-          "SAYDIN_AUDIT_LOGIN=$${prefix}_audit_login_v1"
+          "SAYDIN_AUDIT_LOGIN=$${prefix}_audit_login_v1" \
+          "SAYDIN_BACKUP_V1_VALID_UNTIL=$$backup_valid_until"
     volumes:
       - role_bootstrap_secret:/run/saydin-secrets:ro
     tmpfs:
       - /identity:uid=0,gid=0,mode=0700,size=64k
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Development keeps the production backup-login boundary: only the exact
+  # target-derived v1/v2 roles may open physical replication connections, and
+  # those roles are rejected from every SQL database. The project subnet is
+  # derived inside this container; no Docker socket or broad role pattern is
+  # needed.
+  database-backup-hba:
+    image: timescale/timescaledb:2.16.1-pg16
+    user: "70:70"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        subnet="$$(python3 - <<'PY'
+        import ipaddress
+        import socket
+
+        address = ipaddress.IPv4Address(socket.gethostbyname(socket.gethostname()))
+        matches = []
+        with open('/proc/net/route', encoding='ascii') as routes:
+            next(routes)
+            for line in routes:
+                fields = line.split()
+                if len(fields) < 8 or fields[1] == '00000000':
+                    continue
+                destination = int.from_bytes(bytes.fromhex(fields[1]), 'little')
+                mask = int.from_bytes(bytes.fromhex(fields[7]), 'little')
+                prefix_length = mask.bit_count()
+                network = ipaddress.IPv4Network((destination, prefix_length), strict=True)
+                if int(network.netmask) != mask:
+                    raise SystemExit('development_backup_subnet_mask_invalid')
+                if address in network and network.is_private and 16 <= network.prefixlen <= 28:
+                    matches.append(network)
+        if len(matches) != 1:
+            raise SystemExit('development_backup_subnet_invalid')
+        print(matches[0])
+        PY
+        )"
+        python3 /usr/local/bin/manage-backup-hba.py install \
+          --fixture-cleartext \
+          --hba /var/lib/postgresql/data/pg_hba.conf \
+          --cidr "$$subnet" \
+          --role-prefix "$$SAYDIN_DATABASE_ROLE_PREFIX"
+        password="$$(cat /run/postgres-secret/private/password)"
+        umask 077
+        printf 'postgres:5432:*:saydin_admin:%s' "$$password" > /tmp/pgpass
+        unset password
+        PGPASSFILE=/tmp/pgpass psql -X -A -t -v ON_ERROR_STOP=1 \
+          -h postgres -U saydin_admin -d "$$PGDATABASE" \
+          -c 'SELECT pg_reload_conf(); SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL' \
+          | tr -d '[:space:]' | grep -qx 't0'
+        python3 /usr/local/bin/manage-backup-hba.py verify \
+          --fixture-cleartext \
+          --hba /var/lib/postgresql/data/pg_hba.conf \
+          --cidr "$$subnet" \
+          --role-prefix "$$SAYDIN_DATABASE_ROLE_PREFIX"
+        rm -f /tmp/pgpass
+    environment:
+      PGDATABASE: ${POSTGRES_DB:-saydin}
+      SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?run infrastructure/secrets/bootstrap-dev-database.sh first}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_secret:/run/postgres-secret:ro
+      - ./infrastructure/backup/manage_backup_hba.py:/usr/local/bin/manage-backup-hba.py:ro
+    tmpfs:
+      - /tmp:uid=70,gid=70,mode=0700,size=1m
     depends_on:
       postgres:
         condition: service_healthy
@@ -192,6 +279,8 @@ services:
       - 2.16.1
       - --uuid-ossp-version
       - "1.1"
+      - --backup-v1-valid-until
+      - ${SAYDIN_BACKUP_V1_VALID_UNTIL:?run infrastructure/secrets/bootstrap-dev-database.sh first}
       - --migrator-password-file
       - /run/saydin-secrets/private/migrator-v1
       - --api-password-file
@@ -204,11 +293,15 @@ services:
       - /run/saydin-secrets/private/exporter-v1
       - --audit-password-file
       - /run/saydin-secrets/private/audit-v1
+      - --backup-password-file
+      - /run/saydin-secrets/private/backup-v1
     volumes:
       - role_bootstrap_secret:/run/saydin-secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
+      database-backup-hba:
+        condition: service_completed_successfully
     restart: "no"
 
   # C-02: Her startup/deploy'da çalışan fail-closed migration control-plane.
@@ -231,10 +324,26 @@ services:
       SAYDIN_TIMESCALEDB_VERSION: 2.16.1
       SAYDIN_UUID_OSSP_VERSION: "1.1"
       SAYDIN_MIGRATOR_LOGIN_VERSION: "1"
+      SAYDIN_BACKUP_V1_VALID_UNTIL: ${SAYDIN_BACKUP_V1_VALID_UNTIL:?run infrastructure/secrets/bootstrap-dev-database.sh first}
     volumes:
       - migrator_secret:/run/saydin-secrets:ro
     depends_on:
       database-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # A fresh database cannot materialize the physical-backup role until the
+  # principal-retention contract (022) is terminal. The pre-migration ensure
+  # establishes the migrator role; this second, separately gated ensure
+  # completes and authenticates the post-022 backup role before any runtime
+  # database consumer is admitted.
+  database-role-bootstrap-post-migration:
+    extends:
+      service: database-role-bootstrap
+    depends_on:
+      database-migrator:
+        condition: service_completed_successfully
+      database-backup-hba:
         condition: service_completed_successfully
     restart: "no"
 
@@ -271,7 +380,7 @@ services:
         bind:
           create_host_path: false
     depends_on:
-      database-migrator:
+      database-role-bootstrap-post-migration:
         condition: service_completed_successfully
     restart: unless-stopped
 
@@ -361,30 +470,22 @@ services:
       - "--web.enable-lifecycle"
     restart: unless-stopped
 
-  # F2.6-21: Test runner — SDK image + repo mount, compose ağına bağlı. `test` profili
-  # ile default başlatılmaz. Lokalde .NET SDK olmadığı için tüm testler (unit + gerçek
-  # PostgreSQL/Redis entegrasyon) bu servis üzerinden çalışır:
-  #   docker compose run --rm tests                          # tüm solution
-  #   docker compose run --rm tests test tests/Saydin.Api.IntegrationTests  # sadece entegrasyon
+  # F2.6-21: Yerel test runner — SDK image + repo mount; `test` profiliyle default başlamaz.
+  # Default komut yalnız yedi unit projesini locked restore + coverage ratchet ile çalıştırır.
+  # Purpose-specific DB credential taşımadığı için solution/integration komutlarını fail-closed
+  # reddeder; gerçek PostgreSQL/Redis kabulü `.github/compose.integration.yml` akışındadır.
+  #   docker compose run --rm tests
+  #   docker compose run --rm tests test tests/Saydin.Api.Tests/Saydin.Api.Tests.csproj
   tests:
     # Exact .NET 10.0.400 multi-arch manifest; global.json ile aynı compiler/SDK.
     image: mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c
     profiles: ["test"]
     working_dir: /src
-    environment:
-      # Root dev test profile is unit/compile-only. Required real-login
-      # integration suites use the isolated CI stack and per-purpose files.
-      ConnectionStrings__Redis: "redis:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
     volumes:
       - .:/src
       - nuget_cache:/root/.nuget/packages
-    depends_on:
-      database-migrator:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    entrypoint: ["dotnet"]
-    command: ["test", "Saydin.Services.sln", "-c", "Debug"]
+    entrypoint: ["/src/.github/scripts/run-local-tests.sh"]
+    command: []
 
   # ============================================================
   # BACKEND SERVİSLER
@@ -410,6 +511,7 @@ services:
       SAYDIN_DATABASE_ROLE_PREFIX: ${SAYDIN_DATABASE_ROLE_PREFIX:?run infrastructure/secrets/bootstrap-dev-database.sh first}
       SAYDIN_DATABASE_LOGIN_VERSION: "1"
       InstallationCredentials__SecretFile: /run/saydin-secrets/private/installation-keyring.json
+      ActivityPrincipalPseudonym__SecretFile: /run/saydin-secrets/private/activity-principal-hmac
       DistributedSecurityLimiter__Enabled: "true"
       DistributedSecurityLimiter__HmacKeyFile: /run/saydin-secrets/private/security-limiter-hmac
       # F2.8-5: Redis ConnectionString'i password ile bağlanır.
@@ -422,7 +524,7 @@ services:
       - ./infrastructure/geoip:/app/geoip:ro
       - api_secret:/run/saydin-secrets:ro
     depends_on:
-      database-migrator:
+      database-role-bootstrap-post-migration:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
@@ -470,7 +572,7 @@ services:
     volumes:
       - ingestion_secret:/run/saydin-secrets:ro
     depends_on:
-      database-migrator:
+      database-role-bootstrap-post-migration:
         condition: service_completed_successfully
     healthcheck:
       # F1.7-6: LivenessHeartbeatService /tmp/saydin-ingestion-healthy dosyasını
@@ -496,7 +598,7 @@ services:
     volumes:
       - exporter_secret:/run/saydin-secrets:ro
     depends_on:
-      database-migrator:
+      database-role-bootstrap-post-migration:
         condition: service_completed_successfully
     healthcheck:
       # INFR-007: exporter ölü kalırsa Prometheus scrape sessizce başarısız olur;
@@ -527,7 +629,7 @@ services:
       - calendar_secret:/run/saydin-secrets:ro
       - ./tools/calendar-data/data:/workspace/tools/calendar-data/data:ro
     depends_on:
-      database-migrator:
+      database-role-bootstrap-post-migration:
         condition: service_completed_successfully
     restart: "no"
 

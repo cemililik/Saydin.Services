@@ -10,8 +10,9 @@ domain, object-store/KMS workload identity, on-call route, private volume materi
 and absolute operator environment/smoke files in environment variables. Never store
 credential values in Actions variables or `GITHUB_ENV`.
 
-1. Verify the release record binds commit, API/ingestion/control/calendar/DQA/backup/
-   Caddy manifest-list digests, third-party digests, SBOMs, provenance and signatures.
+1. Verify the release record binds commit, API/ingestion/control/calendar/DataRepair/DQA/
+   backup/Caddy manifest-list digests, the 11 external runtime digests, the derived exact
+   `runtimeImages.data_repair` binding, SBOMs, provenance and signatures.
 2. Require migrations through 022 and every later migration in the release to be frozen in the
    Migrator and DQA trust roots. Unknown tail or checksum drift stops promotion.
 3. Deploy the exact digest set to staging. Run role bootstrap, migrator, DQA, API trust,

@@ -10,6 +10,7 @@ internal sealed class TestFiles : IDisposable
     {
         Root = Path.Combine(Path.GetTempPath(), $"saydin-audit-unit-{Guid.NewGuid():N}");
         Directory.CreateDirectory(Root);
+        SetPrivateDirectoryMode(Root);
         using var inputKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         InputPrivateKeyPath = Write("input-private.pem", inputKey.ExportECPrivateKeyPem());
         InputPublicKeyPath = Write("input-public.pem", inputKey.ExportSubjectPublicKeyInfoPem());
@@ -18,6 +19,7 @@ internal sealed class TestFiles : IDisposable
         EvidencePublicKeyPath = Write("evidence-public.pem", evidenceKey.ExportSubjectPublicKeyInfoPem());
         HmacKeyPath = Path.Combine(Root, "hmac.key");
         File.WriteAllBytes(HmacKeyPath, RandomNumberGenerator.GetBytes(32));
+        SetSecretFileMode(HmacKeyPath);
     }
 
     public string Root { get; }
@@ -34,7 +36,22 @@ internal sealed class TestFiles : IDisposable
     {
         var path = Path.Combine(Root, name);
         File.WriteAllText(path, content, Encoding.UTF8);
+        if (name.Contains("private", StringComparison.Ordinal))
+            SetSecretFileMode(path);
         return path;
+    }
+
+    private static void SetPrivateDirectoryMode(string path)
+    {
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    internal static void SetSecretFileMode(string path)
+    {
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
     public (string Manifest, string Signature) WriteSignedInput(AuditInputManifest manifest)
@@ -48,6 +65,15 @@ internal sealed class TestFiles : IDisposable
         return (manifestPath, signaturePath);
     }
 
+    public string WriteProductionTargetAuthority(AuditTarget target)
+    {
+        var path = Path.Combine(Root, $"production-target-{Guid.NewGuid():N}.authority");
+        File.WriteAllBytes(path, SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"saydin-dqa-production-target/v1\0{target.Database}\0{target.SystemIdentifierSha256}")));
+        SetSecretFileMode(path);
+        return path;
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(Root))
@@ -58,7 +84,7 @@ internal sealed class TestFiles : IDisposable
     {
         var instant = now ?? DateTimeOffset.UtcNow;
         return new AuditInputManifest(
-            1,
+            2,
             AuditCryptography.PublicKeyId(InputPublicKeyPath),
             AuditCryptography.PublicKeyId(EvidencePublicKeyPath),
             instant.AddMinutes(-1),
@@ -78,7 +104,9 @@ internal sealed class TestFiles : IDisposable
                 1_000_000,
                 30_000,
                 1_000,
-                60),
+                60,
+                10_000,
+                1_000),
             new AuditScope(
                 instant,
                 instant.AddMinutes(-1),
@@ -91,4 +119,9 @@ internal sealed class TestFiles : IDisposable
                     new DateOnly(2024, 1, 2),
                     "day")]));
     }
+}
+
+internal sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    public override DateTimeOffset GetUtcNow() => utcNow;
 }

@@ -59,8 +59,18 @@ groups:
           runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/tls-expiry.md
 
       - alert: SaydinProcessRestarted
-        expr: changes(process_start_time_seconds{job=~"saydin-api|otel-collector|prometheus|alertmanager"}[15m]) > 0
+        expr: |
+          changes(saydin_process_start_time_seconds{job="saydin-api"}[15m]) > 0
+          or resets(otelcol_process_uptime{job="otel-collector"}[15m]) > 0
+          or changes(process_start_time_seconds{job=~"prometheus|alertmanager"}[15m]) > 0
         labels: {severity: warning, service: runtime}
         annotations:
           summary: A monitored production process restarted
           runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/container-restart.md
+
+      - alert: SaydinWatchdog
+        expr: vector(1)
+        labels: {severity: watchdog, service: monitoring}
+        annotations:
+          summary: Continuous heartbeat proving the alert evaluation and routing path is alive
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/telemetry-pipeline.md

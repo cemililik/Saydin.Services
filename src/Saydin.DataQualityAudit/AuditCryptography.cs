@@ -1,6 +1,7 @@
 using System.Formats.Asn1;
 using System.Security.Cryptography;
 using System.Text;
+using Saydin.DatabaseSecurity;
 
 namespace Saydin.DataQualityAudit;
 
@@ -17,16 +18,10 @@ internal static class AuditCryptography
 
     public static byte[] Sign(ReadOnlySpan<byte> bytes, string privateKeyPath)
     {
-        var pem = AuditFileLimits.ReadText(
-            privateKeyPath,
-            AuditFileLimits.PemKeyBytes,
-            "evidence_private_key_unreadable",
-            "evidence_private_key_too_large",
-            AuditExitCodes.EvidenceFailure);
         using var ecdsa = ECDsa.Create();
         try
         {
-            ecdsa.ImportFromPem(pem);
+            ImportPrivateP256Pem(ecdsa, privateKeyPath);
             EnsureP256(ecdsa);
             return ecdsa.SignData(bytes, HashAlgorithmName.SHA256,
                 DSASignatureFormat.Rfc3279DerSequence);
@@ -85,14 +80,10 @@ internal static class AuditCryptography
 
     public static string PrivateKeyId(string privateKeyPath)
     {
-        var pem = AuditFileLimits.ReadText(
-            privateKeyPath, AuditFileLimits.PemKeyBytes,
-            "evidence_private_key_unreadable", "evidence_private_key_too_large",
-            AuditExitCodes.EvidenceFailure);
         using var ecdsa = ECDsa.Create();
         try
         {
-            ecdsa.ImportFromPem(pem);
+            ImportPrivateP256Pem(ecdsa, privateKeyPath);
             EnsureP256(ecdsa);
             return Sha256Hex(ecdsa.ExportSubjectPublicKeyInfo());
         }
@@ -104,14 +95,10 @@ internal static class AuditCryptography
 
     public static byte[] ReadPrivateP256PublicKey(string privateKeyPath)
     {
-        var pem = AuditFileLimits.ReadText(
-            privateKeyPath, AuditFileLimits.PemKeyBytes,
-            "evidence_private_key_unreadable", "evidence_private_key_too_large",
-            AuditExitCodes.EvidenceFailure);
         using var ecdsa = ECDsa.Create();
         try
         {
-            ecdsa.ImportFromPem(pem);
+            ImportPrivateP256Pem(ecdsa, privateKeyPath);
             EnsureP256(ecdsa);
             return ecdsa.ExportSubjectPublicKeyInfo();
         }
@@ -187,8 +174,8 @@ internal static class AuditCryptography
             {
                 var rawWriter = new AsnWriter(AsnEncodingRules.DER);
                 rawWriter.PushSequence();
-                rawWriter.WriteIntegerUnsigned(signature[..32]);
-                rawWriter.WriteIntegerUnsigned(signature[32..]);
+                rawWriter.WriteIntegerUnsigned(TrimP1363Component(signature[..32]));
+                rawWriter.WriteIntegerUnsigned(TrimP1363Component(signature[32..]));
                 rawWriter.PopSequence();
                 return rawWriter.Encode();
             }
@@ -217,25 +204,61 @@ internal static class AuditCryptography
         }
     }
 
+    private static ReadOnlySpan<byte> TrimP1363Component(ReadOnlySpan<byte> component)
+    {
+        var offset = 0;
+        while (offset < component.Length - 1 && component[offset] == 0)
+            offset++;
+        return component[offset..];
+    }
+
     public static byte[] ReadHmacKey(string path)
     {
-        byte[] bytes;
         try
         {
-            bytes = AuditFileLimits.ReadBytes(
-                path,
-                AuditFileLimits.HmacKeyBytes,
-                "hmac_key_unreadable",
-                "hmac_key_too_large",
-                AuditExitCodes.InvalidArguments);
+            return SecureSecretFile.ReadBytes(
+                path, 32, AuditFileLimits.HmacKeyBytes, "hmac_key_file_rejected");
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (DatabaseSecurityRejectedException)
         {
-            throw new AuditRejectedException("hmac_key_unreadable", AuditExitCodes.InvalidArguments);
+            throw new AuditRejectedException("hmac_key_file_rejected", AuditExitCodes.InvalidArguments);
         }
-        if (bytes.Length < 32)
-            throw new AuditRejectedException("hmac_key_too_short", AuditExitCodes.InvalidArguments);
-        return bytes;
+    }
+
+    private static void ImportPrivateP256Pem(ECDsa ecdsa, string privateKeyPath)
+    {
+        byte[]? bytes = null;
+        char[]? characters = null;
+        try
+        {
+            bytes = SecureSecretFile.ReadBytes(
+                privateKeyPath, 1, AuditFileLimits.PemKeyBytes,
+                "evidence_private_key_file_rejected");
+            var utf8 = new UTF8Encoding(false, true);
+            characters = new char[utf8.GetCharCount(bytes)];
+            utf8.GetChars(bytes, characters);
+            var pem = characters.AsSpan();
+            if (!pem.IsEmpty && pem[0] == '\uFEFF')
+                pem = pem[1..];
+            ecdsa.ImportFromPem(pem);
+        }
+        catch (DatabaseSecurityRejectedException)
+        {
+            throw new AuditRejectedException(
+                "evidence_private_key_file_rejected", AuditExitCodes.EvidenceFailure);
+        }
+        catch (DecoderFallbackException)
+        {
+            throw new AuditRejectedException(
+                "evidence_private_key_invalid", AuditExitCodes.EvidenceFailure);
+        }
+        finally
+        {
+            if (bytes is not null)
+                CryptographicOperations.ZeroMemory(bytes);
+            if (characters is not null)
+                Array.Clear(characters);
+        }
     }
 
     private static void EnsureP256(ECDsa ecdsa)

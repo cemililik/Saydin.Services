@@ -9,7 +9,12 @@ internal static class CanonicalJson
 {
     public static byte[] Canonicalize(ReadOnlySpan<byte> json)
     {
-        using var document = JsonDocument.Parse(json.ToArray());
+        using var document = JsonDocument.Parse(json.ToArray(), new JsonDocumentOptions
+        {
+            AllowTrailingCommas = false,
+            CommentHandling = JsonCommentHandling.Disallow,
+            MaxDepth = 32,
+        });
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
         {

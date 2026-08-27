@@ -1,0 +1,418 @@
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: api_signal_contracts_fire
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{job="saydin-api",http_response_status_code="500"}'
+        values: '0+10x20'
+      - series: 'http_server_request_duration_seconds_bucket{job="saydin-api",le="1"}'
+        values: '0x20'
+      - series: 'http_server_request_duration_seconds_bucket{job="saydin-api",le="2"}'
+        values: '0+10x20'
+      - series: 'http_server_request_duration_seconds_bucket{job="saydin-api",le="+Inf"}'
+        values: '0+10x20'
+      - series: 'saydin_activity_log_queue_drops_total{job="saydin-api",action="calculation"}'
+        values: '0+1x20'
+      - series: 'saydin_activity_log_data_truncations_total{job="saydin-api",action="scenario_create"}'
+        values: '0+1x20'
+      - series: 'saydin_security_admission_decisions_total{job="saydin-api",bucket="principal",outcome="unavailable",reason="redis"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: SaydinApiErrorBudgetBurn
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-api}
+            exp_annotations:
+              summary: API 5xx ratio is above 5 percent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-errors.md
+      - eval_time: 16m
+        alertname: SaydinApiLatencyHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, service: saydin-api}
+            exp_annotations:
+              summary: API p95 latency is above one second
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-latency.md
+      - eval_time: 10m
+        alertname: SaydinActivityLogLoss
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-api}
+            exp_annotations:
+              summary: Activity log writes were lost or rejected
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-errors.md
+      - eval_time: 10m
+        alertname: SaydinActivityLogDataTruncated
+        exp_alerts:
+          - exp_labels: {severity: warning, service: saydin-api, job: saydin-api, action: scenario_create}
+            exp_annotations:
+              summary: Activity log structured data exceeded its integrity bound
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-errors.md
+      - eval_time: 10m
+        alertname: SaydinSecurityAdmissionUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-api, job: saydin-api, bucket: principal, outcome: unavailable, reason: redis}
+            exp_annotations:
+              summary: Security admission failed closed because its authority was unavailable
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md
+
+  - name: api_http_sli_missing_fails_closed
+    interval: 1m
+    input_series:
+      - series: 'up{job="unrelated-api"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SaydinApiHttpSliMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-api, job: saydin-api}
+            exp_annotations:
+              summary: API HTTP SLI series is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md
+
+  - name: exporter_and_host_availability_fire
+    interval: 1m
+    input_series:
+      - series: 'up{job="postgres"}'
+        values: '0x20'
+      - series: 'up{job="redis"}'
+        values: '0x20'
+      - series: 'up{job="node"}'
+        values: '0x20'
+      - series: 'node_filesystem_avail_bytes{job="node",fstype="ext4",mountpoint="/"}'
+        values: '10x20'
+      - series: 'node_filesystem_size_bytes{job="node",fstype="ext4",mountpoint="/"}'
+        values: '100x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SaydinPostgresExporterUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: postgres, job: postgres}
+            exp_annotations:
+              summary: PostgreSQL exporter scrape is unavailable
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/database-saturation.md
+      - eval_time: 3m
+        alertname: SaydinRedisExporterUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: redis, job: redis}
+            exp_annotations:
+              summary: Redis exporter scrape is unavailable
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/redis-unavailable.md
+      - eval_time: 6m
+        alertname: SaydinNodeExporterUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: host, job: node}
+            exp_annotations:
+              summary: Host metrics scrape is unavailable
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/disk-pressure.md
+      - eval_time: 16m
+        alertname: SaydinHostDiskPressure
+        exp_alerts:
+          - exp_labels: {severity: critical, service: host, job: node, fstype: ext4, mountpoint: /}
+            exp_annotations:
+              summary: Host filesystem has less than 15 percent free space
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/disk-pressure.md
+
+  - name: database_and_redis_capacity_fire
+    interval: 1m
+    input_series:
+      - series: 'pg_stat_activity_count{job="postgres"}'
+        values: '81x20'
+      - series: 'redis_memory_used_bytes{job="redis"}'
+        values: '90x20'
+      - series: 'redis_memory_max_bytes{job="redis"}'
+        values: '100x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: SaydinPostgresConnectionsHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, service: postgres}
+            exp_annotations:
+              summary: PostgreSQL connection count is above the initial operating budget
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/database-saturation.md
+      - eval_time: 11m
+        alertname: SaydinRedisMemoryHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, service: redis, job: redis}
+            exp_annotations:
+              summary: Redis memory usage is above 85 percent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/redis-unavailable.md
+
+  - name: backup_freshness_metrics_missing_fail_closed
+    interval: 1m
+    input_series:
+      - series: 'up{job="unrelated-backup"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: SaydinWalBackupFreshnessMetricMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: wal}
+            exp_annotations:
+              summary: WAL backup freshness signal is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+      - eval_time: 31m
+        alertname: SaydinBaseBackupFreshnessMetricMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: base}
+            exp_annotations:
+              summary: Base backup freshness signal is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+      - eval_time: 31m
+        alertname: SaydinWalSpoolCapacityMetricMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: wal}
+            exp_annotations:
+              summary: WAL spool capacity signal is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+  - name: wal_spool_capacity_floor_fires
+    interval: 1m
+    input_series:
+      - series: 'saydin_backup_wal_spool_free_bytes'
+        values: '100x10'
+      - series: 'saydin_backup_wal_spool_capacity_floor_bytes'
+        values: '200x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SaydinWalSpoolCapacityLow
+        exp_alerts:
+          - exp_labels: {severity: critical, service: backup, kind: wal}
+            exp_annotations:
+              summary: WAL spool free space is below its recovery-chain floor
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+  - name: ingestion_failure_signals_fire
+    interval: 1m
+    input_series:
+      - series: 'saydin_ingestion_failure_streak{source="tcmb"}'
+        values: '3x20'
+      - series: 'saydin_inflation_ingestion_failures_total{source="evds",outcome="http"}'
+        values: '0+1x20'
+      - series: 'saydin_ingestion_calendar_not_ready_total{source="tcmb",reason="coverage"}'
+        values: '0+1x20'
+      - series: 'saydin_market_calendar_coverage_horizon_days{calendar="tcmb_indicative_fx",requirement="yesterday"}'
+        values: '44x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SaydinIngestionFailureStreak
+        exp_alerts:
+          - exp_labels: {severity: warning, service: saydin-price-ingestion, source: tcmb}
+            exp_annotations:
+              summary: A bounded ingestion source has at least three failures after its last success
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+      - eval_time: 10m
+        alertname: SaydinInflationIngestionFailures
+        exp_alerts:
+          - exp_labels: {severity: warning, service: saydin-price-ingestion, source: evds, outcome: http}
+            exp_annotations:
+              summary: Inflation ingestion failures were observed
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+      - eval_time: 10m
+        alertname: SaydinMarketCalendarNotReady
+        exp_alerts:
+          - exp_labels: {severity: critical, service: saydin-price-ingestion, source: tcmb, reason: coverage}
+            exp_annotations:
+              summary: An ingestion window was rejected by calendar readiness
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/ingestion-stale.md
+  - name: monitoring_and_probe_availability_fire
+    interval: 1m
+    input_series:
+      - series: 'up{job="otel-collector"}'
+        values: '0x20'
+      - series: 'up{job="alertmanager"}'
+        values: '0x20'
+      - series: 'probe_success{job="blackbox-https",instance="https://api.validation.test/health/live"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SaydinTelemetryCollectorUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: telemetry, job: otel-collector}
+            exp_annotations:
+              summary: OpenTelemetry metrics endpoint is unavailable
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md
+      - eval_time: 6m
+        alertname: SaydinAlertmanagerUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, service: alertmanager, job: alertmanager}
+            exp_annotations:
+              summary: Alertmanager scrape is unavailable
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/api-availability.md
+      - eval_time: 4m
+        alertname: SaydinPublicProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: edge
+              job: blackbox-https
+              instance: https://api.validation.test/health/live
+            exp_annotations:
+              summary: Public HTTPS probe failed
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/tls-expiry.md
+
+  - name: blackbox_series_missing_fails_closed
+    interval: 1m
+    input_series:
+      - series: 'up{job="unrelated-blackbox"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: SaydinBlackboxSeriesMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, service: edge, job: blackbox-https}
+            exp_annotations:
+              summary: Public HTTPS probe series is absent
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/tls-expiry.md
+
+  - name: runtime_restart_and_watchdog_fire
+    interval: 1m
+    input_series:
+      - series: 'saydin_process_start_time_seconds{job="saydin-api"}'
+        values: '100x5 200x15'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: SaydinProcessRestarted
+        exp_alerts:
+          - exp_labels: {severity: warning, service: runtime, job: saydin-api}
+            exp_annotations:
+              summary: A monitored production process restarted
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/container-restart.md
+      - eval_time: 1m
+        alertname: SaydinWatchdog
+        exp_alerts:
+          - exp_labels: {severity: watchdog, service: monitoring}
+            exp_annotations:
+              summary: Continuous heartbeat proving the alert evaluation and routing path is alive
+              runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/telemetry-pipeline.md
+
+  - name: all_non_watchdog_alerts_stay_quiet_on_healthy_fixture
+    interval: 1m
+    input_series:
+      - series: 'up{job="saydin-api"}'
+        values: '1x40'
+      - series: 'up{job="postgres"}'
+        values: '1x40'
+      - series: 'up{job="redis"}'
+        values: '1x40'
+      - series: 'up{job="node"}'
+        values: '1x40'
+      - series: 'up{job="otel-collector"}'
+        values: '1x40'
+      - series: 'up{job="alertmanager"}'
+        values: '1x40'
+      - series: 'http_server_request_duration_seconds_count{job="saydin-api",http_response_status_code="200"}'
+        values: '0+10x40'
+      - series: 'http_server_request_duration_seconds_bucket{job="saydin-api",le="0.5"}'
+        values: '0+10x40'
+      - series: 'http_server_request_duration_seconds_bucket{job="saydin-api",le="+Inf"}'
+        values: '0+10x40'
+      - series: 'saydin_activity_log_write_failures_total{job="saydin-api",outcome="retry_exhausted"}'
+        values: '0x40'
+      - series: 'pg_up{job="postgres"}'
+        values: '1x40'
+      - series: 'pg_stat_activity_count{job="postgres"}'
+        values: '10x40'
+      - series: 'node_filesystem_avail_bytes{job="node",fstype="ext4",mountpoint="/"}'
+        values: '90x40'
+      - series: 'node_filesystem_size_bytes{job="node",fstype="ext4",mountpoint="/"}'
+        values: '100x40'
+      - series: 'saydin_backup_last_success_timestamp_seconds{kind="wal"}'
+        values: '1800x40'
+      - series: 'saydin_backup_last_success_timestamp_seconds{kind="base"}'
+        values: '1800x40'
+      - series: 'saydin_backup_last_failure_timestamp_seconds{kind="wal"}'
+        values: '0x40'
+      - series: 'saydin_backup_wal_spool_free_bytes'
+        values: '200x40'
+      - series: 'saydin_backup_wal_spool_capacity_floor_bytes'
+        values: '100x40'
+      - series: 'saydin_backup_login_valid_until_timestamp_seconds'
+        values: '4000000x40'
+      - series: 'saydin_ingestion_last_success_timestamp_seconds{source="tcmb",cadence="daily"}'
+        values: '1800x40'
+      - series: 'saydin_ingestion_last_success_timestamp_seconds{source="evds",cadence="monthly"}'
+        values: '1800x40'
+      - series: 'saydin_ingestion_lag_seconds{source="tcmb",cadence="daily"}'
+        values: '10x40'
+      - series: 'saydin_ingestion_lag_seconds{source="evds",cadence="monthly"}'
+        values: '10x40'
+      - series: 'saydin_ingestion_failure_streak{source="tcmb"}'
+        values: '0x40'
+      - series: 'saydin_inflation_ingestion_failures_total{source="evds",outcome="http"}'
+        values: '0x40'
+      - series: 'saydin_ingestion_calendar_not_ready_total{source="tcmb",reason="coverage"}'
+        values: '0x40'
+      - series: 'saydin_market_calendar_coverage_horizon_days{calendar="tcmb_indicative_fx"}'
+        values: '90x40'
+      - series: 'saydin_market_calendar_coverage_horizon_days{calendar="bist_pay_xist"}'
+        values: '90x40'
+      - series: 'redis_up{job="redis"}'
+        values: '1x40'
+      - series: 'redis_memory_used_bytes{job="redis"}'
+        values: '10x40'
+      - series: 'redis_memory_max_bytes{job="redis"}'
+        values: '100x40'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp/tempo"}'
+        values: '0x40'
+      - series: 'otelcol_exporter_queue_size{exporter="otlp/tempo"}'
+        values: '1x40'
+      - series: 'otelcol_exporter_queue_capacity{exporter="otlp/tempo"}'
+        values: '10x40'
+      - series: 'probe_success{job="blackbox-https",instance="https://api.validation.test/health/live"}'
+        values: '1x40'
+      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox-https",instance="https://api.validation.test/health/live"}'
+        values: '10000000x40'
+      - series: 'saydin_process_start_time_seconds{job="saydin-api"}'
+        values: '100x40'
+      - series: 'otelcol_process_uptime{job="otel-collector"}'
+        values: '0+60x40'
+      - series: 'process_start_time_seconds{job="prometheus"}'
+        values: '100x40'
+      - series: 'process_start_time_seconds{job="alertmanager"}'
+        values: '100x40'
+    alert_rule_test:
+      - {eval_time: 31m, alertname: SaydinApiUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinApiHttpSliMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinApiErrorBudgetBurn, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinApiLatencyHigh, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinActivityLogLoss, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinActivityLogDataTruncated, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinSecurityAdmissionUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinPostgresExporterUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinPostgresUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinPostgresConnectionsHigh, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinNodeExporterUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinHostDiskPressure, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinWalBackupFreshnessMetricMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinWalSpoolCapacityMetricMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinWalSpoolCapacityLow, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBaseBackupFreshnessMetricMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinWalBackupStale, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBaseBackupStale, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBackupFailure, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBackupLoginValidityMetricMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBackupLoginExpiring, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBackupLoginExpired, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinIngestionFreshnessMetricMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinDailyIngestionStale, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinMonthlyIngestionStale, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinIngestionFailureStreak, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinInflationIngestionFailures, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinMarketCalendarNotReady, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinMarketCalendarCoverageMetricMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinTcmbCalendarCoverageStale, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBistCalendarCoverageExpiring, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinRedisExporterUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinRedisUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinRedisMemoryHigh, exp_alerts: []}
+      - {eval_time: 31m, alertname: TelemetryExportFailure, exp_alerts: []}
+      - {eval_time: 31m, alertname: TelemetryQueueNearCapacity, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinTelemetryCollectorUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinAlertmanagerUnavailable, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinBlackboxSeriesMissing, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinPublicProbeFailed, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinCertificateExpiring, exp_alerts: []}
+      - {eval_time: 31m, alertname: SaydinProcessRestarted, exp_alerts: []}

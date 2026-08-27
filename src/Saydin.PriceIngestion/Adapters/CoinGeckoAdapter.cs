@@ -64,6 +64,9 @@ public sealed class CoinGeckoAdapter(
 
             var payload = await BoundedHttpContent.ReadAsync(response.Content, ct);
             using var document = JsonDocument.Parse(payload.Bytes);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return AdapterOutcome<PricePoint>.PermanentFailure(
+                    "contract_value_kind_invalid");
             if (!document.RootElement.TryGetProperty("prices", out var prices)
                 || prices.ValueKind != JsonValueKind.Array)
                 return AdapterOutcome<PricePoint>.PermanentFailure("schema_missing_prices");
@@ -92,6 +95,18 @@ public sealed class CoinGeckoAdapter(
             logger.LogError("CoinGecko provider contract rejected: {Code} {Symbol}",
                 ex.Code, request.AssetSymbol);
             return AdapterOutcome<PricePoint>.PermanentFailure(ex.Code);
+        }
+        catch (ProviderTransportPayloadTooLargeException)
+        {
+            logger.LogWarning("CoinGecko provider transport payload limitini aştı: {Symbol}",
+                request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.RetryableFailure("transport_payload_too_large");
+        }
+        catch (ProviderPayloadTooLargeException)
+        {
+            logger.LogError("CoinGecko provider payload exceeded authority limit: {Symbol}",
+                request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.PermanentFailure("payload_too_large");
         }
         catch (JsonException)
         {

@@ -21,6 +21,7 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
 
@@ -72,7 +73,9 @@ jobs:
       - name: Weighted ve kritik namespace unit coverage gate
         run: |
           mapfile -t reports < <(find "$RUNNER_TEMP/unit-coverage" -mindepth 2 -maxdepth 2 -name coverage.cobertura.xml -type f -print | sort)
-          test "${#reports[@]}" -eq 7
+          expected_reports=$(find tests tools/calendar-data/tests -type f -name '*Tests.csproj' \
+            ! -name '*IntegrationTests.csproj' -print | wc -l)
+          test "${#reports[@]}" -eq "$expected_reports"
           python3 .github/scripts/coverage-gate.py --reports "${reports[@]}" \
             --policy .github/scripts/coverage-thresholds-unit.json --repo .
 
@@ -106,9 +109,13 @@ jobs:
         run: python3 .github/scripts/check-doc-links.py
       - name: Development Compose project-isolation sözleşmesi
         run: .github/scripts/validate-development-compose.sh
-      - name: Production render, 29 mutation, Prometheus, Alertmanager, OTel, Tempo, Loki ve Caddy
+      - name: Development Compose fresh-stack, post-bootstrap ve verify-only smoke
+        run: .github/scripts/run-development-compose-smoke.sh
+      - name: Production render, mutation, Prometheus, Alertmanager, OTel, Tempo, Loki ve Caddy
         run: infrastructure/deployment/validate-production-assets.sh
       - name: Release manifest fail-closed fixture seti
+        env:
+          SAYDIN_REQUIRE_DOCKER_SMOKES: "1"
         run: |
           python3 infrastructure/release/tests/release-manifest-self-test.py
           python3 infrastructure/release/tests/rollback-admission-self-test.py
@@ -116,11 +123,14 @@ jobs:
           python3 infrastructure/backup/tests/backup-hba-self-test.py
       - name: Workflow ve shell statik doğrulama
         run: |
+          set -euo pipefail
           docker run --rm -v "$PWD:/repo:ro" -w /repo \
             rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+          mapfile -d '' shell_files < <(git ls-files -z -- '*.sh')
+          [[ "${#shell_files[@]}" -gt 0 ]]
           docker run --rm -v "$PWD:/repo:ro" -w /repo \
             koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
-            .github/scripts/*.sh infrastructure/deployment/*.sh infrastructure/release/*.sh infrastructure/backup/*.sh
+            "${shell_files[@]}"
 
   supply-chain:
     name: Dependency, license, vulnerability, secret and IaC gates
@@ -196,8 +206,8 @@ jobs:
   integration-test:
     name: Integration tests (TimescaleDB + Redis)
     runs-on: ubuntu-latest
-    # Sequential required matrix now includes Calendar 80, API 57, ingestion 39,
-    # RoleBootstrap 76+7, DQA 84+72, DataRepair 15+7 and two-cluster migrator 124. DQA itself took 12 s
+    # Sequential required matrix now includes Calendar 92, API 66, ingestion 44,
+    # RoleBootstrap 98+13, DQA 96+106, DataRepair 28+32 and two-cluster migrator 184. DQA itself took 12 s
     # with an empty project NuGet volume; 45 minutes keeps cold pulls/builds bounded with headroom.
     timeout-minutes: 45
     permissions:
@@ -216,6 +226,13 @@ jobs:
           set -euo pipefail
           RUN_TOKEN="$(tr -d '-' < /proc/sys/kernel/random/uuid)"
           [[ "$RUN_TOKEN" =~ ^[0-9a-f]{32}$ ]]
+          BACKUP_ROTATION_SUFFIX="$(printf 'saydin-migrator-hba-fixture/v1\0%s\0%s' \
+            "$RUN_TOKEN" backup-rotation | sha256sum | cut -c1-32)"
+          LEGACY_ACK_SUFFIX="$(printf 'saydin-migrator-hba-fixture/v1\0%s\0%s' \
+            "$RUN_TOKEN" legacy-ack | sha256sum | cut -c1-32)"
+          [[ "$BACKUP_ROTATION_SUFFIX" =~ ^[0-9a-f]{32}$ ]]
+          [[ "$LEGACY_ACK_SUFFIX" =~ ^[0-9a-f]{32}$ ]]
+          [[ "$BACKUP_ROTATION_SUFFIX" != "$LEGACY_ACK_SUFFIX" ]]
 
           RESULTS_DIR="$RUNNER_TEMP/saydin-integration-results"
           POSTGRES_SECRET_DIR="$RESULTS_DIR/secrets/postgres"
@@ -242,6 +259,12 @@ jobs:
           echo "SAYDIN_CI_AUDIT_DATABASE=saydin_data_audit_test_$RUN_TOKEN" >> "$GITHUB_ENV"
           echo "SAYDIN_CI_REPAIR_DATABASE=saydin_data_repair_test_$RUN_TOKEN" >> "$GITHUB_ENV"
           echo "SAYDIN_CI_SECONDARY_DATABASE=saydin_migrator_secondary_$RUN_TOKEN" >> "$GITHUB_ENV"
+          echo "SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DATABASE=saydin_migrator_$BACKUP_ROTATION_SUFFIX" >> "$GITHUB_ENV"
+          echo "SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DEPLOYMENT_ID=mbr-${RUN_TOKEN:0:8}" >> "$GITHUB_ENV"
+          echo "SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_ROLE_PREFIX=saydin_mbr_$(printf '0%.0s' {1..24})" >> "$GITHUB_ENV"
+          echo "SAYDIN_CI_MIGRATOR_LEGACY_ACK_DATABASE=saydin_migrator_$LEGACY_ACK_SUFFIX" >> "$GITHUB_ENV"
+          echo "SAYDIN_CI_MIGRATOR_LEGACY_ACK_DEPLOYMENT_ID=mla-${RUN_TOKEN:0:8}" >> "$GITHUB_ENV"
+          echo "SAYDIN_CI_MIGRATOR_LEGACY_ACK_ROLE_PREFIX=saydin_mla_$(printf '0%.0s' {1..24})" >> "$GITHUB_ENV"
           echo "SAYDIN_CI_RESULTS_DIR=$RESULTS_DIR" >> "$GITHUB_ENV"
           echo "SAYDIN_CI_POSTGRES_SECRET_DIR=$POSTGRES_SECRET_DIR" >> "$GITHUB_ENV"
           echo "SAYDIN_CI_REDIS_SECRET_DIR=$REDIS_SECRET_DIR" >> "$GITHUB_ENV"
@@ -358,6 +381,21 @@ jobs:
           create_contract INGESTION "$SAYDIN_CI_INGESTION_DATABASE" "$SAYDIN_CI_INGESTION_SECRET_DIR"
           create_contract AUDIT "$SAYDIN_CI_AUDIT_DATABASE" "$SAYDIN_CI_AUDIT_SECRET_DIR"
           create_contract REPAIR "$SAYDIN_CI_REPAIR_DATABASE" "$SAYDIN_CI_REPAIR_SECRET_DIR"
+          create_hba_fixture_contract() {
+            local LABEL="$1" DATABASE="$2" DEPLOYMENT="$3" SLUG="$4"
+            local SUFFIX PREFIX
+            SUFFIX="$(printf '%s\0%s\0%s' "$SYSTEM_HASH" "$DATABASE" "$DEPLOYMENT" \
+              | sha256sum | cut -c1-24)"
+            PREFIX="saydin_${SLUG}_${SUFFIX}"
+            [[ "$PREFIX" =~ ^saydin_[a-z][a-z0-9_]{2}_[0-9a-f]{24}$ ]]
+            echo "SAYDIN_CI_MIGRATOR_${LABEL}_ROLE_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          }
+          create_hba_fixture_contract BACKUP_ROTATION \
+            "$SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DATABASE" \
+            "$SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_DEPLOYMENT_ID" mbr
+          create_hba_fixture_contract LEGACY_ACK \
+            "$SAYDIN_CI_MIGRATOR_LEGACY_ACK_DATABASE" \
+            "$SAYDIN_CI_MIGRATOR_LEGACY_ACK_DEPLOYMENT_ID" mla
           for SPEC in \
             "$SAYDIN_CI_DATABASE_SECRET_DIR:$SAYDIN_CI_DATABASE_MIGRATOR_SECRET_DIR:migrator-v1" \
             "$SAYDIN_CI_INGESTION_SECRET_DIR:$SAYDIN_CI_INGESTION_MIGRATOR_SECRET_DIR:migrator-v1" \
@@ -371,6 +409,13 @@ jobs:
           sudo install -d -o 0 -g 0 -m 0700 "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR"
           sudo install -o 0 -g 0 -m 0400 "$SAYDIN_CI_DATABASE_SECRET_DIR/admin" "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR/admin"
           sudo install -o 0 -g 0 -m 0400 "$SAYDIN_CI_DATABASE_SECRET_DIR/api-v1" "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR/api-v1"
+          KEYRING_KEY="$(openssl rand -base64 32)"
+          echo "::add-mask::$KEYRING_KEY"
+          printf '{"1":"%s"}' "$KEYRING_KEY" \
+            | sudo tee "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR/keyring.json" >/dev/null
+          unset KEYRING_KEY
+          sudo chown 0:0 "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR/keyring.json"
+          sudo chmod 0400 "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR/keyring.json"
           sudo install -d -o 0 -g 0 -m 0700 "$SAYDIN_CI_ROLE_BOOTSTRAP_TEST_SECRET_DIR"
           sudo install -o 0 -g 0 -m 0400 "$SAYDIN_CI_DATABASE_SECRET_DIR/admin" "$SAYDIN_CI_ROLE_BOOTSTRAP_TEST_SECRET_DIR/admin"
           sudo install -d -o 0 -g 0 -m 0700 "$SAYDIN_CI_MIGRATOR_TEST_SECRET_DIR"
@@ -431,7 +476,7 @@ jobs:
               [[ "$(sudo stat -c '%u:%g:%a:%h' "$DIRECTORY/$FILE")" == "0:0:400:1" ]]
             done < <(printf '%s\n' "$EXPECTED" | tr ',' '\n')
           }
-          exact_test_files "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR" "admin,api-v1"
+          exact_test_files "$SAYDIN_CI_DATABASE_TEST_SECRET_DIR" "admin,api-v1,keyring.json"
           exact_test_files "$SAYDIN_CI_ROLE_BOOTSTRAP_TEST_SECRET_DIR" "admin"
           exact_test_files "$SAYDIN_CI_MIGRATOR_TEST_SECRET_DIR" "admin,secondary-admin"
           exact_test_files "$SAYDIN_CI_INGESTION_TEST_SECRET_DIR" "admin,calendar_importer-v1,ingestion-v1"
@@ -500,6 +545,8 @@ jobs:
             --role-prefix "$SAYDIN_CI_INGESTION_ROLE_PREFIX" \
             --role-prefix "$SAYDIN_CI_AUDIT_ROLE_PREFIX" \
             --role-prefix "$SAYDIN_CI_REPAIR_ROLE_PREFIX" \
+            --role-prefix "$SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_ROLE_PREFIX" \
+            --role-prefix "$SAYDIN_CI_MIGRATOR_LEGACY_ACK_ROLE_PREFIX" \
             --fixture-cleartext < infrastructure/backup/manage_backup_hba.py
           HBA_RELOAD_STATE="$("${COMPOSE[@]}" exec -T postgres sh -eu -c \
             'psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
@@ -512,6 +559,8 @@ jobs:
             --role-prefix "$SAYDIN_CI_INGESTION_ROLE_PREFIX" \
             --role-prefix "$SAYDIN_CI_AUDIT_ROLE_PREFIX" \
             --role-prefix "$SAYDIN_CI_REPAIR_ROLE_PREFIX" \
+            --role-prefix "$SAYDIN_CI_MIGRATOR_BACKUP_ROTATION_ROLE_PREFIX" \
+            --role-prefix "$SAYDIN_CI_MIGRATOR_LEGACY_ACK_ROLE_PREFIX" \
             --fixture-cleartext < infrastructure/backup/manage_backup_hba.py
 
           for SERVICE in database-role-bootstrap ingestion-database-role-bootstrap data-quality-audit-database-role-bootstrap data-repair-database-role-bootstrap; do
@@ -565,32 +614,32 @@ jobs:
             'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -F, -tAc "SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='"'"'public'"'"' AND hypertable_name IN ('"'"'price_points'"'"', '"'"'activity_logs'"'"')), (SELECT count(*) FROM schema_migrations WHERE checksum ~ '"'"'^[0-9a-f]{64}$'"'"'), (SELECT count(*) FROM schema_migrations WHERE state IN ('"'"'succeeded'"'"', '"'"'skipped_optional'"'"')), (SELECT state FROM saydin_migration_control WHERE singleton=1);"' \
             | tr -d '[:space:]')"
 
-          [[ "$SCHEMA_STATE" == "24,2,24,24,ready" ]] || {
-            echo "Fresh schema gate FAIL: expected=24,2,24,24,ready actual=${SCHEMA_STATE:-<empty>}" >&2
+          [[ "$SCHEMA_STATE" == "27,2,27,27,ready" ]] || {
+            echo "Fresh schema gate FAIL: expected=27,2,27,27,ready actual=${SCHEMA_STATE:-<empty>}" >&2
             exit 1
           }
           INGESTION_SCHEMA_STATE="$("${COMPOSE[@]}" exec -T postgres sh -c \
             'psql -U "$POSTGRES_USER" -d "$1" -F, -tAc "SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='"'"'public'"'"' AND hypertable_name IN ('"'"'price_points'"'"', '"'"'activity_logs'"'"')), (SELECT count(*) FROM schema_migrations WHERE checksum ~ '"'"'^[0-9a-f]{64}$'"'"'), (SELECT count(*) FROM schema_migrations WHERE state IN ('"'"'succeeded'"'"', '"'"'skipped_optional'"'"')), (SELECT state FROM saydin_migration_control WHERE singleton=1);"' \
             sh "$SAYDIN_CI_INGESTION_DATABASE" | tr -d '[:space:]')"
-          [[ "$INGESTION_SCHEMA_STATE" == "24,2,24,24,ready" ]] || {
-            echo "Ingestion schema gate FAIL: expected=24,2,24,24,ready actual=${INGESTION_SCHEMA_STATE:-<empty>}" >&2
+          [[ "$INGESTION_SCHEMA_STATE" == "27,2,27,27,ready" ]] || {
+            echo "Ingestion schema gate FAIL: expected=27,2,27,27,ready actual=${INGESTION_SCHEMA_STATE:-<empty>}" >&2
             exit 1
           }
           AUDIT_SCHEMA_STATE="$("${COMPOSE[@]}" exec -T postgres sh -c \
             'psql -U "$POSTGRES_USER" -d "$1" -F, -tAc "SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='"'"'public'"'"' AND hypertable_name IN ('"'"'price_points'"'"', '"'"'activity_logs'"'"')), (SELECT count(*) FROM schema_migrations WHERE checksum ~ '"'"'^[0-9a-f]{64}$'"'"'), (SELECT count(*) FROM schema_migrations WHERE state IN ('"'"'succeeded'"'"', '"'"'skipped_optional'"'"')), (SELECT state FROM saydin_migration_control WHERE singleton=1);"' \
             sh "$SAYDIN_CI_AUDIT_DATABASE" | tr -d '[:space:]')"
-          [[ "$AUDIT_SCHEMA_STATE" == "24,2,24,24,ready" ]] || {
-            echo "Audit schema gate FAIL: expected=24,2,24,24,ready actual=${AUDIT_SCHEMA_STATE:-<empty>}" >&2
+          [[ "$AUDIT_SCHEMA_STATE" == "27,2,27,27,ready" ]] || {
+            echo "Audit schema gate FAIL: expected=27,2,27,27,ready actual=${AUDIT_SCHEMA_STATE:-<empty>}" >&2
             exit 1
           }
           REPAIR_SCHEMA_STATE="$("${COMPOSE[@]}" exec -T postgres sh -c \
             'psql -U "$POSTGRES_USER" -d "$1" -F, -tAc "SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema='"'"'public'"'"' AND hypertable_name IN ('"'"'price_points'"'"', '"'"'activity_logs'"'"')), (SELECT count(*) FROM schema_migrations WHERE checksum ~ '"'"'^[0-9a-f]{64}$'"'"'), (SELECT count(*) FROM schema_migrations WHERE state IN ('"'"'succeeded'"'"', '"'"'skipped_optional'"'"')), (SELECT state FROM saydin_migration_control WHERE singleton=1);"' \
             sh "$SAYDIN_CI_REPAIR_DATABASE" | tr -d '[:space:]')"
-          [[ "$REPAIR_SCHEMA_STATE" == "24,2,24,24,ready" ]] || {
-            echo "DataRepair schema gate FAIL: expected=24,2,24,24,ready actual=${REPAIR_SCHEMA_STATE:-<empty>}" >&2
+          [[ "$REPAIR_SCHEMA_STATE" == "27,2,27,27,ready" ]] || {
+            echo "DataRepair schema gate FAIL: expected=27,2,27,27,ready actual=${REPAIR_SCHEMA_STATE:-<empty>}" >&2
             exit 1
           }
-          echo "Fresh schema gates PASS: targets=4 migrations=24 hypertables=2 checksums=24 terminal=24 control=ready"
+          echo "Fresh schema gates PASS: targets=4 migrations=27 hypertables=2 checksums=27 terminal=27 control=ready"
 
       - name: Calendar-data replay/unit suite çalıştır
         run: |
@@ -604,7 +653,7 @@ jobs:
         run: |
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/calendar-data.trx" \
-            --minimum-executed 80
+            --minimum-executed 94
 
       - name: Calendar release image offline/import/activate smoke
         shell: bash
@@ -676,7 +725,7 @@ jobs:
         run: |
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/integration.trx" \
-            --minimum-executed 57
+            --minimum-executed 66
 
       - name: Required ingestion ledger suite çalıştır
         run: |
@@ -698,7 +747,7 @@ jobs:
         run: |
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/ingestion-ledger.trx" \
-            --minimum-executed 39
+            --minimum-executed 44
 
       - name: Required data-quality audit suite çalıştır
         run: |
@@ -713,10 +762,10 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/data-quality-audit-unit.trx" \
-            --minimum-executed 84
+            --minimum-executed 97
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/data-quality-audit-integration.trx" \
-            --minimum-executed 72
+            --minimum-executed 106
 
       - name: Required DataRepair real-PG suite çalıştır
         run: |
@@ -730,7 +779,7 @@ jobs:
         run: |
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/data-repair-integration.trx" \
-            --minimum-executed 7
+            --minimum-executed 32
 
       - name: Required database role-bootstrap suite çalıştır
         run: |
@@ -745,10 +794,10 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/role-bootstrap-unit.trx" \
-            --minimum-executed 76
+            --minimum-executed 98
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/role-bootstrap-integration.trx" \
-            --minimum-executed 7
+            --minimum-executed 13
 
       - name: Required real TimescaleDB migrator suite çalıştır
         run: |
@@ -762,7 +811,7 @@ jobs:
         run: |
           python3 .github/scripts/verify-integration-trx.py \
             "$SAYDIN_CI_RESULTS_DIR/migrator.trx" \
-            --minimum-executed 124
+            --minimum-executed 185
 
       - name: Required TRX artefaktlarını yükle
         if: always()
@@ -821,6 +870,7 @@ jobs:
   coverage-admission:
     name: Merged unit and real-integration changed-line coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [build-and-test, integration-test]
     permissions:
       contents: read
@@ -844,8 +894,11 @@ jobs:
           set -euo pipefail
           mapfile -t unit_reports < <(find "$RUNNER_TEMP/coverage/unit" -type f -name coverage.cobertura.xml -print | sort)
           mapfile -t integration_reports < <(find "$RUNNER_TEMP/coverage/integration" -type f -name '*.coverage.cobertura.xml' -print | sort)
-          [[ "${#unit_reports[@]}" -eq 7 ]]
-          [[ "${#integration_reports[@]}" -eq 5 ]]
+          expected_unit_reports=$(find tests tools/calendar-data/tests -type f -name '*Tests.csproj' \
+            ! -name '*IntegrationTests.csproj' -print | wc -l)
+          expected_integration_reports=$(find tests -type f -name '*IntegrationTests.csproj' -print | wc -l)
+          [[ "${#unit_reports[@]}" -eq "$expected_unit_reports" ]]
+          [[ "${#integration_reports[@]}" -eq "$expected_integration_reports" ]]
           args=(--reports "${unit_reports[@]}" "${integration_reports[@]}" \
             --policy .github/scripts/coverage-thresholds.json --repo .)
           if [[ -n "${COVERAGE_DIFF_BASE:-}" && "$COVERAGE_DIFF_BASE" != "0000000000000000000000000000000000000000" ]]; then
@@ -855,6 +908,7 @@ jobs:
 
   docker-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [coverage-admission, production-assurance, supply-chain, codeql]
     permissions:
       contents: read
@@ -883,12 +937,16 @@ jobs:
               echo "api=type=gha,scope=saydin-api,mode=max"
               echo "ing=type=gha,scope=saydin-price-ingestion,mode=max"
               echo "mig=type=gha,scope=saydin-database-migrator,mode=max"
+              echo "dqa=type=gha,scope=saydin-data-quality-audit,mode=max"
+              echo "backup=type=gha,scope=saydin-database-backup,mode=max"
             } >> "$GITHUB_OUTPUT"
           else
             {
               echo "api="
               echo "ing="
               echo "mig="
+              echo "dqa="
+              echo "backup="
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -924,3 +982,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=saydin-database-migrator
           cache-to: ${{ steps.cache_target.outputs.mig }}
+
+      - name: Saydin.DataQualityAudit Docker image build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: infrastructure/release/Dockerfile.dqa
+          tags: saydin-data-quality-audit:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=saydin-data-quality-audit
+          cache-to: ${{ steps.cache_target.outputs.dqa }}
+
+      - name: Saydin.DatabaseBackup Docker image build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: infrastructure/backup
+          file: infrastructure/backup/Dockerfile
+          tags: saydin-database-backup:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=saydin-database-backup
+          cache-to: ${{ steps.cache_target.outputs.backup }}

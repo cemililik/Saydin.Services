@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Repositories;
@@ -54,7 +55,7 @@ public class EvdsInflationWorkerTests
     }
 
     [Fact]
-    public async Task MissingMonthOrWrongSource_IsPermanentAndThirdDoesNotRun()
+    public async Task MissingMonthOrWrongSource_IsPermanentAndScopeIsIsolated()
     {
         var fixture = CreateFixture();
         var calls = 0;
@@ -73,9 +74,9 @@ public class EvdsInflationWorkerTests
                 return Success(call.ArgAt<DateOnly>(0), call.ArgAt<DateOnly>(1));
             });
 
-        var act = () => fixture.Worker.RunBackfillChunksAsync(ThreeChunks(), default);
+        var result = await fixture.Worker.RunBackfillChunksAsync(ThreeChunks(), default);
 
-        await act.Should().ThrowAsync<PermanentIngestionWindowException>();
+        result.Should().BeFalse();
         calls.Should().Be(2);
         fixture.Windows.PermanentFailures.Should().Be(1);
     }
@@ -107,9 +108,9 @@ public class EvdsInflationWorkerTests
             Arg.Any<CancellationToken>()).Returns<AdapterOutcome<InflationRate>>(_ =>
                 throw new InvalidOperationException("bug"));
 
-        var act = () => fixture.Worker.RunBackfillChunksAsync(ThreeChunks(), default);
+        var result = await fixture.Worker.RunBackfillChunksAsync(ThreeChunks(), default);
 
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        result.Should().BeFalse();
         fixture.Windows.FailureFinalizeAttempts.Should().Be(1);
     }
 
@@ -125,6 +126,45 @@ public class EvdsInflationWorkerTests
 
         result.Should().BeTrue();
         fixture.Windows.Completed.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task LedgerNotDue_WakesAtExactThirtyMinuteRetryInsteadOfMonthlySchedule()
+    {
+        var time = new FakeTimeProvider(
+            new DateTimeOffset(2026, 8, 20, 0, 0, 0, TimeSpan.Zero));
+        var adapter = Substitute.For<IInflationAdapter>();
+        adapter.Source.Returns("evds");
+        var windows = Substitute.For<IIngestionWindowRepository>();
+        windows.PlanWindowsAsync(Arg.Any<IngestionWindowScope>(), Arg.Any<DateOnly>(),
+                Arg.Any<DateOnly>(), Arg.Any<int>(), Arg.Any<IngestionCadence>(),
+                Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+        var due = time.GetUtcNow().AddMinutes(30);
+        var claimCalls = 0;
+        windows.ClaimNextAsync(Arg.Any<IngestionWindowScope>(), Arg.Any<string>(),
+                Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                Interlocked.Increment(ref claimCalls);
+                return new WindowClaimResult(WindowClaimStatus.NotDue, NextAttemptAt: due);
+            });
+        var worker = new EvdsInflationWorker(adapter, windows,
+            new ConfigurationBuilder().Build(), time,
+            NullLogger<EvdsInflationWorker>.Instance);
+        using var stop = new CancellationTokenSource();
+
+        var execution = worker.RunAsync(stop.Token);
+        await WaitUntilAsync(() => Volatile.Read(ref claimCalls) >= 1);
+
+        time.Advance(TimeSpan.FromMinutes(29) + TimeSpan.FromSeconds(59));
+        await Task.Yield();
+        Volatile.Read(ref claimCalls).Should().Be(1);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await WaitUntilAsync(() => Volatile.Read(ref claimCalls) >= 2);
+
+        stop.Cancel();
+        await execution.WaitAsync(TimeSpan.FromSeconds(1));
     }
 
     private static Fixture CreateFixture()
@@ -161,6 +201,17 @@ public class EvdsInflationWorkerTests
         return AdapterOutcome<InflationRate>.Data(records, records.Count);
     }
 
+    private static async Task WaitUntilAsync(Func<bool> predicate)
+    {
+        var timeout = DateTime.UtcNow.AddSeconds(1);
+        while (!predicate())
+        {
+            if (DateTime.UtcNow >= timeout)
+                throw new TimeoutException("Asynchronous worker condition was not reached.");
+            await Task.Yield();
+        }
+    }
+
     private sealed record Fixture(
         IInflationAdapter Adapter, RecordingWindows Windows, EvdsInflationWorker Worker);
 
@@ -178,6 +229,22 @@ public class EvdsInflationWorkerTests
         public int Completed { get; private set; }
         public bool BlockFailureFinalization { get; set; }
         public int FailureFinalizeAttempts { get; private set; }
+
+        public Task<IngestionFreshnessState> ReadFreshnessStateAsync(CancellationToken ct) =>
+            Task.FromResult(new IngestionFreshnessState(DateTimeOffset.UnixEpoch, [], []));
+
+        public Task<MarketCalendarReadiness> CheckCalendarReadinessAsync(
+            IngestionWindowScope scope, DateOnly from, DateOnly to, CancellationToken ct) =>
+            Task.FromResult(MarketCalendarReadiness.NotRequired);
+
+        public Task<MarketCalendarTargetResolution> ResolveLatestExpectedObservationAsync(
+            string calendarCode, DateOnly notAfter, CancellationToken ct) =>
+            Task.FromResult(new MarketCalendarTargetResolution(
+                true, notAfter, null, calendarCode, "calendar_target_ready"));
+
+        public Task<IReadOnlySet<DateOnly>> GetExpectedNoDataDatesAsync(
+            Guid releaseId, DateOnly from, DateOnly to, CancellationToken ct) =>
+            Task.FromResult<IReadOnlySet<DateOnly>>(new HashSet<DateOnly>());
 
         public Task PlanWindowsAsync(IngestionWindowScope scope, DateOnly start, DateOnly end,
             int chunkSize, IngestionCadence cadence, CancellationToken ct) => Task.CompletedTask;

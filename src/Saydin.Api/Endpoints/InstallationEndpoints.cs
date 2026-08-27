@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Npgsql;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
+using Saydin.Api.Middleware;
 using Saydin.Api.Repositories;
 using Saydin.Api.Services;
 
@@ -16,8 +17,7 @@ public static class InstallationEndpoints
         group.MapPost("", RegisterAsync)
             .WithName("RegisterInstallation")
             .Produces<InstallationRegistrationResponse>(StatusCodes.Status201Created)
-            .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+            .RequireRegistrationAdmission();
 
         group.MapPost("/rotation", BeginRotationAsync)
             .WithName("BeginInstallationRotation")
@@ -29,7 +29,7 @@ public static class InstallationEndpoints
             .WithName("CommitInstallationRotation")
             .Produces(StatusCodes.Status204NoContent)
             .ProducesProblem(StatusCodes.Status400BadRequest)
-            .ProducesProblem(StatusCodes.Status401Unauthorized);
+            .RequirePendingInstallationCredential();
 
         group.MapDelete("/current", RevokeCurrentAsync)
             .WithName("RevokeInstallation")
@@ -44,6 +44,7 @@ public static class InstallationEndpoints
         HttpContext http,
         IInstallationCredentialKeyring keyring,
         IInstallationRepository repository,
+        IInstallationPrincipalContext principalContext,
         CancellationToken ct)
     {
         using var generated = keyring.Generate();
@@ -51,6 +52,14 @@ public static class InstallationEndpoints
         try
         {
             var registered = await repository.RegisterAsync(Guid.NewGuid(), Guid.NewGuid(), hash, ct);
+            // The admission filter may compensate a failed pre-commit request. Mark the
+            // durable boundary before any post-commit decoration can throw so a created
+            // principal never receives an unearned quota refund.
+            http.Items[EndpointExtensions.RegistrationCommittedItemKey] = true;
+            http.RequestServices.GetRequiredService<InstallationPrincipalContext>().Set(registered);
+            http.GetOrCreateActivityLog(Saydin.Shared.Constants.ActivityActions.InstallationRegister)
+                .WithUserId(registered.PrincipalId)
+                .WithData(new { registered.Generation, registered.CredentialState });
             SetNoStore(http.Response);
             return Results.Created(
                 "/v1/installations/current",
@@ -82,12 +91,15 @@ public static class InstallationEndpoints
             {
                 try
                 {
-                    _ = await repository.BeginRotationAsync(
+                    var rotated = await repository.BeginRotationAsync(
                         candidate,
                         rotationId,
                         Guid.NewGuid(),
                         pendingHash,
                         ct);
+                    http.GetOrCreateActivityLog(
+                            Saydin.Shared.Constants.ActivityActions.InstallationRotationBegin)
+                        .WithData(new { rotated.Generation, rotated.CredentialState });
                     SetNoStore(http.Response);
                     return Results.Ok(new InstallationRotationResponse(rotationId, generated.Token));
                 }
@@ -112,6 +124,7 @@ public static class InstallationEndpoints
         InstallationRotationCommitRequest request,
         HttpContext http,
         IInstallationCredentialKeyring keyring,
+        IInstallationPrincipalContext principalContext,
         IInstallationRepository repository,
         CancellationToken ct)
     {
@@ -129,7 +142,15 @@ public static class InstallationEndpoints
             {
                 try
                 {
-                    _ = await repository.CommitRotationAsync(request.RotationId, candidate, ct);
+                    var committed = await repository.CommitRotationAsync(
+                        request.RotationId, candidate, ct);
+                    if (!principalContext.IsResolved
+                        || committed.PrincipalId != principalContext.PrincipalId)
+                        throw new InvalidOperationException(
+                            "installation_rotation_commit_principal_mismatch");
+                    http.GetOrCreateActivityLog(
+                            Saydin.Shared.Constants.ActivityActions.InstallationRotationCommit)
+                        .WithData(new { committed.Generation, committed.CredentialState });
                     SetNoStore(http.Response);
                     return Results.NoContent();
                 }
@@ -170,7 +191,10 @@ public static class InstallationEndpoints
             {
                 try
                 {
-                    await repository.RevokeAsync(candidate, ct);
+                    var revoked = await repository.RevokeAsync(candidate, ct);
+                    http.GetOrCreateActivityLog(
+                            Saydin.Shared.Constants.ActivityActions.InstallationRevoke)
+                        .WithData(new { revoked.Generation, revoked.CredentialState });
                     SetNoStore(http.Response);
                     return Results.NoContent();
                 }

@@ -42,6 +42,12 @@ public sealed class InflationRepository(SaydinDbContext context) : IInflationRep
             .ToDictionary(rate => rate.PeriodDate, rate => ToObservation(rate)!);
     }
 
+    public async Task<InflationIndexObservation?> GetLatestFinalIndexValueAsync(
+        DateOnly terminalMonth,
+        CancellationToken ct) =>
+        ToObservation(await GetNearestRowAsync(
+            new DateOnly(terminalMonth.Year, terminalMonth.Month, 1), ct));
+
     /// <summary>
     /// En yakın (≤ <paramref name="month"/>) complete final EVDS/TÜİK CPI gözlemini seçer.
     /// Migration 020 expand fazında bırakılan all-null seed/legacy satırlar görünmez.

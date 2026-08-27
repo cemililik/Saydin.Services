@@ -57,17 +57,47 @@ public class CoinGeckoAdapterTests
     }
 
     [Fact]
-    public async Task PayloadOver64KiB_IsRejectedBeforeJsonParse()
+    public async Task TransportPayloadOverLimit_IsRetryableBeforeJsonParse()
     {
         var adapter = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(new string('x', 65_537)),
+            Content = new StringContent(new string('x', ProviderTransportLimits.MaxResponseBytes + 1)),
         });
 
-        var act = () => adapter.FetchRangeAsync(Request(), default);
+        var result = await adapter.FetchRangeAsync(Request(), default);
 
-        await act.Should().ThrowAsync<ProviderPayloadTooLargeException>()
-            .WithMessage("provider_payload_too_large");
+        result.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        result.Code.Should().Be("transport_payload_too_large");
+    }
+
+    [Fact]
+    public async Task WrongPriceValueKind_IsTypedPermanent()
+    {
+        var adapter = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"prices":[[1704067200000,{"unexpected":true}]]}"""),
+        });
+
+        var result = await adapter.FetchRangeAsync(Request(), default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        result.Code.Should().Be("contract_value_kind_invalid");
+    }
+
+    [Fact]
+    public async Task MalformedPriceOutsideRequestedWindow_DoesNotRejectTargetWindow()
+    {
+        var adapter = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"prices":[[1703980800000,{"bad":true}],[1704067200000,42000.5]]}"""),
+        });
+
+        var result = await adapter.FetchRangeAsync(Request(), default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.Data);
+        result.Records.Should().ContainSingle().Which.Close.Should().Be(42000.5m);
     }
 
     [Fact]

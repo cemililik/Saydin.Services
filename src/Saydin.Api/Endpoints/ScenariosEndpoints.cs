@@ -36,15 +36,14 @@ public static class ScenariosEndpoints
             .ProducesProblem(StatusCodes.Status401Unauthorized)
             .RequireInstallationCredential();
 
-        // APIR-002: 422 (ScenarioLimitExceeded) ve 409 (Conflict) açıkça beyan
-        // edilir → Flutter codegen 422'yi typed handle edebilir.
+        // ScenarioLimitExceeded is the only create-time conflict-like domain result
+        // and is intentionally exposed as 422. No runtime path emits 409.
         group.MapPost("", SaveScenarioAsync)
             .WithName("SaveScenario")
             .WithSummary("Yeni bir senaryo kaydeder")
             .Produces<Models.Responses.ScenarioResponse>(StatusCodes.Status201Created)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
-            .ProducesProblem(StatusCodes.Status409Conflict)
             .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
             .ProducesProblem(StatusCodes.Status413PayloadTooLarge)
             .ProducesProblem(StatusCodes.Status415UnsupportedMediaType)
@@ -64,14 +63,21 @@ public static class ScenariosEndpoints
     }
 
     private static async Task<IResult> GetScenarioPageAsync(
-        int? limit,
+        string? limit,
         string? cursor,
         HttpContext httpContext,
         ISavedScenarioService service,
+        IStringLocalizer<ErrorMessages> localizer,
         CancellationToken ct)
     {
+        // Keep the simple query parameters in the handler signature so native
+        // OpenAPI/codegen can discover them. ParsePageQuery remains authoritative
+        // because it also rejects duplicate values and applies invariant parsing.
+        _ = limit;
+        _ = cursor;
+        var (parsedLimit, parsedCursor) = ParsePageQuery(httpContext.Request.Query, localizer);
         var log = httpContext.GetOrCreateActivityLog(ActivityActions.ScenarioList);
-        var page = await service.GetScenarioPageAsync(limit, cursor, ct);
+        var page = await service.GetScenarioPageAsync(parsedLimit, parsedCursor, ct);
 
         log.WithData(CreateListActivityData(
             page.Items.Count,
@@ -152,9 +158,45 @@ public static class ScenariosEndpoints
         {
             scenarioId = scenario.Id,
             type = request.Type,
-            assetSymbol = request.AssetSymbol,
+            // The service response carries the repository-validated canonical symbol.
+            // Never copy the untrusted request spelling into the audit payload.
+            assetSymbol = scenario.AssetSymbol,
             hasLabel = !string.IsNullOrWhiteSpace(request.Label),
         };
+
+    internal static (int? Limit, string? Cursor) ParsePageQuery(
+        IQueryCollection query,
+        IStringLocalizer<ErrorMessages> localizer)
+    {
+        int? limit = null;
+        if (query.TryGetValue("limit", out var limitValues))
+        {
+            if (limitValues.Count != 1
+                || !int.TryParse(
+                    limitValues[0],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var parsed))
+            {
+                throw new Saydin.Shared.Exceptions.ValidationException(
+                    string.Format(localizer["ScenarioPageLimitInvalid"],
+                        ScenarioLimits.MaxPageSize),
+                    field: "limit");
+            }
+            limit = parsed;
+        }
+
+        string? cursor = null;
+        if (query.TryGetValue("cursor", out var cursorValues))
+        {
+            if (cursorValues.Count != 1)
+                throw new Saydin.Shared.Exceptions.ValidationException(
+                    localizer["ScenarioCursorInvalid"], field: "cursor");
+            cursor = string.IsNullOrWhiteSpace(cursorValues[0]) ? null : cursorValues[0];
+        }
+
+        return (limit, cursor);
+    }
 
     internal static object CreateListActivityData(
         int scenarioCount,

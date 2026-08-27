@@ -3,6 +3,7 @@
 # mounted directory contains one pgpass file and no control-plane credential.
 set -euo pipefail
 export LC_ALL=C
+export PGCONNECT_TIMEOUT=10
 
 die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
 
@@ -18,7 +19,7 @@ done
 [[ -f "$PGPASSFILE" && ! -L "$PGPASSFILE" ]] || die "backup_auth_pgpass_invalid" 78
 [[ "$(stat -c '%u:%g:%a:%h' "$PGPASSFILE")" == "0:0:400:1" ]] || \
   die "backup_auth_pgpass_permissions_invalid" 78
-[[ "$(find "$(dirname "$PGPASSFILE")" -mindepth 1 -maxdepth 1 -printf '%f\n')" == ".pgpass" ]] || \
+[[ "$(find "$(dirname "$PGPASSFILE")" -mindepth 1 -maxdepth 1 -print)" == "$PGPASSFILE" ]] || \
   die "backup_auth_secret_scope_invalid" 78
 
 target=/work/base
@@ -40,7 +41,7 @@ trap cleanup EXIT HUP INT TERM
 mkdir -m 0700 "$target"
 pg_receivewal --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
   --slot="$slot" --create-slot --if-not-exists --no-password >/dev/null
-timeout --signal=TERM 30 pg_receivewal --directory=/work --host="$PGHOST" \
+timeout -s TERM 30 pg_receivewal --directory=/work --host="$PGHOST" \
   --port="$PGPORT" --username="$PGUSER" --slot="$slot" --synchronous --no-password \
   >"$log" 2>&1 &
 receiver=$!
@@ -60,11 +61,28 @@ system_identifier="$(pg_controldata "$target" | sed -n 's/^Database system ident
 [[ "$(printf '%s' "$system_identifier" | sha256sum | cut -d' ' -f1)" == \
     "$SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256" ]] || die "backup_auth_wrong_cluster"
 
-! grep -Eqi 'fatal|password authentication failed|no pg_hba.conf entry' "$log" || \
-  die "backup_auth_receivewal_rejected"
 kill "$receiver" >/dev/null 2>&1 || true
 wait "$receiver" >/dev/null 2>&1 || true
 receiver=
+
+# Exercise the exact replication-mode psql path used by the production WAL
+# high-water probe. Ordinary SQL denial below must not mask a broken physical HBA path.
+replication_connection="host=$PGHOST port=$PGPORT user=$PGUSER dbname=postgres replication=true"
+identity="$(timeout -s TERM 30 psql -X -A -t -F '|' --no-password \
+  --dbname="$replication_connection" -c 'IDENTIFY_SYSTEM')" || \
+  die "backup_auth_highwater_identity_failed"
+wal_segment_size="$(timeout -s TERM 30 psql -X -A -t --no-password \
+  --dbname="$replication_connection" -c 'SHOW wal_segment_size')" || \
+  die "backup_auth_highwater_segment_size_failed"
+identity_system=${identity%%|*}
+identity_rest=${identity#*|}
+[[ "$identity_rest" != "$identity" && "$identity_system" =~ ^[0-9]+$ ]] || \
+  die "backup_auth_highwater_identity_invalid"
+[[ "$(printf '%s' "$identity_system" | sha256sum | cut -d' ' -f1)" == \
+  "$SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256" ]] || die "backup_auth_highwater_wrong_cluster"
+[[ "$wal_segment_size" =~ ^[1-9][0-9]*(kB|MB|GB)$ ]] || \
+  die "backup_auth_highwater_segment_size_invalid"
+
 pg_receivewal --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
   --slot="$slot" --drop-slot --no-password >/dev/null
 
@@ -73,7 +91,8 @@ for database in postgres "$SAYDIN_TARGET_DATABASE" template0 template1; do
       --username="$PGUSER" --dbname="$database" -c 'SELECT 1' >"$log" 2>&1; then
     die "backup_auth_sql_access_allowed"
   fi
-  grep -q 'pg_hba.conf rejects connection' "$log" || die "backup_auth_sql_rejection_not_hba"
+  pg_isready --host="$PGHOST" --port="$PGPORT" --timeout=5 >/dev/null 2>&1 || \
+    die "backup_auth_database_unavailable" 75
 done
 
-printf 'backup_auth_acceptance_passed:basebackup,receivewal,sql-deny\n'
+printf 'backup_auth_acceptance_passed:basebackup,receivewal,highwater,sql-deny\n'

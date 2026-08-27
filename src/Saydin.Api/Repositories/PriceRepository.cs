@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using NpgsqlTypes;
@@ -8,6 +9,25 @@ namespace Saydin.Api.Repositories;
 
 public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
 {
+    private static readonly Expression<Func<PricePoint, PricePoint>> ApiProjection = point => new PricePoint
+    {
+        AssetId = point.AssetId,
+        PriceDate = point.PriceDate,
+        Close = point.Close,
+        Open = point.Open,
+        High = point.High,
+        Low = point.Low,
+        Volume = point.Volume,
+        ProviderSource = point.ProviderSource,
+        SourceObservationId = point.SourceObservationId,
+        AsOfAt = point.AsOfAt,
+        PriceKind = point.PriceKind,
+        IsFinal = point.IsFinal,
+        ObservationSha256 = point.ObservationSha256,
+        AuthorityContractVersion = point.AuthorityContractVersion,
+        HasSourceRaw = point.SourceRaw != null,
+    };
+
     public async Task<IReadOnlyList<Asset>> GetAllActiveAssetsAsync(CancellationToken ct)
         => await context.Assets
             .Where(a => a.IsActive)
@@ -54,6 +74,7 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
             .AsNoTracking()
             .WhereCompleteFinalAuthority()
             .Where(pp => pp.Asset.Symbol == symbol && pp.PriceDate == date)
+            .Select(ApiProjection)
             .FirstOrDefaultAsync(ct);
 
     public async Task<PricePoint?> GetNearestPriceAsync(
@@ -80,6 +101,7 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
             .OrderBy(pp => pp.PriceDate > date ? 1 : 0)
             .ThenByDescending(pp => pp.PriceDate <= date ? pp.PriceDate : minDate)
             .ThenBy(pp => pp.PriceDate > date ? pp.PriceDate : maxDate)
+            .Select(ApiProjection)
             .FirstOrDefaultAsync(ct);
     }
 
@@ -122,7 +144,7 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
                    nearest.is_final,
                    nearest.observation_sha256,
                    nearest.authority_contract_version,
-                   nearest.source_raw::text AS source_raw
+                   nearest.has_source_raw
               FROM requested
               LEFT JOIN LATERAL
               (
@@ -140,7 +162,7 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
                          point.is_final,
                          point.observation_sha256,
                          point.authority_contract_version,
-                         point.source_raw
+                         point.source_raw IS NOT NULL AS has_source_raw
                     FROM price_points AS point
                     JOIN assets AS asset ON asset.id = point.asset_id
                    WHERE asset.symbol = @symbol
@@ -212,7 +234,7 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
                 IsFinal = row.IsFinal,
                 ObservationSha256 = row.ObservationSha256,
                 AuthorityContractVersion = row.AuthorityContractVersion,
-                SourceRaw = row.SourceRaw,
+                HasSourceRaw = row.HasSourceRaw == true,
             })
             .ToArray();
     }
@@ -234,7 +256,7 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
         public bool? IsFinal { get; init; }
         public byte[]? ObservationSha256 { get; init; }
         public int? AuthorityContractVersion { get; init; }
-        public string? SourceRaw { get; init; }
+        public bool? HasSourceRaw { get; init; }
     }
 
     public async Task<DateOnly?> GetLatestPriceDateAsync(string symbol, CancellationToken ct)
@@ -288,5 +310,6 @@ public sealed class PriceRepository(SaydinDbContext context) : IPriceRepository
             .WhereCompleteFinalAuthority()
             .Where(pp => pp.Asset.Symbol == symbol && pp.PriceDate >= from && pp.PriceDate <= to)
             .OrderBy(pp => pp.PriceDate)
+            .Select(ApiProjection)
             .ToListAsync(ct);
 }

@@ -41,8 +41,8 @@ mkdir -p "${work_dir}"
 ) | tar -xf - -C "${work_dir}"
 
 cd "${work_dir}"
-dotnet restore "${unit_project}" --force-evaluate
-dotnet restore "${integration_project}" --force-evaluate
+dotnet restore "${unit_project}" --locked-mode
+dotnet restore "${integration_project}" --locked-mode
 dotnet test "${unit_project}" \
     --configuration Release \
     --no-restore \

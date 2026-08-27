@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Saydin.Shared.Data;
 using Saydin.Shared.Entities;
+using System.Text.RegularExpressions;
 
 namespace Saydin.Api.Tests.Data;
 
@@ -15,6 +16,7 @@ public sealed class ApiTrustSchemaModelTests
         using var context = CreateContext();
         var entity = context.GetService<IDesignTimeModel>().Model
             .FindEntityType(typeof(InstallationCredential))!;
+        var migration = Migration021();
 
         entity.GetTableName().Should().Be("installation_credentials");
         entity.GetCheckConstraints().Select(check => check.Name).Should().BeEquivalentTo(
@@ -48,6 +50,23 @@ public sealed class ApiTrustSchemaModelTests
         entity.GetForeignKeys().Single(foreignKey =>
                 foreignKey.PrincipalEntityType.ClrType == typeof(InstallationCredential))
             .DeleteBehavior.Should().Be(DeleteBehavior.Restrict);
+
+        var modelObjectNames = entity.GetCheckConstraints().Select(item => item.Name)
+            .Concat(entity.GetIndexes().Select(item => item.GetDatabaseName()))
+            .Concat(entity.GetForeignKeys().Select(item => item.GetConstraintName()))
+            .Append(entity.FindAnnotation(
+                    "Saydin:DatabaseIndex:uq_installation_credentials_pending_principal") is null
+                ? null
+                : "uq_installation_credentials_pending_principal")
+            .Where(name => name is not null)
+            .Cast<string>()
+            .Where(name => Regex.IsMatch(name, "^(chk|fk|uq)_installation_credentials_"));
+        var migrationObjectNames = Regex.Matches(
+                migration, @"\b(?:chk|fk|uq)_installation_credentials_[a-z_]+\b")
+            .Select(match => match.Value)
+            .Distinct(StringComparer.Ordinal);
+        modelObjectNames.Should().BeEquivalentTo(migrationObjectNames,
+            "the checked-in migration, not a duplicated test constant, is the schema authority");
     }
 
     [Fact]
@@ -59,6 +78,7 @@ public sealed class ApiTrustSchemaModelTests
         var catalog = model.FindEntityType(typeof(AssetCatalogState))!;
 
         user.GetCheckConstraints().Select(check => check.Name).Should().Contain(
+            "chk_users_tier",
             "chk_users_principal_status",
             "chk_users_principal_contract_version",
             "chk_users_principal_lifecycle",
@@ -77,6 +97,13 @@ public sealed class ApiTrustSchemaModelTests
             "chk_asset_catalog_state_singleton",
             "chk_asset_catalog_state_revision",
             "chk_asset_catalog_state_sha256");
+
+        var migration = Migration021();
+        foreach (var name in user.GetCheckConstraints().Select(check => check.Name)
+                     .Where(name => name is not null && name.StartsWith(
+                         "chk_users_principal_", StringComparison.Ordinal))
+                     .Concat(catalog.GetCheckConstraints().Select(check => check.Name)))
+            migration.Should().Contain(name!);
     }
 
     private static SaydinDbContext CreateContext()
@@ -86,5 +113,18 @@ public sealed class ApiTrustSchemaModelTests
             .UseSnakeCaseNamingConvention()
             .Options;
         return new SaydinDbContext(options);
+    }
+
+    private static string Migration021() => File.ReadAllText(Path.Combine(
+        FindRepositoryRoot(), "infrastructure", "postgres", "migrations",
+        "021_api_trust_expand.sql"));
+
+    private static string FindRepositoryRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null && !File.Exists(Path.Combine(current.FullName, "Saydin.Services.sln")))
+            current = current.Parent;
+        return current?.FullName
+            ?? throw new InvalidOperationException("Repository root could not be located.");
     }
 }

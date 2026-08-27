@@ -20,4 +20,12 @@ public interface IInflationRepository
     Task<IReadOnlyDictionary<DateOnly, InflationIndexObservation>> GetExactIndexValuesAsync(
         IReadOnlyCollection<DateOnly> months,
         CancellationToken ct);
+
+    /// <summary>
+    /// Terminal deflatör için hedef aydan ileri olmayan en son complete-final CPI
+    /// gözlemini döner. Ara katkı aylarının exact-only sözleşmesini değiştirmez.
+    /// </summary>
+    Task<InflationIndexObservation?> GetLatestFinalIndexValueAsync(
+        DateOnly terminalMonth,
+        CancellationToken ct);
 }

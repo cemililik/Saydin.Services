@@ -255,6 +255,7 @@ internal static class SqlScriptNormalizer
         canonical.StartsWith("cluster", StringComparison.Ordinal) ||
         canonical.StartsWith("altersystem", StringComparison.Ordinal) ||
         canonical.StartsWith("createindexconcurrently", StringComparison.Ordinal) ||
+        canonical.StartsWith("createuniqueindexconcurrently", StringComparison.Ordinal) ||
         canonical.StartsWith("dropindexconcurrently", StringComparison.Ordinal) ||
         canonical.StartsWith("reindex", StringComparison.Ordinal) &&
         canonical.Contains("concurrently", StringComparison.Ordinal);

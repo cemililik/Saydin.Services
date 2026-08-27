@@ -48,6 +48,8 @@ try
     var serviceVersion = ApiServiceVersionContract.Parse(builder.Configuration, builder.Environment);
     builder.WebHost.ConfigureKestrel(apiRuntime.Configure);
     builder.Services.AddSingleton(apiRuntime);
+    builder.Services.AddSingleton<Microsoft.AspNetCore.Routing.MatcherPolicy,
+        ApiPortEndpointSelectorPolicy>();
 
     // ─── Serilog ─────────────────────────────────────────────────────────────
     builder.Host.UseSerilog((ctx, services, cfg) =>
@@ -173,7 +175,7 @@ try
             return HealthCheckResult.Healthy();
         }, tags: ["db"])
         .AddRedis(
-            builder.Configuration.GetConnectionString("Redis")!,
+            services => services.GetRequiredService<IConnectionMultiplexer>(),
             name: "redis",
             tags: ["cache"]);
 
@@ -236,6 +238,18 @@ try
         validateAllProperties: true);
     var installationCredentialKeyring = InstallationCredentialKeyring.Load(installationCredentialOptions);
     builder.Services.AddSingleton<IInstallationCredentialKeyring>(installationCredentialKeyring);
+    var activityPrincipalPseudonymOptions = builder.Configuration
+        .GetSection(ActivityPrincipalPseudonymOptions.SectionName)
+        .Get<ActivityPrincipalPseudonymOptions>()
+        ?? throw new InvalidOperationException("Activity principal pseudonym configuration is missing.");
+    Validator.ValidateObject(
+        activityPrincipalPseudonymOptions,
+        new ValidationContext(activityPrincipalPseudonymOptions),
+        validateAllProperties: true);
+    var activityPrincipalPseudonymizer = ActivityPrincipalPseudonymizer.Load(
+        activityPrincipalPseudonymOptions);
+    builder.Services.AddSingleton<IActivityPrincipalPseudonymizer>(activityPrincipalPseudonymizer);
+    builder.Services.AddSingleton<IQuotaSubjectPseudonymizer>(activityPrincipalPseudonymizer);
 
     // ─── Repositories & Services ─────────────────────────────────────────────
     // F3.1-5 / SVCR-007/025: TimeProvider — servisler DateTime.UtcNow yerine bunu
@@ -286,6 +300,12 @@ try
     builder.Services.AddSingleton<IActivityLogger, ChannelActivityLogger>();
     builder.Services.AddSingleton<IActivityLogBatchStore, EfActivityLogBatchStore>();
     builder.Services.AddHostedService<ActivityLogWriter>();
+    // Hosted services stop in reverse registration order. This completion phase
+    // therefore closes ingress before ActivityLogWriter is stopped, while the
+    // framework's later-registered Kestrel host has already drained requests.
+    builder.Services.AddHostedService<ActivityLogChannelLifetime>();
+    builder.Services.Configure<HostOptions>(options =>
+        options.ShutdownTimeout = TimeSpan.FromSeconds(45));
     // IMiddleware ile çalıştığı için transient kayıt zorunlu (UseMiddleware<T>() activate eder).
     builder.Services.AddTransient<ActivityLogMiddleware>();
     builder.Services.AddTransient<ApiPortBoundaryMiddleware>();
@@ -334,28 +354,34 @@ try
 
     if (app.Environment.IsDevelopment())
     {
-        app.MapOpenApi();
-        app.MapScalarApiReference();
+        app.MapOpenApi().WithMetadata(
+            new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicProduct));
+        app.MapScalarApiReference().WithMetadata(
+            new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicProduct));
     }
 
     app.MapHealthChecks(ApiPortBoundary.LivePath, new()
     {
         Predicate = _ => false,
-    });
+    }).WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicLiveness));
     app.MapHealthChecks(ApiPortBoundary.ReadyPath, new()
     {
         Predicate = registration => registration.Tags.Contains("db")
                                     || registration.Tags.Contains("cache"),
-    });
-    app.MapPrometheusScrapingEndpoint(ApiPortBoundary.MetricsPath);
+    }).WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.Management));
+    app.MapPrometheusScrapingEndpoint(ApiPortBoundary.MetricsPath)
+        .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.Management));
 
-    app.MapWhatIfEndpoints();
-    app.MapDcaEndpoints();
-    app.MapAssetsEndpoints();
-    app.MapScenariosEndpoints();
-    app.MapAppConfigEndpoints();
-    app.MapInstallationEndpoints();
+    var productEndpoints = app.MapGroup("")
+        .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicProduct));
+    productEndpoints.MapWhatIfEndpoints();
+    productEndpoints.MapDcaEndpoints();
+    productEndpoints.MapAssetsEndpoints();
+    productEndpoints.MapScenariosEndpoints();
+    productEndpoints.MapAppConfigEndpoints();
+    productEndpoints.MapInstallationEndpoints();
 
+    SaydinMetrics.InitializeActivityLogContractSeries();
     Log.Information("Saydin.Api başlatılıyor — ortam: {Environment}", app.Environment.EnvironmentName);
     await app.RunAsync();
 }

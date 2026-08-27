@@ -34,6 +34,27 @@ def main() -> int:
         "missing_tempo_retention": ("infrastructure/otel/tempo.production.yml", ("block_retention:", "block_lifetime:")),
         "missing_loki_retention": ("infrastructure/otel/loki.production.yml", ("retention_enabled: true", "retention_enabled: false")),
         "public_api_scrape": ("infrastructure/prometheus/prometheus.production.yml", ("saydin-api:9090", "saydin-api:8080")),
+        "missing_backup_validity_alert": ("infrastructure/prometheus/rules/host-backup.yml", ("SaydinBackupLoginExpiring", "BackupLoginWarningRemoved")),
+        "block_style_pii_label": ("infrastructure/prometheus/rules/api.yml", (
+            "labels: {severity: critical, service: saydin-api}",
+            "labels:\n          severity: critical\n          service: saydin-api\n          device_id: forbidden")),
+        "missing_negative_inventory": ("infrastructure/prometheus/tests/inventory.test.yml", (
+            "alertname: SaydinApiUnavailable, exp_alerts: []",
+            "alertname: RemovedApiUnavailableNegative, exp_alerts: []")),
+        "missing_positive_inventory": ("infrastructure/prometheus/tests/inventory.test.yml", (
+            "alertname: SaydinActivityLogLoss\n", "alertname: RemovedActivityLogLossPositive\n")),
+        "stale_runbook_alert": ("docs/runbooks/observability-game-day.md", (
+            "SaydinDailyIngestionStale", "SaydinNonexistentAlert")),
+        "watchdog_removed": ("infrastructure/prometheus/rules/tls-runtime.yml", (
+            "SaydinWatchdog", "RemovedWatchdog")),
+        "instance_identity_overwrite": ("infrastructure/otel/otel-collector.production.yml", (
+            "action: insert", "action: upsert")),
+        "resource_label_explosion": ("infrastructure/otel/otel-collector.production.yml", (
+            "enabled: false", "enabled: true")),
+        "loopback_health_endpoint": ("infrastructure/otel/otel-collector.production.yml", (
+            "endpoint: 0.0.0.0:13133", "endpoint: 127.0.0.1:13133")),
+        "unbounded_metric_inventory": ("infrastructure/release/deploy-release.sh", (
+            "&start=$series_start&end=$series_end", "")),
     }
     for name, (relative, change) in mutations.items():
         with tempfile.TemporaryDirectory(prefix="saydin-observability-") as directory:

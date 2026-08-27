@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
-using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using FluentAssertions;
 using Saydin.Api.Models.Responses;
@@ -9,8 +9,16 @@ using Saydin.Api.Services;
 
 namespace Saydin.Api.Tests.Security;
 
+[SupportedOSPlatform("linux")]
 public sealed class InstallationCredentialKeyringTests
 {
+    [Fact]
+    public void Suite_RequiresCanonicalLinuxSecretContract()
+    {
+        OperatingSystem.IsLinux().Should().BeTrue(
+            "security-critical secret-file assertions must run in the canonical Linux test container");
+    }
+
     [Fact]
     public void SecretBearingResponseText_IsAlwaysRedacted()
     {
@@ -25,7 +33,7 @@ public sealed class InstallationCredentialKeyringTests
     [Fact]
     public void Generate_ProducesExactOpaqueCredential_AndDisposeZeroesSecret()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         using var fixture = KeyringFixture.Create();
         var generated = fixture.Keyring.Generate();
         var original = generated.Secret.ToArray();
@@ -46,7 +54,7 @@ public sealed class InstallationCredentialKeyringTests
     [Fact]
     public void HashAccepted_IsDeterministicVersioned_AndNeverStoresRawSecret()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         using var fixture = KeyringFixture.Create(includePrevious: true);
         using var generated = fixture.Keyring.Generate();
 
@@ -76,7 +84,7 @@ public sealed class InstallationCredentialKeyringTests
     [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB")]
     public void TryDecode_RejectsNonCanonicalCredential(string token)
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         using var fixture = KeyringFixture.Create();
 
         fixture.Keyring.TryDecode(token, out var secret).Should().BeFalse();
@@ -84,24 +92,9 @@ public sealed class InstallationCredentialKeyringTests
     }
 
     [Fact]
-    public void PseudonymizePrincipal_IsStableAndDoesNotExposePrincipal()
-    {
-        if (!OperatingSystem.IsLinux()) return;
-        using var fixture = KeyringFixture.Create();
-        var principalId = Guid.NewGuid();
-
-        var first = fixture.Keyring.PseudonymizePrincipal(principalId);
-        var second = fixture.Keyring.PseudonymizePrincipal(principalId);
-
-        first.Should().Be(second).And.StartWith("p1:");
-        first.Should().NotContain(principalId.ToString("N"));
-        first.Should().HaveLength(35);
-    }
-
-    [Fact]
     public void Load_WorldReadableSecretFile_FailsWithoutLeakingPathOrValue()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
 
         var directory = CreatePrivateDirectory();
         var path = Path.Combine(directory, "keyring.json");
@@ -133,7 +126,7 @@ public sealed class InstallationCredentialKeyringTests
     [Fact]
     public void Load_SymlinkAndHardlinkSecrets_AreRejectedWithStableError()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var directory = CreatePrivateDirectory();
         var target = WriteKeyring(directory, "target.json");
         var symlink = Path.Combine(directory, "symlink.json");
@@ -166,7 +159,7 @@ public sealed class InstallationCredentialKeyringTests
     [Fact]
     public void Load_NonPrivateParentDirectory_IsRejected()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var directory = CreatePrivateDirectory();
         var path = WriteKeyring(directory, "keyring.json");
         File.SetUnixFileMode(directory,
@@ -192,36 +185,17 @@ public sealed class InstallationCredentialKeyringTests
     }
 
     [Fact]
-    public void Load_SameInodeRewriteRace_IsRejected()
+    public void Load_ProductionSecretReader_ExposesNoMutableStaticTestHook()
     {
-        if (!OperatingSystem.IsLinux()) return;
-        var directory = CreatePrivateDirectory();
-        var firstValue = Convert.ToBase64String(Enumerable.Repeat((byte)1, 32).ToArray());
-        var secondValue = Convert.ToBase64String(Enumerable.Repeat((byte)2, 32).ToArray());
-        var original = JsonSerializer.Serialize(new Dictionary<string, string> { ["1"] = firstValue });
-        var replacement = JsonSerializer.Serialize(new Dictionary<string, string> { ["1"] = secondValue });
-        original.Should().HaveLength(replacement.Length);
-        var path = Path.Combine(directory, "race.json");
-        File.WriteAllText(path, original);
-        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        Saydin.DatabaseSecurity.LinuxSecretFile.AfterOpenBeforeReadForTests = () =>
-            File.WriteAllText(path, replacement);
-        try
-        {
-            var act = () => InstallationCredentialKeyring.Load(new InstallationCredentialOptions
-            {
-                SecretFile = path,
-                ActiveKeyVersion = 1,
-            });
-            act.Should().Throw<InvalidOperationException>()
-                .Which.InnerException.Should().BeNull();
-        }
-        finally
-        {
-            Saydin.DatabaseSecurity.LinuxSecretFile.AfterOpenBeforeReadForTests = null;
-            File.Delete(path);
-            Directory.Delete(directory);
-        }
+        var writableStaticState = typeof(Saydin.DatabaseSecurity.LinuxSecretFile)
+            .GetProperties(System.Reflection.BindingFlags.Static |
+                           System.Reflection.BindingFlags.Public |
+                           System.Reflection.BindingFlags.NonPublic)
+            .Where(property => property.SetMethod is not null)
+            .Select(property => property.Name)
+            .ToArray();
+
+        writableStaticState.Should().BeEmpty();
     }
 
     [Fact]
@@ -242,7 +216,7 @@ public sealed class InstallationCredentialKeyringTests
     [Fact]
     public void Load_ActiveVersionMustBeCanonicalHighestAcceptedVersion()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         var directory = CreatePrivateDirectory();
         var path = Path.Combine(directory, "keyring.json");
         File.WriteAllText(path, JsonSerializer.Serialize(new Dictionary<string, string>
@@ -271,7 +245,7 @@ public sealed class InstallationCredentialKeyringTests
     [Fact]
     public void HashOperations_RejectNonCredentialLength()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        RequireLinux();
         using var fixture = KeyringFixture.Create();
 
         var active = () => fixture.Keyring.HashActive(new byte[31]);
@@ -325,6 +299,13 @@ public sealed class InstallationCredentialKeyringTests
         }
     }
 
+    private static void RequireLinux()
+    {
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException(
+                "Installation credential secret-file tests require Linux and may not pass without executing assertions.");
+    }
+
     private static string CreatePrivateDirectory()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"saydin-keyring-{Guid.NewGuid():N}");
@@ -335,7 +316,6 @@ public sealed class InstallationCredentialKeyringTests
         return directory;
     }
 
-    [SupportedOSPlatform("linux")]
     private static string WriteKeyring(string directory, string name)
     {
         var path = Path.Combine(directory, name);

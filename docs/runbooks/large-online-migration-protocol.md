@@ -2,7 +2,15 @@
 
 ## Scope and hard boundary
 
-This protocol applies to every migration after the compiled 001–022 trust root. Existing migrations retain their conventional transactional behavior. An unrecognized SQL statement, missing/invalid manifest, wrong target, invalid budget, or unsupported execution plan is rejected before migration-control or schema-tracking mutation.
+This protocol applies to every migration after the compiled trust root (001–024,
+including 008b and 012b, in this revision). Existing compiled migrations retain
+their conventional transactional behavior. In particular, frozen migration 022
+predates the impact-manifest and resumable-online admission path; a database that
+has not crossed it must first pass the dedicated
+[`principal-retention-migration.md`](principal-retention-migration.md) procedure.
+An unrecognized SQL statement, missing/invalid manifest, wrong target, invalid
+budget, or unsupported execution plan is rejected before migration-control or
+schema-tracking mutation.
 
 The current reusable online surface is deliberately narrow: one public relation, a UUID keyset cursor, and a generated parameterized `SET <column>=<constant> WHERE <column> IS NULL` batch. It does not claim to execute arbitrary backfills, concurrent index creation, procedures, multi-table plans, non-UUID cursors, or generic SQL. Those need a new reviewed executor plan kind; they are not operable by changing JSON.
 

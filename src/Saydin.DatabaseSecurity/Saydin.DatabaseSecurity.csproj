@@ -9,7 +9,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Saydin.DatabaseRoleBootstrap.Tests" />
     <InternalsVisibleTo Include="Saydin.DatabaseMigrator.Tests" />
-    <InternalsVisibleTo Include="Saydin.DatabaseSecurity.Tests" />
     <InternalsVisibleTo Include="Saydin.Api.Tests" />
   </ItemGroup>
 

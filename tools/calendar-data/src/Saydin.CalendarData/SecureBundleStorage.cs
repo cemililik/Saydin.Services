@@ -48,6 +48,47 @@ internal static class SecureBundleStorage
             File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
+    public static void WritePrivateFileIdempotent(
+        string path,
+        ReadOnlySpan<byte> content,
+        string conflictCode)
+    {
+        var target = Path.GetFullPath(path);
+        var parent = EnsurePrivateDirectory(Path.GetDirectoryName(target)!);
+        if (File.Exists(target))
+        {
+            EnsureRegularFileNoFollow(parent, target, "materialized_plan_unsafe");
+            if (File.ReadAllBytes(target).AsSpan().SequenceEqual(content)) return;
+            throw new CalendarDataException(conflictCode, target);
+        }
+        WriteNewPrivateFile(parent, Path.GetFileName(target), content);
+    }
+
+    public static void WritePrivateFileAtomicallyReplacing(
+        string path,
+        ReadOnlySpan<byte> content)
+    {
+        var target = Path.GetFullPath(path);
+        var parent = EnsurePrivateDirectory(Path.GetDirectoryName(target)!);
+        if (File.Exists(target))
+        {
+            EnsureRegularFileNoFollow(parent, target, "materialized_plan_unsafe");
+            if (File.ReadAllBytes(target).AsSpan().SequenceEqual(content)) return;
+        }
+
+        var temporaryName = $".pending-plan-{Guid.NewGuid():N}";
+        var temporaryPath = Path.Combine(parent, temporaryName);
+        try
+        {
+            WriteNewPrivateFile(parent, temporaryName, content);
+            File.Move(temporaryPath, target, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+        }
+    }
+
     public static FileStream OpenExclusiveLock(string stagingRoot)
     {
         var path = Path.Combine(stagingRoot, ".acquisition.lock");
@@ -58,6 +99,18 @@ internal static class SecureBundleStorage
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         return stream;
+    }
+
+    public static void DeletePrivateTree(string path, string expectedParent)
+    {
+        var parent = Path.GetFullPath(expectedParent);
+        var target = Path.GetFullPath(path);
+        if (!string.Equals(Path.GetDirectoryName(target), parent, StringComparison.Ordinal)
+            || !Path.GetFileName(target).StartsWith(".pending-", StringComparison.Ordinal)
+            || !Directory.Exists(target))
+            return;
+        EnsureNoReparseComponents(parent, target, "staging_cleanup_unsafe");
+        Directory.Delete(target, recursive: true);
     }
 
     private static void EnsureNoReparseComponents(string root, string target, string errorCode)

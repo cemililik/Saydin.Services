@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import ipaddress
 import json
 import re
@@ -36,6 +37,8 @@ PRIVATE_VOLUMES = {
     "alertmanager_secret": "alertmanager",
     "audit_secret": "data-quality-audit",
     "audit_input": "data-quality-audit",
+    "data_repair_secret": "data-repair",
+    "data_repair_input": "data-repair",
     "backup_secret": {"database-backup", "database-wal-archive"},
 }
 
@@ -96,11 +99,24 @@ def exact_private_proxy_network(value: str) -> ipaddress.IPv4Network | ipaddress
     return network
 
 
+def managed_login_binding_valid(
+        role_prefix: str, purpose: str, login: str, version: str) -> bool:
+    if re.fullmatch(r"(?:[1-9]|[12][0-9]|3[0-2])", version) is None:
+        return False
+    return login == f"{role_prefix}_{purpose}_login_v{version}"
+
+
 def validate(document: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     services = document.get("services") or {}
     networks = document.get("networks") or {}
     volumes = document.get("volumes") or {}
+
+    # Environment-only scans are bypassed by placeholders hidden in labels,
+    # commands, mount paths or extension fields. Scan the complete rendered
+    # model before interpreting individual service contracts.
+    if PLACEHOLDER.search(json.dumps(document, sort_keys=True)):
+        reject(errors, "placeholder_rendered_document")
 
     required_services = {
         "postgres", "redis", "database-role-bootstrap", "database-migrator",
@@ -108,7 +124,7 @@ def validate(document: dict[str, Any]) -> list[str]:
         "redis-exporter", "otel-collector", "prometheus", "alertmanager",
         "tempo", "loki", "blackbox-exporter", "node-exporter", "calendar-release",
         "calendar-activate", "data-quality-audit", "database-backup",
-        "database-wal-archive",
+        "database-wal-archive", "data-repair",
     }
     missing = sorted(required_services - services.keys())
     if missing:
@@ -122,6 +138,7 @@ def validate(document: dict[str, Any]) -> list[str]:
         "database-role-bootstrap", "database-migrator", "saydin-api",
         "saydin-price-ingestion", "caddy", "calendar-release", "calendar-activate",
         "data-quality-audit", "database-backup", "database-wal-archive",
+        "data-repair",
     }
 
     for name, service in services.items():
@@ -130,6 +147,21 @@ def validate(document: dict[str, Any]) -> list[str]:
             reject(errors, "image_not_digest_pinned", name)
         if service.get("build") is not None:
             reject(errors, "host_build_forbidden", name)
+        if service.get("privileged") not in (None, False):
+            reject(errors, "privileged_forbidden", name)
+        if service.get("cap_add"):
+            reject(errors, "cap_add_forbidden", name)
+        if service.get("devices"):
+            reject(errors, "devices_forbidden", name)
+        if service.get("sysctls"):
+            reject(errors, "sysctls_forbidden", name)
+        if service.get("group_add"):
+            reject(errors, "group_add_forbidden", name)
+        if service.get("network_mode"):
+            reject(errors, "network_mode_forbidden", name)
+        for namespace in ("pid", "ipc", "uts", "userns_mode"):
+            if str(service.get(namespace, "")).lower() == "host":
+                reject(errors, "host_namespace_forbidden", name)
         if name in first_party:
             labels = service.get("labels") or {}
             if not str(labels.get("io.saydin.image-class", "")).startswith("first-party"):
@@ -196,6 +228,17 @@ def validate(document: dict[str, Any]) -> list[str]:
         reject(errors, "allowed_hosts_invalid")
     if api_env.get("DistributedSecurityLimiter__Enabled", "").lower() != "true":
         reject(errors, "security_limiter_disabled")
+    security_limits = {
+        "DistributedSecurityLimiter__RegistrationExactHourlyLimit": "3",
+        "DistributedSecurityLimiter__RegistrationExactDailyLimit": "5",
+        "DistributedSecurityLimiter__RegistrationNetworkHourlyLimit": "20",
+        "DistributedSecurityLimiter__RegistrationNetworkDailyLimit": "100",
+        "DistributedSecurityLimiter__RegistrationIpv4ExactHourlyLimit": "60",
+        "DistributedSecurityLimiter__RegistrationIpv4NetworkHourlyLimit": "1000",
+        "DistributedSecurityLimiter__CalculationNetworkDailyLimit": "500",
+    }
+    if any(api_env.get(key) != expected for key, expected in security_limits.items()):
+        reject(errors, "security_limiter_production_limits_invalid")
     proxy_network = exact_private_proxy_network(api_env.get("ForwardedHeaders__KnownNetworks", ""))
     if proxy_network is None:
         reject(errors, "trusted_proxy_invalid")
@@ -234,10 +277,46 @@ def validate(document: dict[str, Any]) -> list[str]:
         reject(errors, "replication_slot_wal_bound_missing")
     if postgres_command_items.count("wal_keep_size=8GB") != 1:
         reject(errors, "basebackup_fetch_wal_window_missing")
+    if postgres_command_items.count("archive_timeout=300s") != 1:
+        reject(errors, "wal_archive_timeout_missing")
     if not all(value in postgres_command for value in (
             "ssl=on", "ssl_cert_file=/run/saydin-secrets/private/server.crt",
             "ssl_key_file=/run/saydin-secrets/private/server.key")):
         reject(errors, "postgres_tls_boundary_missing")
+    for service_name in (
+            "database-migrator", "saydin-api", "saydin-price-ingestion",
+            "calendar-release", "calendar-activate", "data-quality-audit", "data-repair"):
+        environment = environment_map(services.get(service_name, {}).get("environment"))
+        if environment.get("PGSSLMODE", "").lower() != "require":
+            reject(errors, "postgres_client_tls_required", service_name)
+    exporter_uri = environment_map(
+        services.get("postgres-exporter", {}).get("environment")).get("DATA_SOURCE_URI", "")
+    if exporter_uri.count("sslmode=require") != 1 or "sslmode=disable" in exporter_uri.lower():
+        reject(errors, "postgres_exporter_tls_required")
+    migrator_environment = environment_map(
+        services.get("database-migrator", {}).get("environment"))
+    role_prefix = migrator_environment.get("SAYDIN_DATABASE_ROLE_PREFIX", "")
+    if (not managed_login_binding_valid(
+            role_prefix, "migrator", migrator_environment.get("PGUSER", ""),
+            migrator_environment.get("SAYDIN_MIGRATOR_LOGIN_VERSION", ""))
+            or "SAYDIN_DATABASE_LOGIN_VERSION" in migrator_environment):
+        reject(errors, "migrator_login_version_binding_invalid")
+
+    login_bindings = (
+        ("saydin-api", "api", "PGUSER", "SAYDIN_DATABASE_LOGIN_VERSION"),
+        ("saydin-price-ingestion", "ingestion", "PGUSER", "SAYDIN_DATABASE_LOGIN_VERSION"),
+        ("calendar-release", "calendar_importer", "PGUSER", "SAYDIN_DATABASE_LOGIN_VERSION"),
+        ("calendar-activate", "calendar_importer", "PGUSER", "SAYDIN_DATABASE_LOGIN_VERSION"),
+        ("data-quality-audit", "audit", "PGUSER", "SAYDIN_DATABASE_LOGIN_VERSION"),
+        ("data-repair", "ingestion", "PGUSER", "SAYDIN_DATABASE_LOGIN_VERSION"),
+        ("postgres-exporter", "exporter", "DATA_SOURCE_USER", "SAYDIN_EXPORTER_LOGIN_VERSION"),
+    )
+    for service_name, purpose, login_key, version_key in login_bindings:
+        binding_environment = environment_map(services.get(service_name, {}).get("environment"))
+        if not managed_login_binding_valid(
+                role_prefix, purpose, binding_environment.get(login_key, ""),
+                binding_environment.get(version_key, "")):
+            reject(errors, "managed_login_version_binding_invalid", service_name)
 
     dqa = services.get("data-quality-audit", {})
     dqa_command = command_text(dqa)
@@ -246,23 +325,91 @@ def validate(document: dict[str, Any]) -> list[str]:
         "--kms-key-version-id", "--kms-crypto-endpoint", "--oci-region",
         "--evidence-public-key /run/saydin-secrets/private/evidence-public.pem",
         "--allowed-evidence-key-ids", "--kms-timeout-seconds 10",
+        "--production-target-authority-file /run/saydin-secrets/private/production-target",
     )
     if any(value not in dqa_command for value in required_dqa) \
             or "--evidence-private-key" in dqa_command:
         reject(errors, "dqa_kms_boundary_invalid")
 
+    repair = services.get("data-repair", {})
+    repair_env = environment_map(repair.get("environment"))
+    repair_audit_env = environment_map(dqa.get("environment"))
+    repair_command = repair.get("command")
+    expected_repair_environment = {
+        "SAYDIN_ENVIRONMENT", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER",
+        "PGSSLMODE", "SAYDIN_INGESTION_DATABASE_PASSWORD_FILE",
+        "SAYDIN_DEPLOYMENT_ID", "SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256",
+        "SAYDIN_DATABASE_ROLE_PREFIX", "SAYDIN_DATABASE_LOGIN_VERSION",
+        "SAYDIN_DATA_REPAIR_AUDIT_LOGIN", "SAYDIN_DATA_REPAIR_KMS_KEY_ID",
+        "SAYDIN_DATA_REPAIR_KMS_KEY_VERSION_ID",
+        "SAYDIN_DATA_REPAIR_KMS_CRYPTO_ENDPOINT", "SAYDIN_DATA_REPAIR_OCI_REGION",
+    }
+    ingestion_env = environment_map(
+        services.get("saydin-price-ingestion", {}).get("environment"))
+    if (repair.get("profiles") != ["data-repair-operator"]
+            or repair.get("user") != "1001:1001"
+            or repair_command != ["operator-command-required"]
+            or repair.get("restart") != "no"
+            or repair.get("depends_on")
+            or repair.get("healthcheck")
+            or set(repair_env) != expected_repair_environment):
+        reject(errors, "data_repair_operator_boundary_invalid")
+    if (repair_env.get("SAYDIN_ENVIRONMENT") != "production"
+            or repair_env.get("PGHOST") != "postgres"
+            or repair_env.get("PGPORT") != "5432"
+            or repair_env.get("PGDATABASE") != ingestion_env.get("PGDATABASE")
+            or repair_env.get("PGUSER") != ingestion_env.get("PGUSER")
+            or repair_env.get("PGSSLMODE", "").lower() != "require"
+            or repair_env.get("SAYDIN_INGESTION_DATABASE_PASSWORD_FILE")
+            != "/run/saydin-secrets/private/ingestion-current"
+            or repair_env.get("SAYDIN_DEPLOYMENT_ID") != ingestion_env.get("SAYDIN_DEPLOYMENT_ID")
+            or repair_env.get("SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256")
+            != ingestion_env.get("SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256")
+            or repair_env.get("SAYDIN_DATABASE_ROLE_PREFIX")
+            != ingestion_env.get("SAYDIN_DATABASE_ROLE_PREFIX")
+            or repair_env.get("SAYDIN_DATABASE_LOGIN_VERSION")
+            != ingestion_env.get("SAYDIN_DATABASE_LOGIN_VERSION")):
+        reject(errors, "data_repair_database_boundary_invalid")
+    if (repair_env.get("SAYDIN_DATA_REPAIR_AUDIT_LOGIN") != repair_audit_env.get("PGUSER")
+            or not repair_env.get("SAYDIN_DATA_REPAIR_KMS_KEY_ID", "").startswith("ocid1.key.")
+            or not repair_env.get("SAYDIN_DATA_REPAIR_KMS_KEY_VERSION_ID", "").startswith("ocid1.keyversion.")
+            or not repair_env.get("SAYDIN_DATA_REPAIR_KMS_CRYPTO_ENDPOINT", "").startswith("https://")
+            or not re.fullmatch(r"[a-z0-9-]{3,63}",
+                                repair_env.get("SAYDIN_DATA_REPAIR_OCI_REGION", ""))):
+        reject(errors, "data_repair_kms_boundary_invalid")
+
     bootstrap_command = command_text(services.get("database-role-bootstrap", {}))
-    if "--backup-v1-valid-until" not in bootstrap_command \
-            or "--backup-password-file /run/saydin-secrets/private/backup-v1" not in bootstrap_command:
+    required_bootstrap_passwords = (
+        "--migrator-password-file /run/saydin-secrets/private/migrator-current",
+        "--api-password-file /run/saydin-secrets/private/api-current",
+        "--ingestion-password-file /run/saydin-secrets/private/ingestion-current",
+        "--calendar-importer-password-file /run/saydin-secrets/private/calendar_importer-current",
+        "--exporter-password-file /run/saydin-secrets/private/exporter-current",
+        "--audit-password-file /run/saydin-secrets/private/audit-current",
+        "--backup-password-file /run/saydin-secrets/private/backup-v1",
+    )
+    if ("--backup-v1-valid-until" not in bootstrap_command
+            or any(value not in bootstrap_command for value in required_bootstrap_passwords)):
         reject(errors, "backup_bootstrap_contract_missing")
     migrator_env = environment_map(services.get("database-migrator", {}).get("environment"))
     dqa_env = environment_map(dqa.get("environment"))
+    backup_env = environment_map(services.get("database-backup", {}).get("environment"))
     valid_until = migrator_env.get("SAYDIN_BACKUP_V1_VALID_UNTIL", "")
-    if not re.fullmatch(r"20[0-9]{2}-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z", valid_until) \
-            or dqa_env.get("SAYDIN_BACKUP_V1_VALID_UNTIL") != valid_until:
+    try:
+        parsed_valid_until = datetime.datetime.strptime(
+            valid_until, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        parsed_valid_until = None
+    if parsed_valid_until is None \
+            or parsed_valid_until.strftime("%Y-%m-%dT%H:%M:%SZ") != valid_until \
+            or dqa_env.get("SAYDIN_BACKUP_V1_VALID_UNTIL") != valid_until \
+            or backup_env.get("SAYDIN_BACKUP_V1_VALID_UNTIL") != valid_until:
         reject(errors, "backup_valid_until_contract_invalid")
 
-    for name in ("app", "data", "backup-db", "management"):
+    for name in (
+            "app", "data", "backup-db", "telemetry-ingest", "monitoring-core",
+            "monitoring-scrape", "blackbox-control", "host-scrape"):
         if not (networks.get(name) or {}).get("internal"):
             reject(errors, "private_network_not_internal", name)
     if (networks.get("edge") or {}).get("internal"):
@@ -292,8 +439,10 @@ def validate(document: dict[str, Any]) -> list[str]:
     expected_egress = {
         "provider-egress": "saydin-price-ingestion",
         "alert-egress": "alertmanager",
+        "probe-egress": "blackbox-exporter",
         "backup-egress": {"database-backup", "database-wal-archive"},
         "kms-egress": "data-quality-audit",
+        "data-repair-kms-egress": "data-repair",
     }
     for network_name, consumer in expected_egress.items():
         if (networks.get(network_name) or {}).get("internal"):
@@ -308,11 +457,13 @@ def validate(document: dict[str, Any]) -> list[str]:
 
     if "data" in (services.get("caddy", {}).get("networks") or {}):
         reject(errors, "proxy_on_data_network")
-    if set(api.get("networks") or {}) != {"app", "data", "management"}:
+    if set(api.get("networks") or {}) != {
+            "app", "data", "telemetry-ingest", "monitoring-scrape"}:
         reject(errors, "api_network_scope")
     if set((services.get("caddy") or {}).get("networks") or {}) != {"edge", "app"}:
         reject(errors, "proxy_network_scope")
-    if set((services.get("prometheus") or {}).get("networks") or {}) != {"management"}:
+    if set((services.get("prometheus") or {}).get("networks") or {}) != {
+            "monitoring-core", "monitoring-scrape", "blackbox-control", "host-scrape"}:
         reject(errors, "prometheus_network_scope")
     if set((services.get("postgres") or {}).get("networks") or {}) != {"data", "backup-db"}:
         reject(errors, "postgres_network_scope")
@@ -320,6 +471,8 @@ def validate(document: dict[str, Any]) -> list[str]:
         reject(errors, "bootstrap_network_scope")
     if set(dqa.get("networks") or {}) != {"data", "kms-egress"}:
         reject(errors, "dqa_network_scope")
+    if set(repair.get("networks") or {}) != {"data", "data-repair-kms-egress"}:
+        reject(errors, "data_repair_network_scope")
     for backup_service in ("database-backup", "database-wal-archive"):
         service = services.get(backup_service, {})
         if set(service.get("networks") or {}) != {"backup-db", "backup-egress"}:
@@ -328,14 +481,63 @@ def validate(document: dict[str, Any]) -> list[str]:
         role_prefix = environment.get("SAYDIN_DATABASE_ROLE_PREFIX", "")
         if (environment.get("PGHOST") != "postgres-backup"
                 or environment.get("PGSSLMODE", "").lower() != "require"
+                or environment.get("PGCONNECT_TIMEOUT") != "10"
                 or not re.fullmatch(r"saydin_[a-z][a-z0-9_]{2}_[0-9a-f]{24}", role_prefix)
                 or environment.get("PGUSER") != f"{role_prefix}_backup_login_v1"
                 or not re.fullmatch(r"[0-9a-f]{64}", environment.get(
                     "SAYDIN_DATABASE_SYSTEM_IDENTIFIER_SHA256", ""))):
             reject(errors, "backup_connection_boundary_invalid", backup_service)
+
+    wal_environment = environment_map(
+        services.get("database-wal-archive", {}).get("environment"))
+    if wal_environment.get("SAYDIN_BACKUP_WAL_UPLOAD_INTERVAL_SECONDS") != "300":
+        reject(errors, "backup_wal_upload_interval_invalid")
+    wal_minimum_free = wal_environment.get("SAYDIN_BACKUP_WAL_SPOOL_MIN_FREE_BYTES", "")
+    if (not wal_minimum_free.isdigit()
+            or int(wal_minimum_free) < 96 * 1024 * 1024 * 1024):
+        reject(errors, "backup_wal_spool_capacity_invalid")
+
+    base_backup = services.get("database-backup", {})
+    base_environment = environment_map(base_backup.get("environment"))
+    minimum_free = base_environment.get("SAYDIN_BACKUP_BASE_STAGING_MIN_FREE_BYTES", "")
+    if (base_environment.get("SAYDIN_BACKUP_BASE_STAGING_DIR")
+            != "/var/lib/saydin-backup/base-staging"
+            or not minimum_free.isdigit() or int(minimum_free) < 8 * 1024 * 1024 * 1024):
+        reject(errors, "backup_base_staging_environment_invalid")
+    base_mounts = {
+        (str(item.get("source", "")), str(item.get("target", "")), bool(item.get("read_only")))
+        for item in base_backup.get("volumes", []) if isinstance(item, dict)
+    }
+    expected_base_mount = (
+        "backup_base_staging", "/var/lib/saydin-backup/base-staging", False)
+    if expected_base_mount not in base_mounts or any(
+            str(item.get("source", "")) == "backup_base_staging"
+            for service_name, service in services.items() if service_name != "database-backup"
+            for item in service.get("volumes", []) if isinstance(item, dict)):
+        reject(errors, "backup_base_staging_mount_invalid")
+    if not (volumes.get("backup_base_staging") or {}).get("external"):
+        reject(errors, "backup_base_staging_volume_not_external")
+    base_tmpfs = [str(item) for item in base_backup.get("tmpfs", [])]
+    if base_tmpfs != ["/tmp:uid=1001,gid=1001,mode=0700,size=64m"]:
+        reject(errors, "backup_tmpfs_boundary_invalid")
     for name in ("postgres", "redis"):
         if "edge" in (services.get(name, {}).get("networks") or {}):
             reject(errors, "data_service_on_edge", name)
+
+    expected_monitoring_networks = {
+        "saydin-price-ingestion": {"data", "telemetry-ingest", "provider-egress"},
+        "postgres-exporter": {"data", "monitoring-scrape"},
+        "redis-exporter": {"data", "monitoring-scrape"},
+        "otel-collector": {"telemetry-ingest", "monitoring-core"},
+        "tempo": {"monitoring-core"},
+        "loki": {"monitoring-core"},
+        "alertmanager": {"monitoring-core", "alert-egress"},
+        "blackbox-exporter": {"blackbox-control", "probe-egress"},
+        "node-exporter": {"host-scrape"},
+    }
+    for service_name, expected_networks in expected_monitoring_networks.items():
+        if set((services.get(service_name) or {}).get("networks") or {}) != expected_networks:
+            reject(errors, "monitoring_network_scope", service_name)
 
     for name, volume in volumes.items():
         if name in PRIVATE_VOLUMES and not (volume or {}).get("external"):
@@ -344,6 +546,27 @@ def validate(document: dict[str, Any]) -> list[str]:
     for volume_name in ("otel_queue", "tempo_data", "loki_data"):
         if not (volumes.get(volume_name) or {}).get("external"):
             reject(errors, "telemetry_volume_not_external", volume_name)
+
+    repair_mounts = {
+        (str(item.get("source", "")), str(item.get("target", "")), bool(item.get("read_only")))
+        for item in repair.get("volumes", []) if isinstance(item, dict)
+    }
+    expected_repair_mounts = {
+        ("data_repair_secret", "/run/saydin-secrets", True),
+        ("data_repair_input", "/run/repair", True),
+        ("data_repair_receipts", "/var/lib/saydin/repair-receipts", False),
+    }
+    receipt_consumers = {
+        service_name for service_name, service in services.items()
+        for item in service.get("volumes", []) if isinstance(item, dict)
+        if item.get("source") == "data_repair_receipts"
+    }
+    if (repair_mounts != expected_repair_mounts
+            or receipt_consumers != {"data-repair"}
+            or not (volumes.get("data_repair_receipts") or {}).get("external")
+            or [str(item) for item in repair.get("tmpfs", [])]
+            != ["/tmp:uid=1001,gid=1001,mode=0700,size=32m"]):
+        reject(errors, "data_repair_volume_boundary_invalid")
 
     for service_name, service in services.items():
         for mount in service.get("volumes", []):
@@ -373,14 +596,60 @@ def validate(document: dict[str, Any]) -> list[str]:
     }
     for service_name, expected in telemetry_mounts.items():
         service = services.get(service_name, {})
-        if set(service.get("networks") or {}) != {"management"}:
-            reject(errors, "telemetry_network_scope", service_name)
         actual = {
             (str(item.get("source", "")), str(item.get("target", "")), bool(item.get("read_only")))
             for item in service.get("volumes", []) if isinstance(item, dict)
         }
         if (expected[0], expected[1], False) not in actual:
             reject(errors, "telemetry_durable_volume_missing", service_name)
+
+    expected_bind_targets = {
+        "saydin-api": {"/app/geoip"},
+        "caddy": {"/etc/caddy/Caddyfile"},
+        "otel-collector": {"/etc/otelcol/config.yml"},
+        "tempo": {"/etc/tempo/config.yml"},
+        "loki": {"/etc/loki/config.yml"},
+        "prometheus": {"/etc/prometheus/prometheus.yml", "/etc/prometheus/rules"},
+        "blackbox-exporter": {"/etc/blackbox/config.yml"},
+        "node-exporter": {"/host"},
+    }
+    for service_name, service in services.items():
+        binds = [item for item in service.get("volumes", [])
+                 if isinstance(item, dict) and item.get("type") == "bind"]
+        actual_targets = {str(item.get("target", "")) for item in binds}
+        if actual_targets != expected_bind_targets.get(service_name, set()):
+            reject(errors, "bind_mount_target_set_invalid", service_name)
+        for mount in binds:
+            source = str(mount.get("source", ""))
+            target = str(mount.get("target", ""))
+            if mount.get("read_only") is not True:
+                reject(errors, "bind_mount_not_read_only", service_name)
+            if source.endswith("/docker.sock") or target.endswith("/docker.sock"):
+                reject(errors, "docker_socket_mount_forbidden", service_name)
+            if source == "/":
+                propagation = (mount.get("bind") or {}).get("propagation")
+                if service_name != "node-exporter" or target != "/host" or propagation != "rslave":
+                    reject(errors, "host_root_mount_forbidden", service_name)
+    node_command = command_text(services.get("node-exporter", {}))
+    for token in (
+            "--path.rootfs=/host", "--collector.disable-defaults", "--collector.cpu",
+            "--collector.filesystem", "--collector.loadavg", "--collector.meminfo",
+            "--collector.stat", "--collector.textfile", "--collector.time", "--collector.uname"):
+        if token not in node_command:
+            reject(errors, "node_exporter_collector_allowlist_invalid")
+
+    health_contracts = {
+        "caddy": ("health/live",),
+        "prometheus": ("promtool", "check", "healthy"),
+        "alertmanager": ("/-/ready",),
+        "tempo": ("/ready",),
+        "loki": ("/usr/bin/loki", "-version"),
+    }
+    for service_name, required_tokens in health_contracts.items():
+        health_text = " ".join(str(item) for item in
+                               ((services.get(service_name, {}).get("healthcheck") or {}).get("test") or []))
+        if any(token not in health_text for token in required_tokens):
+            reject(errors, "monitoring_healthcheck_invalid", service_name)
 
     return sorted(set(errors))
 

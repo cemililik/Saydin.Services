@@ -29,17 +29,31 @@ filters=(
   ""
   ""
   ""
-  "FullyQualifiedName~MigrationManifestTests|FullyQualifiedName~MigratorOptionsTests|FullyQualifiedName~SqlScriptNormalizerTests"
+  "Category=Unit"
   ""
   ""
   ""
 )
-minimum_tests=(545 145 84 41 76 15 80)
+minimum_tests=(658 182 97 78 98 29 94)
 
 [[ "${#projects[@]}" -eq "${#filters[@]}" && "${#projects[@]}" -eq "${#minimum_tests[@]}" ]] || {
   echo "unit_coverage_failed:internal_project_contract" >&2
   exit 70
 }
+
+mapfile -t discovered_projects < <(
+  find tests tools/calendar-data/tests -type f -name '*Tests.csproj' \
+    ! -name '*IntegrationTests.csproj' -print | LC_ALL=C sort
+)
+mapfile -t configured_projects < <(printf '%s\n' "${projects[@]}" | LC_ALL=C sort)
+if [[ "${#discovered_projects[@]}" -ne "${#configured_projects[@]}" ]] \
+  || ! diff -u <(printf '%s\n' "${discovered_projects[@]}") \
+    <(printf '%s\n' "${configured_projects[@]}") >/dev/null; then
+  echo "unit_coverage_failed:unit_project_inventory_mismatch" >&2
+  diff -u <(printf '%s\n' "${discovered_projects[@]}") \
+    <(printf '%s\n' "${configured_projects[@]}") >&2 || true
+  exit 70
+fi
 
 mkdir -p "$output_root"
 cd "$repo_root"
@@ -66,22 +80,8 @@ for index in "${!projects[@]}"; do
   dotnet test "${test_args[@]}"
   trx="$project_output/$project_name.trx"
   [[ -s "$trx" ]] || { echo "unit_coverage_failed:trx_missing:$project_name" >&2; exit 2; }
-  total_attribute="$(grep -Eo 'total="[0-9]+"' "$trx" | head -1)"
-  passed_attribute="$(grep -Eo 'passed="[0-9]+"' "$trx" | head -1)"
-  [[ "$total_attribute" =~ ^total=\"([0-9]+)\"$ ]] || {
-    echo "unit_coverage_failed:trx_total_invalid:$project_name" >&2
-    exit 2
-  }
-  total="${BASH_REMATCH[1]}"
-  [[ "$passed_attribute" =~ ^passed=\"([0-9]+)\"$ ]] || {
-    echo "unit_coverage_failed:trx_passed_invalid:$project_name" >&2
-    exit 2
-  }
-  passed="${BASH_REMATCH[1]}"
-  [[ "$total" -ge "${minimum_tests[$index]}" && "$passed" -eq "$total" ]] || {
-    echo "unit_coverage_failed:test_ratchet:$project_name:$passed:$total:${minimum_tests[$index]}" >&2
-    exit 2
-  }
+  python3 "$repo_root/.github/scripts/verify-integration-trx.py" "$trx" \
+    --minimum-executed "${minimum_tests[$index]}"
   generated_reports=()
   while IFS= read -r report; do
     generated_reports+=("$report")

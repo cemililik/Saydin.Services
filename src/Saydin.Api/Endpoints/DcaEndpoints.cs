@@ -23,7 +23,7 @@ public static class DcaEndpoints
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
-            .RequireInstallationCredential();
+            .RequireInstallationCredential(requireCalculationNetworkAdmission: true);
 
         return app;
     }
@@ -40,23 +40,27 @@ public static class DcaEndpoints
 
         // API-06: ham periyodik tutar bucket'lanır; exact TL/yüzde sonuçlar
         // yalnız düşük kardinaliteli outcome'a indirgenir.
-        log.WithData(new
-        {
-            request.AssetSymbol,
-            startDate = request.StartDate.ToString("yyyy-MM-dd"),
-            endDate = request.EndDate?.ToString("yyyy-MM-dd"),
-            amountBucket = AmountBucket.Coarse(request.PeriodicAmount),
-            request.Period,
-            request.AmountType,
-            request.IncludeInflation,
-            result = new
-            {
-                result.TotalPurchases,
-                outcome = TelemetryOutcome.From(result.ProfitLossTry),
-                realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
-            }
-        });
+        log.WithData(CreateCalculationActivityData(request, result));
 
         return Results.Ok(result);
     }
+
+    internal static object CreateCalculationActivityData(
+        DcaRequest request,
+        Models.Responses.DcaResponse result) => new
+    {
+        request.AssetSymbol,
+        startDate = request.StartDate.ToString("yyyy-MM-dd"),
+        endDate = request.EndDate?.ToString("yyyy-MM-dd"),
+        amountBucket = AmountBucket.Coarse(request.PeriodicAmount),
+        request.Period,
+        request.AmountType,
+        request.IncludeInflation,
+        result = new
+        {
+            result.TotalPurchases,
+            outcome = TelemetryOutcome.From(result.ProfitLossTry),
+            realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
+        }
+    };
 }

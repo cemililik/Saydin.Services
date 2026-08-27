@@ -57,9 +57,8 @@ internal sealed class MigrationRunner(
     private const string PriceAuthorityVersion = "020_price_authority_expand";
     private const string ApiTrustVersion = "021_api_trust_expand";
     private const string PrincipalRetentionVersion = "022_principal_retention";
-    private const string ScenarioIntegrityChecksum =
-        "8f6f76c12862c5f3696f9241c9e6566e75d048875552656b32b7eca84f65a056";
-
+    private const string ApiSecurityAdmissionVersion = "023_installation_lifecycle_admission";
+    private const string CredentialRehashVersion = "024_installation_credential_rehash";
     private static readonly string[] LegacyVersions =
     [
         "001_initial",
@@ -114,6 +113,10 @@ internal sealed class MigrationRunner(
             migration => migration.Version == ApiTrustVersion);
         var requiresPrincipalRetention = manifest.Migrations.Any(
             migration => migration.Version == PrincipalRetentionVersion);
+        var requiresApiSecurityAdmission = manifest.Migrations.Any(
+            migration => migration.Version == ApiSecurityAdmissionVersion);
+        var requiresCredentialRehash = manifest.Migrations.Any(
+            migration => migration.Version == CredentialRehashVersion);
         var sqlBodies = manifest.Migrations
             .Where(migration => migration.Kind == MigrationKind.Sql)
             .ToDictionary(
@@ -157,7 +160,8 @@ internal sealed class MigrationRunner(
             try
             {
                 var databaseState = await ClassifyAsync(connection, manifest, cancellationToken);
-                if (hasImpactTail && databaseState != DatabaseState.Managed)
+                var deferImpactPreflightToTail = hasImpactTail && databaseState == DatabaseState.Blank;
+                if (hasImpactTail && databaseState != DatabaseState.Managed && !deferImpactPreflightToTail)
                     throw new MigratorRejectedException(
                         "migration_impact_requires_managed_terminal_predecessor");
                 if (options.LegacyPrivilegeCutover)
@@ -189,7 +193,9 @@ internal sealed class MigrationRunner(
                             requirePrivilegeSeparation: false,
                             requirePriceAuthority: false,
                             requireApiTrust: false,
-                            requirePrincipalRetention: false, cancellationToken);
+                            requirePrincipalRetention: false,
+                            requireApiSecurityAdmission: false,
+                            requireCredentialRehash: false, cancellationToken);
                         var legacyOptionalStatus = await ValidateLegacyOptionalStepAsync(
                             connection, cancellationToken);
                         if (options.VerifyOnly)
@@ -226,13 +232,15 @@ internal sealed class MigrationRunner(
                         connection, requiresIngestionLedger, requiresIngestionWriteFence,
                         requiresAuthoritativeCalendars, requiresScenarioIntegrity,
                         requiresPrivilegeSeparation, requiresPriceAuthority, requiresApiTrust,
-                        requiresPrincipalRetention, cancellationToken);
+                        requiresPrincipalRetention, requiresApiSecurityAdmission,
+                        requiresCredentialRehash,
+                        cancellationToken);
                     await VerifyImpactPostconditionsAsync(
                         connection, manifest, impacts, trustedPrefixCount, cancellationToken);
                     return new MigrationRunResult(0, manifest.Migrations.Count, 0);
                 }
 
-                impactPreflightInProgress = hasImpactTail;
+                impactPreflightInProgress = hasImpactTail && !deferImpactPreflightToTail;
                 var pendingImpactMigrations = new List<MigrationDefinition>();
                 foreach (var migration in manifest.Migrations.Skip(trustedPrefixCount))
                 {
@@ -245,15 +253,9 @@ internal sealed class MigrationRunner(
                     throw new MigratorRejectedException("migration_impact_multi_pending_rejected");
                 if (pendingImpactMigrations is [var pendingImpact])
                 {
-                    var snapshot = await MigrationImpactPreflight.VerifyAsync(
-                        connection, options, pendingImpact, impacts.For(pendingImpact.Version),
-                        cancellationToken);
-                    await output.WriteLineAsync(
-                        $"impact preflight: version={pendingImpact.Version}; " +
-                        $"relation_bytes={snapshot.RelationBytes}; compressed_bytes={snapshot.CompressedBytes}; " +
-                        $"free_bytes_after={snapshot.FreeBytesAfter}; " +
-                        $"headroom_bps={snapshot.HeadroomRatioBasisPoints}; " +
-                        $"waiting_locks={snapshot.WaitingLocks}; replicas={snapshot.StreamingReplicas}");
+                    if (!deferImpactPreflightToTail)
+                        await VerifyImpactPreflightAsync(
+                            connection, pendingImpact, impacts.For(pendingImpact.Version), cancellationToken);
                 }
                 impactPreflightInProgress = false;
 
@@ -283,6 +285,12 @@ internal sealed class MigrationRunner(
                     var impact = MigratorMigrationTrustRoot.Checksums.ContainsKey(migration.Version)
                         ? null
                         : impacts.For(migration.Version);
+                    if (impact is not null && deferImpactPreflightToTail)
+                    {
+                        await VerifyImpactPreflightAsync(
+                            connection, migration, impact, cancellationToken);
+                        deferImpactPreflightToTail = false;
+                    }
                     var finalState = migration.Kind switch
                     {
                         MigrationKind.Sql when impact?.Mode == MigrationExecutionMode.ResumableOnline =>
@@ -311,7 +319,9 @@ internal sealed class MigrationRunner(
                     connection, requiresIngestionLedger, requiresIngestionWriteFence,
                     requiresAuthoritativeCalendars, requiresScenarioIntegrity,
                     requiresPrivilegeSeparation, requiresPriceAuthority, requiresApiTrust,
-                    requiresPrincipalRetention, cancellationToken);
+                    requiresPrincipalRetention, requiresApiSecurityAdmission,
+                    requiresCredentialRehash,
+                    cancellationToken);
                 await AssertTargetIdentityAsync(connection, target, cancellationToken);
                 await SetControlStateAsync(connection, "ready", manifest.Checksum, null, cancellationToken);
                 return new MigrationRunResult(
@@ -342,13 +352,36 @@ internal sealed class MigrationRunner(
         }
     }
 
+    private async Task VerifyImpactPreflightAsync(
+        NpgsqlConnection connection,
+        MigrationDefinition migration,
+        MigrationImpactDefinition impact,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await MigrationImpactPreflight.VerifyAsync(
+            connection, options, migration, impact, cancellationToken);
+        await output.WriteLineAsync(
+            $"impact preflight: version={migration.Version}; " +
+            $"relation_bytes={snapshot.RelationBytes}; compressed_bytes={snapshot.CompressedBytes}; " +
+            $"free_bytes_after={snapshot.FreeBytesAfter}; " +
+            $"headroom_bps={snapshot.HeadroomRatioBasisPoints}; " +
+            $"waiting_locks={snapshot.WaitingLocks}; replicas={snapshot.StreamingReplicas}");
+    }
+
     private static async Task<bool> IsPostBootstrapManagedDatabaseAsync(
         NpgsqlConnection connection,
         CancellationToken cancellationToken)
     {
-        return await ScalarAsync<bool>(connection, """
+        var controlsExist = await ScalarAsync<bool>(connection, """
             SELECT pg_catalog.to_regclass('public.saydin_migration_control') IS NOT NULL
                AND pg_catalog.to_regclass('public.saydin_role_contract') IS NOT NULL
+               AND pg_catalog.to_regclass('public.schema_migrations') IS NOT NULL
+            """, cancellationToken);
+        if (!controlsExist) return false;
+        return await ScalarAsync<bool>(connection, """
+            SELECT (SELECT count(*)=1 AND bool_and(state='succeeded')
+                      FROM public.schema_migrations
+                     WHERE version='022_principal_retention')
             """, cancellationToken);
     }
 
@@ -442,7 +475,7 @@ internal sealed class MigrationRunner(
         bool allowBackup,
         CancellationToken cancellationToken)
     {
-        var required = options.Contract.AllRolesForVersion(1)
+        var required = options.Contract.StableRoles
             .Concat(requireBackup
                 ? [options.Contract.BackupLogin(1, options.BackupV1ValidUntilUtc)]
                 : [])
@@ -450,6 +483,10 @@ internal sealed class MigrationRunner(
             .DistinctBy(role => role.Name, StringComparer.Ordinal)
             .ToDictionary(role => role.Name, StringComparer.Ordinal);
         var observed = new Dictionary<string, ManagedRole>(StringComparer.Ordinal);
+        var roleRows = new List<(string Name, bool CanLogin, bool Superuser,
+            bool CreateDatabase, bool CreateRole, bool Inherit, bool Replication,
+            bool BypassRls, int ConnectionLimit, string? ValidUntilUtc,
+            bool ConfigIsNull, string Marker)>();
         await using (var roles = new NpgsqlCommand("""
             SELECT role.rolname, role.rolcanlogin, role.rolsuper, role.rolcreatedb,
                    role.rolcreaterole, role.rolinherit, role.rolreplication,
@@ -468,31 +505,68 @@ internal sealed class MigrationRunner(
             await using var reader = await roles.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var name = reader.GetString(0);
-                var marker = reader.IsDBNull(11) ? string.Empty : reader.GetString(11);
-                ManagedRole? role = required.GetValueOrDefault(name);
-                if (role is null && options.Contract.TryResolveManagedMarker(marker, out var resolved))
-                {
-                    role = !allowBackup && resolved.Purpose == "backup" ? null : resolved;
-                    if (role is not null &&
-                        !string.Equals(role.Name, name, StringComparison.Ordinal))
-                        role = null;
-                }
-                var shouldLogin = role?.Kind == ManagedRoleKind.Login;
-                var expectedConnectionLimit = role?.ConnectionLimit ?? -1;
-                var expectedValidUntil = role?.ValidUntilUtc is null
-                    ? null
-                    : RoleContract.FormatBackupValidUntil(role.ValidUntilUtc.Value);
-                if (role is null || !observed.TryAdd(name, role) || reader.GetBoolean(1) != shouldLogin ||
-                    reader.GetBoolean(2) || reader.GetBoolean(3) || reader.GetBoolean(4) ||
-                    reader.GetBoolean(5) || reader.GetBoolean(6) != role.Replication || reader.GetBoolean(7) ||
-                    reader.GetInt32(8) != expectedConnectionLimit ||
-                    !string.Equals(reader.IsDBNull(9) ? null : reader.GetString(9),
-                        expectedValidUntil, StringComparison.Ordinal) || !reader.GetBoolean(10) ||
-                    !options.Contract.IsExactMarker(role, marker))
-                    throw new MigratorRejectedException("managed_role_contract_mismatch");
+                roleRows.Add((
+                    reader.GetString(0), reader.GetBoolean(1), reader.GetBoolean(2),
+                    reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5),
+                    reader.GetBoolean(6), reader.GetBoolean(7), reader.GetInt32(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9), reader.GetBoolean(10),
+                    reader.IsDBNull(11) ? string.Empty : reader.GetString(11)));
             }
-            if (required.Keys.Any(name => !observed.ContainsKey(name)))
+        }
+
+        var resolvedRows = new List<(ManagedRole Role, bool CanLogin, bool Superuser,
+            bool CreateDatabase, bool CreateRole, bool Inherit, bool Replication,
+            bool BypassRls, int ConnectionLimit, string? ValidUntilUtc,
+            bool ConfigIsNull)>();
+        foreach (var row in roleRows)
+        {
+            ManagedRole? role = required.GetValueOrDefault(row.Name);
+            if (role is null && options.Contract.TryResolveManagedMarker(row.Marker, out var resolved))
+            {
+                role = !allowBackup && resolved.Purpose == "backup" ? null : resolved;
+                if (role is not null &&
+                    !string.Equals(role.Name, row.Name, StringComparison.Ordinal))
+                    role = null;
+            }
+            if (role is null || !observed.TryAdd(row.Name, role)
+                || !options.Contract.IsExactMarker(role, row.Marker))
+                throw new MigratorRejectedException("managed_role_contract_mismatch");
+            resolvedRows.Add((role, row.CanLogin, row.Superuser, row.CreateDatabase,
+                row.CreateRole, row.Inherit, row.Replication, row.BypassRls,
+                row.ConnectionLimit, row.ValidUntilUtc, row.ConfigIsNull));
+        }
+        if (required.Keys.Any(name => !observed.ContainsKey(name)))
+            throw new MigratorRejectedException("managed_role_contract_mismatch");
+
+        var currentVersions = resolvedRows
+            .Where(row => row.Role.Kind == ManagedRoleKind.Login
+                && row.Role.LoginVersion is not null
+                && row.Role.Purpose is not ("backup" or "timescale_scheduler"))
+            .GroupBy(row => row.Role.Purpose, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key,
+                group => group.Max(row => row.Role.LoginVersion!.Value),
+                StringComparer.Ordinal);
+        if (Enum.GetValues<LoginPurpose>().Select(RoleContract.PurposeName)
+            .Any(purpose => !currentVersions.ContainsKey(purpose)))
+            throw new MigratorRejectedException("managed_role_contract_mismatch");
+
+        foreach (var row in resolvedRows)
+        {
+            var role = row.Role;
+            var isDrainingOldLogin = role.LoginVersion is { } version
+                && currentVersions.TryGetValue(role.Purpose, out var currentVersion)
+                && version < currentVersion;
+            var loginStateValid = role.Kind != ManagedRoleKind.Login
+                ? !row.CanLogin
+                : row.CanLogin || isDrainingOldLogin;
+            var expectedValidUntil = role.ValidUntilUtc is null
+                ? null
+                : RoleContract.FormatBackupValidUntil(role.ValidUntilUtc.Value);
+            if (!loginStateValid || row.Superuser || row.CreateDatabase || row.CreateRole
+                || row.Inherit || row.Replication != role.Replication || row.BypassRls
+                || row.ConnectionLimit != role.ConnectionLimit
+                || !string.Equals(row.ValidUntilUtc, expectedValidUntil, StringComparison.Ordinal)
+                || !row.ConfigIsNull)
                 throw new MigratorRejectedException("managed_role_contract_mismatch");
         }
 
@@ -635,6 +709,22 @@ internal sealed class MigrationRunner(
                AND NOT EXISTS (SELECT 1 FROM differences)
             """, cancellationToken, options.Contract.Owner.Name,
             options.Contract.MigratorCapability.Name, options.Contract.AuditCapability.Name);
+
+        await AssertSecurityFingerprintAsync(connection, "pg_parameter_acl_mismatch", """
+            WITH expected(grantee,grantor,privilege_type,is_grantable) AS (
+                SELECT NULL::text,NULL::text,NULL::text,NULL::boolean WHERE false),
+            actual AS (
+                SELECT coalesce(grantee.rolname,'PUBLIC'),grantor.rolname,
+                       acl.privilege_type,acl.is_grantable
+                  FROM pg_catalog.pg_parameter_acl parameter_acl
+                 CROSS JOIN LATERAL pg_catalog.aclexplode(parameter_acl.paracl) acl
+                  LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+                  LEFT JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
+                 WHERE parameter_acl.parname='session_replication_role'),
+            differences AS ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+            SELECT NOT EXISTS (SELECT 1 FROM differences)
+            """, cancellationToken);
     }
 
     private async Task VerifyAllManagedMembershipsAsync(
@@ -1207,6 +1297,8 @@ internal sealed class MigrationRunner(
         bool requirePriceAuthority,
         bool requireApiTrust,
         bool requirePrincipalRetention,
+        bool requireApiSecurityAdmission,
+        bool requireCredentialRehash,
         CancellationToken cancellationToken)
     {
         var checks = new (string Code, string Sql)[]
@@ -1306,7 +1398,7 @@ internal sealed class MigrationRunner(
                 WHERE c.conrelid = 'public.inflation_rates'::regclass AND c.contype = 'p'
                 """),
             ("critical_constraints_missing", """
-                SELECT COUNT(*) = 13 AND bool_and(convalidated)
+                SELECT COUNT(*) = __EXPECTED_CONSTRAINT_COUNT__ AND bool_and(convalidated)
                 FROM pg_constraint
                 WHERE connamespace='public'::regnamespace AND conname IN (
                     'chk_saved_scenarios_unit','chk_saved_scenarios_type','chk_users_tier',
@@ -1314,7 +1406,12 @@ internal sealed class MigrationRunner(
                     'chk_inflation_rates_source','chk_activity_data_size','fk_price_points_asset',
                     'fk_ingestion_jobs_asset','fk_saved_scenarios_user','fk_saved_scenarios_asset',
                     'fk_market_holidays_asset')
-                """),
+                  AND (__REQUIRE_ACTION_CONSTRAINT__ OR conname<>'chk_activity_action')
+                """.Replace("__EXPECTED_CONSTRAINT_COUNT__",
+                    requireApiSecurityAdmission ? "12" : "13",
+                    StringComparison.Ordinal).Replace("__REQUIRE_ACTION_CONSTRAINT__",
+                    requireApiSecurityAdmission ? "FALSE" : "TRUE",
+                    StringComparison.Ordinal)),
             ("phase2_indexes_missing", """
                 SELECT COUNT(*) = 3
                 FROM pg_indexes
@@ -1466,7 +1563,7 @@ internal sealed class MigrationRunner(
                     ('activate_market_calendar_release','9c7680d37e98ae75475ccac4afc96798f958cf0ea897c7f2ded6fdb19879c9c9'),
                     ('enforce_active_market_calendar_release','5bade313804c0e597b9af28a6edb1143600eaefd5345cb347fe9daedd5f4ee6f'),
                     ('enforce_asset_market_calendar_source','32086cca3e0712a9fac701f54b7801ef43a1bfb2574d1fdcb03485680cbbe2f4'),
-                    ('enforce_ingestion_window_calendar_release','757f159bc79d46513b43dc58dff2127d097128ac1ba0d22e470a1cfc933fcc1a'),
+                    ('enforce_ingestion_window_calendar_release','ae2468290e4f09338e9120f25bafa65e3575b1f6dc941aa65e4867f733de428a'),
                     ('enforce_market_calendar_release_assembly','7a00eb9a7c0a8e266ff7f10543efa757924dec410fe573eac728a38adbe679db'),
                     ('provision_asset_market_calendar','32c07aca82ae50c6b3638015df2792bd421a4aa3e09f85aea9089dd0b3ec7392'),
                     ('seal_market_calendar_release','d41d5fb586594ec56de83c6a85e71108a292e8d1adb23863dae4b9de137a3e4c'),
@@ -1556,19 +1653,24 @@ internal sealed class MigrationRunner(
         }
         if (requirePrivilegeSeparation)
             await VerifyPrivilegeSeparationAsync(
-                connection, requirePriceAuthority, requireApiTrust, cancellationToken);
+                connection, requirePriceAuthority, requireApiTrust,
+                requireCredentialRehash, cancellationToken);
         if (requirePriceAuthority)
             await VerifyPriceAuthorityAsync(connection, cancellationToken);
         if (requireApiTrust)
-            await VerifyApiTrustAsync(connection, cancellationToken);
+            await VerifyApiTrustAsync(connection, requireCredentialRehash, cancellationToken);
         if (requirePrincipalRetention)
-            await VerifyPrincipalRetentionAsync(connection, cancellationToken);
+            await VerifyPrincipalRetentionAsync(
+                connection, requireApiSecurityAdmission, cancellationToken);
+        if (requireApiSecurityAdmission)
+            await VerifyApiSecurityAdmissionAsync(connection, cancellationToken);
     }
 
     private async Task VerifyPrivilegeSeparationAsync(
         NpgsqlConnection connection,
         bool requirePriceAuthority,
         bool requireApiTrust,
+        bool requireCredentialRehash,
         CancellationToken cancellationToken)
     {
         await AssertSecurityFingerprintAsync(connection, "role_contract_singleton_mismatch", """
@@ -1828,10 +1930,13 @@ internal sealed class MigrationRunner(
                 ('begin_installation_rotation(bytea,smallint,uuid,uuid,bytea,smallint)'),
                 ('commit_installation_rotation(uuid,bytea,smallint)'),
                 ('revoke_installation(bytea,smallint)'),('get_asset_catalog_state()')),
+            credential_rehash_functions(signature) AS (VALUES
+                ('resolve_installation_and_rehash(bytea,smallint,bytea,smallint)')),
             functions(signature) AS (
                 SELECT signature FROM base_functions
                 UNION ALL SELECT signature FROM authority_functions WHERE $5
-                UNION ALL SELECT signature FROM api_trust_functions WHERE $6),
+                UNION ALL SELECT signature FROM api_trust_functions WHERE $6
+                UNION ALL SELECT signature FROM credential_rehash_functions WHERE $8),
             base_expected(signature,grantee,grantor,privilege_type,is_grantable) AS (VALUES
                 ('activate_market_calendar_release(text,uuid,uuid)',$2,$1,'EXECUTE',false),
                 ('seal_market_calendar_release(uuid)',$2,$1,'EXECUTE',false),
@@ -1846,16 +1951,21 @@ internal sealed class MigrationRunner(
                 ('commit_installation_rotation(uuid,bytea,smallint)',$7,$1,'EXECUTE',false),
                 ('revoke_installation(bytea,smallint)',$7,$1,'EXECUTE',false),
                 ('get_asset_catalog_state()',$7,$1,'EXECUTE',false)),
+            credential_rehash_expected(
+                signature,grantee,grantor,privilege_type,is_grantable) AS (VALUES
+                ('resolve_installation_and_rehash(bytea,smallint,bytea,smallint)',
+                 $7,$1,'EXECUTE',false)),
             expected AS (
                 SELECT * FROM base_expected
                 UNION ALL SELECT * FROM authority_expected WHERE $5
-                UNION ALL SELECT * FROM api_trust_expected WHERE $6),
+                UNION ALL SELECT * FROM api_trust_expected WHERE $6
+                UNION ALL SELECT * FROM credential_rehash_expected WHERE $8),
             actual AS (
                 SELECT functions.signature,grantee.rolname,grantor.rolname,
                        acl.privilege_type,acl.is_grantable
                   FROM functions
                   JOIN pg_catalog.pg_proc function
-                    ON function.oid=('public.'||functions.signature)::pg_catalog.regprocedure
+                    ON function.oid=pg_catalog.to_regprocedure('public.'||functions.signature)
                   CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(function.proacl,
                       pg_catalog.acldefault('f',function.proowner))) acl
                   LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
@@ -1867,7 +1977,7 @@ internal sealed class MigrationRunner(
             """, cancellationToken, options.Contract.Owner.Name,
             options.Contract.CalendarImporterCapability.Name, options.Contract.AuditCapability.Name,
             options.Contract.IngestionCapability.Name, requirePriceAuthority, requireApiTrust,
-            options.Contract.ApiCapability.Name);
+            options.Contract.ApiCapability.Name, requireCredentialRehash);
 
         await AssertSecurityFingerprintAsync(connection, "owner_default_acl_mismatch", """
             WITH defaults AS (
@@ -1891,7 +2001,7 @@ internal sealed class MigrationRunner(
                 ('activate_market_calendar_release','9c7680d37e98ae75475ccac4afc96798f958cf0ea897c7f2ded6fdb19879c9c9',true,$2),
                 ('enforce_active_market_calendar_release','5bade313804c0e597b9af28a6edb1143600eaefd5345cb347fe9daedd5f4ee6f',false,NULL),
                 ('enforce_asset_market_calendar_source','32086cca3e0712a9fac701f54b7801ef43a1bfb2574d1fdcb03485680cbbe2f4',false,NULL),
-                ('enforce_ingestion_window_calendar_release','757f159bc79d46513b43dc58dff2127d097128ac1ba0d22e470a1cfc933fcc1a',false,NULL),
+                ('enforce_ingestion_window_calendar_release','ae2468290e4f09338e9120f25bafa65e3575b1f6dc941aa65e4867f733de428a',false,NULL),
                 ('enforce_market_calendar_release_assembly','7a00eb9a7c0a8e266ff7f10543efa757924dec410fe573eac728a38adbe679db',true,NULL),
                 ('provision_asset_market_calendar','32c07aca82ae50c6b3638015df2792bd421a4aa3e09f85aea9089dd0b3ec7392',false,NULL),
                 ('seal_market_calendar_release','d41d5fb586594ec56de83c6a85e71108a292e8d1adb23863dae4b9de137a3e4c',true,$2),
@@ -2295,6 +2405,7 @@ internal sealed class MigrationRunner(
 
     private async Task VerifyApiTrustAsync(
         NpgsqlConnection connection,
+        bool requireCredentialRehash,
         CancellationToken cancellationToken)
     {
         await AssertSecurityFingerprintAsync(connection, "api_trust_column_mismatch", """
@@ -2438,7 +2549,8 @@ internal sealed class MigrationRunner(
             """, cancellationToken);
 
         await AssertSecurityFingerprintAsync(connection, "api_trust_function_security_mismatch", """
-            WITH expected(name,identity_arguments,result_type,language,volatility,body_sha256) AS (VALUES
+            WITH base_expected(
+              name,identity_arguments,result_type,language,volatility,body_sha256) AS (VALUES
                 ('compute_asset_catalog_sha256','','bytea','sql','s','23d8e0f7e620d3881a279b46b1b61347b4ff54cd20f259c575c26b56f7787efb'),
                 ('refresh_asset_catalog_state','','trigger','plpgsql','v','ab2a18e6003ef4cdffa109309bf9e43e0b05bd2184fd2e6198e92bf399c5fb1b'),
                 ('register_installation','p_principal_id uuid, p_credential_id uuid, p_secret_hash bytea, p_key_version smallint',
@@ -2457,8 +2569,18 @@ internal sealed class MigrationRunner(
                     'TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)',
                     'plpgsql','v','23632c1b5140a65b8c9aec4850bdc5612da2ff59eca3456a49e004dbf81c7380'),
                 ('get_asset_catalog_state','','TABLE(revision bigint, catalog_sha256 bytea, updated_at timestamp with time zone)',
-                    'sql','s','1332bd64e33389696ebed64ec1ca9fd96464fdc28693a3efbae0c6068f949c29'))
-            SELECT count(*)=8 AND count(function.oid)=8 AND bool_and(
+                    'sql','s','1332bd64e33389696ebed64ec1ca9fd96464fdc28693a3efbae0c6068f949c29')),
+            credential_rehash_expected(
+              name,identity_arguments,result_type,language,volatility,body_sha256) AS (VALUES
+                ('resolve_installation_and_rehash','p_secret_hash bytea, p_key_version smallint, p_active_secret_hash bytea, p_active_key_version smallint',
+                    'TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)',
+                    'plpgsql','v','b009448de892a425e191e649fbd942b6dd77777fa68d9b339b8010cadcbb3de2')),
+            expected AS (
+              SELECT * FROM base_expected
+              UNION ALL SELECT * FROM credential_rehash_expected WHERE $2)
+            SELECT count(*)=8 + CASE WHEN $2 THEN 1 ELSE 0 END
+               AND count(function.oid)=8 + CASE WHEN $2 THEN 1 ELSE 0 END
+               AND bool_and(
                        pg_catalog.pg_get_userbyid(function.proowner)=$1
                        AND pg_catalog.pg_get_function_identity_arguments(function.oid)=expected.identity_arguments
                        AND pg_catalog.pg_get_function_result(function.oid)=expected.result_type
@@ -2475,7 +2597,7 @@ internal sealed class MigrationRunner(
                 ON function.pronamespace='public'::pg_catalog.regnamespace
                AND function.proname=expected.name
               LEFT JOIN pg_catalog.pg_language language ON language.oid=function.prolang
-            """, cancellationToken, options.Contract.Owner.Name);
+            """, cancellationToken, options.Contract.Owner.Name, requireCredentialRehash);
 
         await AssertSecurityFingerprintAsync(connection, "asset_catalog_trigger_mismatch", """
             WITH expected(trigger_name,trigger_type) AS (VALUES
@@ -2537,6 +2659,7 @@ internal sealed class MigrationRunner(
 
     private async Task VerifyPrincipalRetentionAsync(
         NpgsqlConnection connection,
+        bool requireApiSecurityAdmission,
         CancellationToken cancellationToken)
     {
         await AssertSecurityFingerprintAsync(connection, "principal_retention_function_mismatch", """
@@ -2652,6 +2775,12 @@ internal sealed class MigrationRunner(
                  WHERE source.schema_name='public' AND source.table_name='activity_logs'),
             expected_acl(grantee,grantor,privilege_type,is_grantable) AS (VALUES
                 ($1,$2,'INSERT',false),($2,$2,'SELECT',false),($2,$2,'UPDATE',false)),
+            expected_relation_acl AS (
+                SELECT relation_set.oid,expected_acl.*
+                  FROM relation_set CROSS JOIN expected_acl
+                UNION ALL
+                SELECT relation_set.oid,$2,$2,'TRIGGER',false
+                  FROM relation_set WHERE $3),
             actual_acl AS (
                 SELECT relation.oid,coalesce(grantee.rolname,'PUBLIC'),grantor.rolname,
                        acl.privilege_type,acl.is_grantable
@@ -2661,13 +2790,10 @@ internal sealed class MigrationRunner(
                   LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
                   LEFT JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor),
             acl_differences AS (
-                (SELECT relation_set.oid,expected_acl.*
-                   FROM relation_set CROSS JOIN expected_acl
-                 EXCEPT ALL SELECT * FROM actual_acl)
+                (SELECT * FROM expected_relation_acl EXCEPT ALL SELECT * FROM actual_acl)
                 UNION ALL
                 (SELECT * FROM actual_acl EXCEPT ALL
-                 SELECT relation_set.oid,expected_acl.*
-                   FROM relation_set CROSS JOIN expected_acl))
+                 SELECT * FROM expected_relation_acl))
             SELECT (SELECT count(*)>0 AND count(*)=count(relation.oid) AND bool_and(
                                pg_catalog.pg_get_userbyid(relation.relowner)=$2
                                AND NOT relation.relrowsecurity
@@ -2682,7 +2808,7 @@ internal sealed class MigrationRunner(
                     CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) acl
                     WHERE attribute.attnum>0 AND NOT attribute.attisdropped)
             """, cancellationToken, options.Contract.ApiCapability.Name,
-            options.Contract.TimescaleScheduler.Name);
+            options.Contract.TimescaleScheduler.Name, requireApiSecurityAdmission);
 
         await AssertSecurityFingerprintAsync(connection, "principal_retention_transition_residual", """
             SELECT pg_catalog.to_regnamespace('saydin_principal_retention_control') IS NULL
@@ -2700,6 +2826,121 @@ internal sealed class MigrationRunner(
                        AND job.proc_name='policy_compression')
             """, cancellationToken, options.Contract.TimescaleScheduler.Name,
             options.Contract.ApiCapability.Name);
+    }
+
+    private async Task VerifyApiSecurityAdmissionAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await AssertSecurityFingerprintAsync(
+            connection, "api_security_activity_trigger_mismatch", """
+            SELECT NOT EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_constraint contract
+                        WHERE contract.conrelid='public.activity_logs'::pg_catalog.regclass
+                          AND contract.conname='chk_activity_action')
+               AND (SELECT count(*)=1 AND bool_and(
+                           trigger.tgenabled='O' AND trigger.tgtype=23
+                           AND trigger.tgattr::text=attribute.attnum::text
+                           AND function.proname='enforce_activity_action_allowlist'
+                           AND function.pronamespace='public'::pg_catalog.regnamespace
+                           AND pg_catalog.pg_get_userbyid(function.proowner)=$1
+                           AND pg_catalog.pg_get_userbyid(relation.relowner)=$1)
+                      FROM pg_catalog.pg_trigger trigger
+                      JOIN pg_catalog.pg_proc function ON function.oid=trigger.tgfoid
+                      JOIN pg_catalog.pg_class relation ON relation.oid=trigger.tgrelid
+                      JOIN pg_catalog.pg_attribute attribute
+                        ON attribute.attrelid=trigger.tgrelid AND attribute.attname='action'
+                       AND attribute.attnum>0 AND NOT attribute.attisdropped
+                     WHERE trigger.tgrelid='public.activity_logs'::pg_catalog.regclass
+                       AND trigger.tgname='trg_activity_action_allowlist'
+                       AND NOT trigger.tgisinternal)
+            """, cancellationToken, options.Contract.TimescaleScheduler.Name);
+
+        await AssertSecurityFingerprintAsync(
+            connection, "api_security_function_mismatch", """
+            WITH expected(name,identity_arguments,result_type,strict,language,volatility,
+                          parallel,security_definer,body_sha256) AS (VALUES
+                ('installation_verifier_matches','p_expected bytea, p_candidate bytea',
+                 'boolean',true,'plpgsql','i','s',false,
+                 '0fd89e2c59f51af516bc0a028699f24e454dba6c9b37c2e1dd0ab23e82fa1c09'),
+                ('resolve_installation_rotation_commit',
+                 'p_rotation_id uuid, p_secret_hash bytea, p_key_version smallint',
+                 'TABLE(principal_id uuid, credential_id uuid, generation integer, tier character varying, principal_status character varying, credential_state character varying)',
+                 false,'sql','s','u',true,
+                 '00da525d7b48949f14d10ffee3b21989d9cbf6f47d201b59043c83b13c8386b1'))
+            SELECT count(*)=2 AND count(function.oid)=2 AND bool_and(
+                       pg_catalog.pg_get_userbyid(function.proowner)=$1
+                       AND pg_catalog.pg_get_function_identity_arguments(function.oid)=
+                           expected.identity_arguments
+                       AND pg_catalog.pg_get_function_result(function.oid)=expected.result_type
+                       AND function.proisstrict=expected.strict AND function.prokind='f'
+                       AND language.lanname=expected.language
+                       AND function.provolatile=expected.volatility
+                       AND function.proparallel=expected.parallel
+                       AND NOT function.proleakproof
+                       AND function.prosecdef=expected.security_definer
+                       AND function.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                       AND pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+                           function.prosrc,'UTF8')),'hex')=expected.body_sha256)
+              FROM expected
+              LEFT JOIN pg_catalog.pg_proc function
+                ON function.pronamespace='public'::pg_catalog.regnamespace
+               AND function.proname=expected.name
+              LEFT JOIN pg_catalog.pg_language language ON language.oid=function.prolang
+            """, cancellationToken, options.Contract.Owner.Name);
+
+        await AssertSecurityFingerprintAsync(
+            connection, "api_security_activity_function_mismatch", """
+            SELECT count(*)=1 AND bool_and(
+                       pg_catalog.pg_get_userbyid(function.proowner)=$1
+                       AND pg_catalog.pg_get_function_identity_arguments(function.oid)=''
+                       AND pg_catalog.pg_get_function_result(function.oid)='trigger'
+                       AND NOT function.proisstrict AND function.prokind='f'
+                       AND language.lanname='plpgsql' AND function.provolatile='v'
+                       AND function.proparallel='u' AND NOT function.proleakproof
+                       AND NOT function.prosecdef
+                       AND function.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                       AND pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+                           function.prosrc,'UTF8')),'hex')=
+                           'e3bef3c7edc15170f84e99e69683b0ac32e87e023e3416eac2cbafbbd70d3fcc')
+              FROM pg_catalog.pg_proc function
+              JOIN pg_catalog.pg_language language ON language.oid=function.prolang
+             WHERE function.pronamespace='public'::pg_catalog.regnamespace
+               AND function.proname='enforce_activity_action_allowlist'
+            """, cancellationToken, options.Contract.TimescaleScheduler.Name);
+
+        await AssertSecurityFingerprintAsync(
+            connection, "api_security_function_acl_mismatch", """
+            WITH expected(function_name,grantor,grantee,privilege_type,is_grantable) AS (VALUES
+                ('resolve_installation_rotation_commit',$1::text,$2::text,'EXECUTE',false)),
+            functions AS (
+                SELECT function.oid,function.proname,function.proowner,function.proacl
+                  FROM pg_catalog.pg_proc function
+                 WHERE function.pronamespace='public'::pg_catalog.regnamespace
+                   AND function.proname IN ('installation_verifier_matches',
+                                            'resolve_installation_rotation_commit',
+                                            'enforce_activity_action_allowlist')),
+            actual AS (
+                SELECT functions.proname,grantor.rolname,grantee.rolname,
+                       acl.privilege_type,acl.is_grantable
+                  FROM functions
+                  CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+                      functions.proacl,pg_catalog.acldefault('f',functions.proowner))) acl
+                  LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+                  LEFT JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
+                 WHERE acl.grantee<>functions.proowner),
+            differences AS ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+            SELECT (SELECT count(*) FROM functions)=3
+               AND NOT EXISTS (
+                   SELECT 1 FROM functions
+                    WHERE pg_catalog.pg_get_userbyid(proowner)<>
+                          CASE WHEN proname='enforce_activity_action_allowlist'
+                               THEN $3 ELSE $1 END)
+               AND NOT EXISTS (SELECT 1 FROM differences)
+            """, cancellationToken, options.Contract.Owner.Name,
+            options.Contract.ApiCapability.Name,
+            options.Contract.TimescaleScheduler.Name);
     }
 
     private async Task AcquireLockAsync(
@@ -2939,43 +3180,6 @@ internal sealed class MigrationRunner(
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task ApplyExporterRoleBodyAsync(
-        NpgsqlConnection connection,
-        NpgsqlTransaction transaction,
-        string password,
-        CancellationToken cancellationToken)
-    {
-        if (!await ScalarAsync<bool>(connection,
-                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='saydin_exporter')",
-                transaction, cancellationToken))
-        {
-            await using var create = new NpgsqlCommand(
-                "CREATE ROLE saydin_exporter LOGIN", connection, transaction);
-            await create.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        string passwordCommand;
-        await using (var quote = new NpgsqlCommand(
-            "SELECT format('ALTER ROLE saydin_exporter WITH LOGIN PASSWORD %L', $1)",
-            connection, transaction))
-        {
-            quote.Parameters.AddWithValue(password);
-            passwordCommand = (string)(await quote.ExecuteScalarAsync(cancellationToken) ??
-                throw new MigratorRejectedException("exporter_password_quote_failed"));
-        }
-        await using (var alter = new NpgsqlCommand(passwordCommand, connection, transaction))
-            await alter.ExecuteNonQueryAsync(cancellationToken);
-        await using (var grant = new NpgsqlCommand(
-            "GRANT pg_monitor TO saydin_exporter", connection, transaction))
-            await grant.ExecuteNonQueryAsync(cancellationToken);
-
-        if (await ReadExporterRoleStatusAsync(connection, transaction, cancellationToken) !=
-            ExporterRoleStatus.Complete)
-        {
-            throw new MigratorRejectedException("exporter_role_postcondition_failed");
-        }
-    }
-
     private static async Task<ExporterRoleStatus> ValidateLegacyOptionalStepAsync(
         NpgsqlConnection connection,
         CancellationToken cancellationToken)
@@ -3154,31 +3358,6 @@ internal sealed class MigrationRunner(
     {
         if (!string.Equals(row.Checksum, migration.Checksum, StringComparison.Ordinal))
             throw new MigratorRejectedException("migration_checksum_mismatch", migration.Version);
-    }
-
-    internal static void ValidateHistoricalPrefix(MigrationManifest manifest)
-    {
-        if (manifest.Migrations.Count != MigratorMigrationTrustRoot.Versions.Count ||
-            !manifest.Migrations.Take(MigratorMigrationTrustRoot.Versions.Count)
-                .Select(migration => migration.Version)
-                .SequenceEqual(MigratorMigrationTrustRoot.Versions, StringComparer.Ordinal))
-        {
-            throw new MigratorRejectedException("historical_manifest_mismatch");
-        }
-
-        foreach (var migration in manifest.Migrations.Take(MigratorMigrationTrustRoot.Versions.Count))
-        {
-            if (!MigratorMigrationTrustRoot.Checksums.TryGetValue(migration.Version, out var expected) ||
-                !string.Equals(migration.Checksum, expected, StringComparison.Ordinal))
-            {
-                throw new MigratorRejectedException(
-                    LegacyVersions.Contains(migration.Version, StringComparer.Ordinal)
-                        ? "historical_checksum_mismatch"
-                        : "pinned_checksum_mismatch",
-                    migration.Version);
-            }
-        }
-
     }
 
     internal static void ValidateTrustedPrefix(MigrationManifest manifest)

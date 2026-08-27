@@ -1,8 +1,5 @@
-using System.Diagnostics;
-using System.Globalization;
 using System.Net;
-using System.Net.Mime;
-using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 
 namespace Saydin.Api.Security;
@@ -10,7 +7,8 @@ namespace Saydin.Api.Security;
 public sealed class DistributedSecurityLimiterMiddleware(
     IDistributedSecurityLimiter limiter,
     IOptions<DistributedSecurityLimiterOptions> options,
-    ILogger<DistributedSecurityLimiterMiddleware> logger)
+    ILogger<DistributedSecurityLimiterMiddleware> logger,
+    IStringLocalizer<ErrorMessages> localizer)
     : IMiddleware
 {
     public async Task InvokeAsync(HttpContext context, RequestDelegate next)
@@ -24,17 +22,22 @@ public sealed class DistributedSecurityLimiterMiddleware(
         // This middleware must run after UseForwardedHeaders. A trusted, valid
         // X-Forwarded-For value is consumed there. A remaining value is therefore
         // untrusted/malformed (or proves unsafe ordering) and must fail closed.
-        var hasUnconsumedForwardedFor =
-            !string.IsNullOrWhiteSpace(context.Request.Headers["X-Forwarded-For"].ToString());
-        var address = Normalize(context.Connection.RemoteIpAddress);
-        if (address is null || IPAddress.Any.Equals(address) || IPAddress.IPv6Any.Equals(address) ||
-            hasUnconsumedForwardedFor)
+        if (!TryGetTrustedClientAddress(context, out var address))
         {
-            await WriteUnavailableAsync(context);
+            SecurityAdmissionTelemetry.Record(
+                SecurityAdmissionTelemetry.NetworkBucket,
+                "unavailable",
+                SecurityAdmissionTelemetry.ClientAddressUntrustedReason);
+            logger.LogWarning("Security admission rejected: {Code}",
+                "security_client_address_untrusted");
+            await SecurityAdmissionProblem.WriteAsync(
+                context, localizer,
+                SecurityLimiterDecision.UnavailableFor(SecurityLimiterReason.InvalidSubject));
             return;
         }
 
         var decision = await limiter.TryAcquireNetworkAsync(address, context.RequestAborted);
+        SecurityAdmissionTelemetry.Record(SecurityAdmissionTelemetry.NetworkBucket, decision);
         if (decision.Outcome == SecurityLimiterOutcome.Allowed)
         {
             await next(context);
@@ -43,55 +46,39 @@ public sealed class DistributedSecurityLimiterMiddleware(
 
         if (decision.Outcome == SecurityLimiterOutcome.Limited)
         {
-            var retrySeconds = Math.Max(1, (int)Math.Ceiling(decision.RetryAfter.TotalSeconds));
-            context.Response.Headers.RetryAfter = retrySeconds.ToString(CultureInfo.InvariantCulture);
-            await WriteProblemAsync(
-                context,
-                StatusCodes.Status429TooManyRequests,
-                "security_rate_limited",
-                "https://saydin.app/errors/security-rate-limited",
-                "Too many requests.");
+            logger.LogWarning("Security admission limited: {Code}",
+                "security_rate_limit_exceeded");
+            await SecurityAdmissionProblem.WriteAsync(context, localizer, decision);
             return;
         }
 
-        await WriteUnavailableAsync(context);
+        logger.LogWarning("Security admission unavailable: {Code} {Reason}",
+            "security_limiter_unavailable", StableReason(decision.Reason));
+        await SecurityAdmissionProblem.WriteAsync(context, localizer, decision);
     }
 
-    private async Task WriteUnavailableAsync(HttpContext context)
-    {
-        // Stable-only telemetry: never attach the address, principal, Redis key or exception.
-        logger.LogWarning("Distributed security limiter unavailable: {Code}",
-            "security_limiter_unavailable");
-        await WriteProblemAsync(
-            context,
-            StatusCodes.Status503ServiceUnavailable,
-            "security_limiter_unavailable",
-            "https://saydin.app/errors/security-limiter-unavailable",
-            "Request admission is temporarily unavailable.");
-    }
-
-    private static async Task WriteProblemAsync(
+    internal static bool TryGetTrustedClientAddress(
         HttpContext context,
-        int status,
-        string code,
-        string type,
-        string title)
+        out IPAddress address)
     {
-        context.Response.StatusCode = status;
-        await context.Response.WriteAsJsonAsync(new ProblemDetails
-        {
-            Type = type,
-            Title = title,
-            Status = status,
-            Extensions =
-            {
-                ["code"] = code,
-                ["traceId"] = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
-            },
-        }, options: null, contentType: MediaTypeNames.Application.ProblemJson,
-            context.RequestAborted);
+        address = Normalize(context.Connection.RemoteIpAddress) ?? IPAddress.None;
+        return !string.IsNullOrWhiteSpace(address.ToString())
+               && !IPAddress.Any.Equals(address)
+               && !IPAddress.IPv6Any.Equals(address)
+               && !IPAddress.None.Equals(address)
+               && !IPAddress.IPv6None.Equals(address)
+               && string.IsNullOrWhiteSpace(
+                   context.Request.Headers["X-Forwarded-For"].ToString());
     }
 
     private static IPAddress? Normalize(IPAddress? address) =>
         address?.IsIPv4MappedToIPv6 == true ? address.MapToIPv4() : address;
+
+    private static string StableReason(SecurityLimiterReason reason) => reason switch
+    {
+        SecurityLimiterReason.InvalidSubject => "invalid_subject",
+        SecurityLimiterReason.RedisFailure => "redis_failure",
+        SecurityLimiterReason.MalformedReply => "malformed_reply",
+        _ => "unexpected",
+    };
 }

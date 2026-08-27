@@ -5,6 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+User=saydin-calendar
+Group=saydin-calendar
+SupplementaryGroups=docker
 EnvironmentFile=/etc/saydin/calendar-acquisition.env
 ExecStart=/opt/saydin/calendar/run-acquisition.sh %i
 TimeoutStartSec=20min
@@ -13,7 +16,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/saydin/calendar /var/lock
+ReadWritePaths=/var/lib/saydin/calendar
 
 [Install]
 WantedBy=multi-user.target

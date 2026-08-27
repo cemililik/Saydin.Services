@@ -47,6 +47,9 @@ public sealed class PriceRepositoryAuthorityIntegrationTests(DatabaseFixture db)
             "legacy, wrong-provider, and short-hash rows cannot win");
         actual[^1]!.PriceDate.Should().Be(actual[1]!.PriceDate,
             "duplicate request positions must be preserved");
+        actual.Should().OnlyContain(point => point == null
+            || (point.HasSourceRaw && point.SourceRaw == null),
+            "API bulk reads must carry only the raw-authority presence bit");
         interceptor.ReaderCommandCount.Should().Be(1);
     }
 
@@ -240,10 +243,13 @@ public sealed class PriceRepositoryAuthorityIntegrationTests(DatabaseFixture db)
         (await repository.GetPriceAsync(
             scenario.Symbol, AuthorityObservationScenario.LegacyExactPriceDate,
             CancellationToken.None)).Should().BeNull();
-        (await repository.GetPriceAsync(
+        var exact = await repository.GetPriceAsync(
             scenario.Symbol, AuthorityObservationScenario.FirstFinalPriceDate,
-            CancellationToken.None)).Should().Match<PricePoint>(point =>
-                point.Close == 11m && point.ObservationSha256!.Length == 32);
+            CancellationToken.None);
+        exact.Should().Match<PricePoint>(point =>
+            point.Close == 11m && point.ObservationSha256!.Length == 32);
+        exact!.HasSourceRaw.Should().BeTrue();
+        exact.SourceRaw.Should().BeNull();
         (await repository.GetPriceAsync(
             scenario.Symbol, AuthorityObservationScenario.WrongSourcePriceDate,
             CancellationToken.None)).Should().BeNull("provider_source must equal the asset source");
@@ -268,6 +274,7 @@ public sealed class PriceRepositoryAuthorityIntegrationTests(DatabaseFixture db)
             AuthorityObservationScenario.FirstFinalPriceDate,
             AuthorityObservationScenario.SecondFinalPriceDate,
             AuthorityObservationScenario.LastFinalPriceDate);
+        range.Should().OnlyContain(point => point.HasSourceRaw && point.SourceRaw == null);
 
         var dateRange = await repository.GetAllActiveAssetsWithDateRangesAsync(CancellationToken.None);
         var assetRange = dateRange.Single(row => row.Asset.Id == scenario.AssetId);

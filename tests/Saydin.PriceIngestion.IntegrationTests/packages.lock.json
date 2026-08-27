@@ -518,11 +518,6 @@
           "OpenTelemetry.Api": "1.15.3"
         }
       },
-      "PdfPig": {
-        "type": "Transitive",
-        "resolved": "0.1.15",
-        "contentHash": "Bf0NO4o2ZSVnemMyj21KDU1sfSgmamFC0pD4aAv19CDNXQsoO1Z6O99gNqpiK/XWWZ5d5i7JkQoT7PUBxEPz5g=="
-      },
       "Polly.Core": {
         "type": "Transitive",
         "resolved": "8.4.2",
@@ -804,6 +799,12 @@
         "dependencies": {
           "OpenTelemetry.Api": "[1.15.3, 2.0.0)"
         }
+      },
+      "PdfPig": {
+        "type": "CentralTransitive",
+        "requested": "[0.1.15, )",
+        "resolved": "0.1.15",
+        "contentHash": "Bf0NO4o2ZSVnemMyj21KDU1sfSgmamFC0pD4aAv19CDNXQsoO1Z6O99gNqpiK/XWWZ5d5i7JkQoT7PUBxEPz5g=="
       },
       "Serilog.Enrichers.Environment": {
         "type": "CentralTransitive",

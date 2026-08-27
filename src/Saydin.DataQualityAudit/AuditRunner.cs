@@ -87,14 +87,14 @@ internal sealed class AuditRunner(
         }
 
         await AuditConstraintDriftAndDuplicatesAsync(connection, transaction, cancellationToken);
-        await AuditFetchLedgerAsync(connection, transaction, cancellationToken);
+        await AuditFetchLedgerAsync(connection, transaction, laneWindows, cancellationToken);
         await AuditCalendarAsync(connection, transaction, laneWindows, cancellationToken);
         await transaction.RollbackAsync(cancellationToken);
 
         var checks = _findings.Build();
         return new EvidenceContent(
-            1,
-            "DQ-001..009/v1",
+            2,
+            "DQ-001..009/v2",
             embeddedMigrations.Checksum,
             input.CanonicalSha256,
             targetIdentity,
@@ -447,10 +447,49 @@ internal sealed class AuditRunner(
     private async Task AuditFetchLedgerAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
+        IReadOnlyDictionary<AuditLane, IReadOnlyList<DatabaseWindow>> laneWindows,
         CancellationToken cancellationToken)
     {
+        var windowIds = laneWindows.Values.SelectMany(value => value)
+            .Select(window => window.Id).Distinct().ToArray();
+        var sources = input.Manifest.Scope.Lanes
+            .Select(lane => lane.Source).Distinct(StringComparer.Ordinal).ToArray();
+        await using (var cardinality = new NpgsqlCommand("""
+            SELECT count(*) FROM (
+              SELECT 1 FROM public.provider_fetch_payloads payload
+               WHERE payload.provider_source=ANY($1::text[])
+                 AND payload.first_observed_at BETWEEN $2 AND $3
+              UNION ALL
+              SELECT 1 FROM public.price_observation_attributions
+               WHERE ingestion_window_id=ANY($4::uuid[])
+              UNION ALL
+              SELECT 1 FROM public.inflation_observation_attributions
+               WHERE ingestion_window_id=ANY($4::uuid[])
+              LIMIT $5) bounded
+            """, connection, transaction))
+        {
+            cardinality.Parameters.AddWithValue(sources);
+            cardinality.Parameters.AddWithValue(input.Manifest.Scope.LegacyGraceEndedAtUtc);
+            cardinality.Parameters.AddWithValue(input.Manifest.Scope.AsOfUtc);
+            cardinality.Parameters.AddWithValue(windowIds);
+            cardinality.Parameters.AddWithValue(_budget.MaxGlobalRows + 1);
+            if (Convert.ToInt64(await cardinality.ExecuteScalarAsync(cancellationToken),
+                    CultureInfo.InvariantCulture) > _budget.MaxGlobalRows)
+                throw new AuditRejectedException(
+                    "global_scan_budget_exceeded", AuditExitCodes.BudgetRejected);
+        }
         var batch = await QueryViolationsAsync(connection, transaction, AuditSql.FetchLedger,
-            _ => { }, cancellationToken);
+            command =>
+            {
+                command.Parameters.AddWithValue(windowIds);
+                command.Parameters.AddWithValue(sources);
+                command.Parameters.AddWithValue(input.Manifest.Scope.LegacyGraceEndedAtUtc);
+                command.Parameters.AddWithValue(input.Manifest.Scope.AsOfUtc);
+                command.Parameters.AddWithValue(_budget.MaxGlobalRows);
+            }, cancellationToken);
+        if (batch.TotalCount > _budget.MaxGlobalRows)
+            throw new AuditRejectedException(
+                "global_scan_budget_exceeded", AuditExitCodes.BudgetRejected);
         AddBatch("DQ-009", AuditSeverity.High, batch);
     }
 
@@ -1007,12 +1046,30 @@ internal sealed class AuditRunner(
     {
         var releases = new List<Guid>();
         await using (var command = new NpgsqlCommand(
-                         "SELECT id FROM public.market_calendar_releases ORDER BY calendar_code COLLATE \"C\", release_version",
+                         "SELECT id FROM public.market_calendar_releases ORDER BY calendar_code COLLATE \"C\", release_version LIMIT $1",
                          connection, transaction))
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            while (await reader.ReadAsync(cancellationToken))
-                releases.Add(reader.GetGuid(0));
+            command.Parameters.AddWithValue(_budget.MaxCalendarReleases + 1);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken)) releases.Add(reader.GetGuid(0));
+        }
+        if (releases.Count > _budget.MaxCalendarReleases)
+            throw new AuditRejectedException(
+                "calendar_release_budget_exceeded", AuditExitCodes.BudgetRejected);
+
+        long calendarRows = 0;
+        foreach (var release in releases)
+        {
+            await using var count = new NpgsqlCommand(
+                "SELECT count(*) FROM (SELECT 1 FROM public.market_calendar_days WHERE release_id=$1 LIMIT $2) bounded",
+                connection, transaction);
+            count.Parameters.AddWithValue(release);
+            count.Parameters.AddWithValue(_budget.MaxGlobalRows + 1);
+            calendarRows += Convert.ToInt64(
+                await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+            if (calendarRows > _budget.MaxGlobalRows)
+                throw new AuditRejectedException(
+                    "calendar_scan_budget_exceeded", AuditExitCodes.BudgetRejected);
         }
 
         foreach (var release in releases)
@@ -1036,7 +1093,13 @@ internal sealed class AuditRunner(
         }
 
         var metadata = await QueryViolationsAsync(connection, transaction, AuditSql.CalendarMetadata,
-            _ => { }, cancellationToken);
+            command =>
+            {
+                command.Parameters.AddWithValue(releases.ToArray());
+                command.Parameters.AddWithValue(input.Manifest.Scope.Lanes
+                    .Where(lane => lane.AssetId is not null)
+                    .Select(lane => lane.AssetId!.Value).Distinct().ToArray());
+            }, cancellationToken);
         AddBatch("DQ-006", AuditSeverity.Critical, metadata);
 
         foreach (var (lane, windows) in laneWindows.Where(pair =>

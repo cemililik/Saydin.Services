@@ -16,7 +16,7 @@ public sealed class IngestionWindow
     public Guid? LeaseToken { get; set; }
     public DateTimeOffset? LeaseUntil { get; set; }
     public int AttemptCount { get; set; }
-    public DateTimeOffset NextAttemptAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset NextAttemptAt { get; set; }
     public int RequestedCalendarCount { get; set; }
     public int ExpectedObservationCount { get; set; }
     public int RawItemCount { get; set; }
@@ -25,8 +25,8 @@ public sealed class IngestionWindow
     public int ExpectedNoDataCount { get; set; }
     public string? OutcomeCode { get; set; }
     public string? ErrorCode { get; set; }
-    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public Asset? Asset { get; init; }
     public MarketCalendarRelease? CalendarRelease { get; init; }

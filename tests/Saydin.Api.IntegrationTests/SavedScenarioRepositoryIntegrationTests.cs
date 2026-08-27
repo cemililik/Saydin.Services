@@ -8,6 +8,7 @@ using Npgsql;
 using Saydin.Api.IntegrationTests.Fixtures;
 using Saydin.Api.Models;
 using Saydin.Api.Repositories;
+using Saydin.Api.Services;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
 
@@ -17,6 +18,27 @@ namespace Saydin.Api.IntegrationTests;
 public sealed class SavedScenarioRepositoryIntegrationTests(DatabaseFixture db)
 {
     private static readonly IStringLocalizer<ErrorMessages> Localizer = CreateLocalizer();
+
+    [SkippableFact]
+    public async Task ExtraData_ApplicationEstimator_EqualsPostgresJsonbTextForDiversePayloads()
+    {
+        RequireScenarioIntegrity();
+        string[] payloads =
+        [
+            "{\"z\":1,\"a\":\"ş\\n\\\"\",\"items\":[true,null,12.50]}",
+            "{\"outer\":{\"emoji\":\"🙂\",\"escaped\":\"a\\tb\"},\"empty\":[]}",
+            "{\"numbers\":[0,-1,0.0001,123456789.125],\"flag\":false}",
+        ];
+
+        foreach (var payload in payloads)
+        {
+            using var document = JsonDocument.Parse(payload);
+            var estimated = ScenarioExtraDataValidator.GetStorageUtf8Size(document.RootElement);
+            var actual = await ScalarAsync<int>(
+                "SELECT octet_length($1::jsonb::text)", payload);
+            estimated.Should().Be(actual, payload);
+        }
+    }
 
     [SkippableFact]
     public async Task ExtraData_Canonical8192Accepted_8193AndNonObjectRejected()
@@ -108,8 +130,17 @@ public sealed class SavedScenarioRepositoryIntegrationTests(DatabaseFixture db)
             actual.Should().OnlyHaveUniqueItems();
             actual.Should().NotContain(otherId);
 
-            var plan = await ExplainAsync(userId, createdAt, expectedDatabaseOrder[7]);
-            plan.Should().Contain("idx_saved_scenarios_user_created_id_desc");
+            var noiseMarker = $"scenario-plan-{Guid.NewGuid():N}";
+            try
+            {
+                await InsertPlannerNoiseAsync(noiseMarker);
+                var plan = await ExplainAsync(userId, createdAt, expectedDatabaseOrder[7]);
+                plan.Should().Contain("idx_saved_scenarios_user_created_id_desc");
+            }
+            finally
+            {
+                await DeletePlannerNoiseAsync(noiseMarker);
+            }
         }
         finally
         {
@@ -503,10 +534,6 @@ public sealed class SavedScenarioRepositoryIntegrationTests(DatabaseFixture db)
     {
         await using var connection = new NpgsqlConnection(db.ConnectionString);
         await connection.OpenAsync();
-        await using (var disableSeqScan = new NpgsqlCommand("SET enable_seqscan=off", connection))
-            await disableSeqScan.ExecuteNonQueryAsync();
-        await using (var disableSort = new NpgsqlCommand("SET enable_sort=off", connection))
-            await disableSort.ExecuteNonQueryAsync();
         await using var command = new NpgsqlCommand("""
             EXPLAIN (COSTS OFF)
             SELECT * FROM saved_scenarios
@@ -521,6 +548,41 @@ public sealed class SavedScenarioRepositoryIntegrationTests(DatabaseFixture db)
         while (await reader.ReadAsync())
             lines.Add(reader.GetString(0));
         return string.Join('\n', lines);
+    }
+
+    private async Task InsertPlannerNoiseAsync(string marker)
+    {
+        await using var context = db.CreateAdminContext();
+        await context.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO users(id,device_id,tier,created_at,last_seen_at)
+            SELECT gen_random_uuid(), {marker} || '-' || ordinal, 'premium', NOW(), NOW()
+              FROM generate_series(1,250) AS ordinal;
+            """);
+        await context.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO saved_scenarios(
+                id,user_id,asset_id,buy_date,sell_date,quantity,quantity_unit,
+                label,created_at,asset_symbol,asset_display_name,type,extra_data)
+            SELECT gen_random_uuid(),u.id,NULL,'2020-01-01',NULL,100,'try',NULL,
+                   NOW()-(sample || ' seconds')::interval,
+                   'PORTFOLIO','PORTFOLIO','portfolio',NULL
+              FROM users AS u
+              CROSS JOIN generate_series(1,10) AS sample
+             WHERE u.device_id LIKE {marker + "%"};
+            """);
+        await context.Database.ExecuteSqlRawAsync("ANALYZE saved_scenarios");
+    }
+
+    private async Task DeletePlannerNoiseAsync(string marker)
+    {
+        await using var context = db.CreateAdminContext();
+        await context.Database.ExecuteSqlInterpolatedAsync($"""
+            DELETE FROM saved_scenarios AS s
+             USING users AS u
+             WHERE s.user_id=u.id AND u.device_id LIKE {marker + "%"};
+            """);
+        await context.Database.ExecuteSqlInterpolatedAsync($"""
+            DELETE FROM users WHERE device_id LIKE {marker + "%"};
+            """);
     }
 
     private static void AddParameters(NpgsqlCommand command, IReadOnlyList<object> parameters)

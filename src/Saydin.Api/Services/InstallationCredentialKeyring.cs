@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Saydin.Api.Options;
 using Saydin.DatabaseSecurity;
@@ -24,7 +23,6 @@ public interface IInstallationCredentialKeyring
     bool TryDecode(string token, out byte[] secret);
     CredentialHashCandidate HashActive(ReadOnlySpan<byte> secret);
     IReadOnlyList<CredentialHashCandidate> HashAccepted(ReadOnlySpan<byte> secret);
-    string PseudonymizePrincipal(Guid principalId);
 }
 
 /// <summary>
@@ -211,24 +209,6 @@ public sealed class InstallationCredentialKeyring : IInstallationCredentialKeyri
             foreach (var candidate in candidates)
                 CryptographicOperations.ZeroMemory(candidate.SecretHash);
             throw;
-        }
-    }
-
-    public string PseudonymizePrincipal(Guid principalId)
-    {
-        Span<byte> payload = stackalloc byte[48];
-        payload.Clear();
-        Encoding.ASCII.GetBytes("saydin.activity.principal.v1", payload);
-        principalId.TryWriteBytes(payload[32..]);
-        var digest = HMACSHA256.HashData(_keys[ActiveKeyVersion], payload);
-        try
-        {
-            return $"p1:{Convert.ToHexString(digest.AsSpan(0, 16)).ToLowerInvariant()}";
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(digest);
-            CryptographicOperations.ZeroMemory(payload);
         }
     }
 

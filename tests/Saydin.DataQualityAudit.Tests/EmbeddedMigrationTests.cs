@@ -11,8 +11,8 @@ public sealed class EmbeddedMigrationTests
     {
         var manifest = EmbeddedMigrations.Load();
         var root = FindRepositoryRoot();
-        manifest.Migrations.Should().HaveCount(24);
-        EmbeddedMigrations.PinnedChecksums.Should().HaveCount(24);
+        manifest.Migrations.Should().HaveCount(27);
+        EmbeddedMigrations.PinnedChecksums.Should().HaveCount(27);
         EmbeddedMigrations.PinnedChecksums.Keys.Should().BeEquivalentTo(
             manifest.Migrations.Select(item => item.Version));
         manifest.Migrations.Single(item => item.Version == EmbeddedMigrations.ScenarioIntegrityVersion)
@@ -21,6 +21,12 @@ public sealed class EmbeddedMigrationTests
             .Checksum.Should().Be(EmbeddedMigrations.ApiTrustChecksum);
         manifest.Migrations.Single(item => item.Version == EmbeddedMigrations.PrincipalRetentionVersion)
             .Checksum.Should().Be(EmbeddedMigrations.PrincipalRetentionChecksum);
+        manifest.Migrations.Single(item =>
+                item.Version == EmbeddedMigrations.InstallationLifecycleAdmissionVersion)
+            .Checksum.Should().Be(EmbeddedMigrations.InstallationLifecycleAdmissionChecksum);
+        manifest.Migrations.Single(item =>
+                item.Version == EmbeddedMigrations.InstallationCredentialRehashVersion)
+            .Checksum.Should().Be(EmbeddedMigrations.InstallationCredentialRehashChecksum);
         foreach (var embedded in manifest.Migrations)
         {
             var file = Path.Combine(root, "infrastructure", "postgres", "migrations", embedded.FileName);
@@ -48,6 +54,9 @@ public sealed class EmbeddedMigrationTests
     [InlineData("020_price_authority_expand")]
     [InlineData("021_api_trust_expand")]
     [InlineData("022_principal_retention")]
+    [InlineData("023_installation_lifecycle_admission")]
+    [InlineData("024_installation_credential_rehash")]
+    [InlineData("025_ingestion_calendar_rebind")]
     public void PinnedManifest_ChangedAdditiveMigrationByte_Rejects(string version)
     {
         var root = FindRepositoryRoot();

@@ -46,7 +46,10 @@
       ..\..\infrastructure\postgres\migrations\019_privilege_separation.sql;
       ..\..\infrastructure\postgres\migrations\020_price_authority_expand.sql;
       ..\..\infrastructure\postgres\migrations\021_api_trust_expand.sql;
-      ..\..\infrastructure\postgres\migrations\022_principal_retention.sql">
+      ..\..\infrastructure\postgres\migrations\022_principal_retention.sql;
+      ..\..\infrastructure\postgres\migrations\023_installation_lifecycle_admission.sql;
+      ..\..\infrastructure\postgres\migrations\024_installation_credential_rehash.sql;
+      ..\..\infrastructure\postgres\migrations\025_ingestion_calendar_rebind.sql">
       <LogicalName>Migrations/%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>

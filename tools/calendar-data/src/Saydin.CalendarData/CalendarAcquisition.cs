@@ -76,6 +76,8 @@ public sealed class CalendarAcquisition(
 
         var pendingName = $".pending-{options.OutputName}-{Guid.CreateVersion7():N}";
         var pendingRoot = SecureBundleStorage.EnsurePrivateDirectory(Path.Combine(stagingRoot, pendingName));
+        try
+        {
         var sources = baseBundle.Manifest.Sources.ToDictionary(source => source.Id, StringComparer.Ordinal);
         var refreshedSourceIds = plan.Sources
             .Select(source => source.Id)
@@ -120,12 +122,39 @@ public sealed class CalendarAcquisition(
             };
         }
 
-        var manifest = new SourceManifest
+        var requestedManifest = new SourceManifest
         {
             SchemaVersion = 1,
             SnapshotSetId = plan.SnapshotSetId,
             Calendars = plan.Calendars,
             Sources = sources.Values.OrderBy(source => source.Id, StringComparer.Ordinal).ToArray(),
+        };
+        var requestedTcmb = plan.Calendars.Single(calendar =>
+            calendar.Code == CalendarDataGenerator.TcmbCode);
+        var requestedThrough = ParseDate(requestedTcmb.CoverageThrough);
+        var previousTcmb = baseBundle.Manifest.Calendars.Single(calendar =>
+            calendar.Code == CalendarDataGenerator.TcmbCode);
+        var previousThrough = ParseDate(previousTcmb.CoverageThrough);
+        var evidencedThrough = CalendarDataGenerator.ResolveTcmbCoverageThrough(
+            pendingRoot, requestedManifest, requestedThrough);
+        if (evidencedThrough < previousThrough)
+            throw new CalendarDataException("tcmb_publication_evidence_regressed");
+        var materializedCalendars = plan.Calendars.Select(calendar =>
+            calendar.Code == CalendarDataGenerator.TcmbCode
+                ? new CalendarDefinition
+                {
+                    Code = calendar.Code,
+                    CoverageFrom = calendar.CoverageFrom,
+                    CoverageThrough = evidencedThrough.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    OutputPath = calendar.OutputPath,
+                }
+                : calendar).ToArray();
+        var manifest = new SourceManifest
+        {
+            SchemaVersion = requestedManifest.SchemaVersion,
+            SnapshotSetId = requestedManifest.SnapshotSetId,
+            Calendars = materializedCalendars,
+            Sources = requestedManifest.Sources,
         };
         var manifestBytes = ManifestJson.Write(manifest);
         SecureBundleStorage.WriteNewPrivateFile(
@@ -163,7 +192,19 @@ public sealed class CalendarAcquisition(
         verified.EnsureInputsUnchanged();
         Directory.Move(pendingRoot, finalPath);
         return finalPath;
+        }
+        catch
+        {
+            SecureBundleStorage.DeletePrivateTree(pendingRoot, stagingRoot);
+            throw;
+        }
     }
+
+    private static DateOnly ParseDate(string value) =>
+        DateOnly.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+            DateTimeStyles.None, out var result)
+            ? result
+            : throw new CalendarDataException("coverage_through_invalid", value);
 
     private async Task<byte[]> DownloadWithRetryAsync(
         SourceDefinition source,

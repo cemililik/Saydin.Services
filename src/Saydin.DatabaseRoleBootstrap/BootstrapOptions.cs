@@ -9,6 +9,8 @@ internal enum BootstrapCommand
     Ensure,
     Verify,
     Rotate,
+    ResetPassword,
+    Retire,
 }
 
 internal sealed record BootstrapTimeouts(
@@ -31,7 +33,9 @@ internal sealed record BootstrapOptions(
     bool RotateBackup,
     int? RotateVersion,
     string? RotatePasswordFile,
-    DateTimeOffset? RotateBackupValidUntilUtc)
+    DateTimeOffset? RotateBackupValidUntilUtc,
+    int? ReplacementVersion = null,
+    TimeSpan? DrainTimeout = null)
 {
     private static readonly Regex ExtensionVersionPattern =
         new("^[0-9]+(?:\\.[0-9]+){1,3}$", RegexOptions.CultureInvariant);
@@ -47,6 +51,8 @@ internal sealed record BootstrapOptions(
             "ensure" => BootstrapCommand.Ensure,
             "verify" => BootstrapCommand.Verify,
             "rotate" => BootstrapCommand.Rotate,
+            "reset-password" => BootstrapCommand.ResetPassword,
+            "retire" => BootstrapCommand.Retire,
             _ => throw Invalid("command_unknown"),
         };
 
@@ -79,6 +85,8 @@ internal sealed record BootstrapOptions(
         int? rotateVersion = null;
         string? rotatePasswordFile = null;
         DateTimeOffset? rotateBackupValidUntil = null;
+        int? replacementVersion = null;
+        TimeSpan? drainTimeout = null;
 
         if (command == BootstrapCommand.Ensure)
         {
@@ -87,20 +95,36 @@ internal sealed record BootstrapOptions(
                     $"--{RoleContract.PurposeName(purpose).Replace('_', '-')}-password-file"));
             backupPasswordFile = Required(values, "--backup-password-file");
         }
-        else if (command == BootstrapCommand.Rotate)
+        else if (command is BootstrapCommand.Rotate or BootstrapCommand.ResetPassword or
+                 BootstrapCommand.Retire)
         {
             var login = Required(values, "--login");
             rotateBackup = string.Equals(login, "backup", StringComparison.Ordinal);
             if (!rotateBackup)
                 rotatePurpose = ParsePurpose(login);
             if (!int.TryParse(Required(values, "--login-version"), NumberStyles.None,
-                    CultureInfo.InvariantCulture, out var version) || version != 2)
-                throw Invalid("rotate_version_must_be_v2");
+                    CultureInfo.InvariantCulture, out var version))
+                throw Invalid("login_version_invalid");
+            if (rotateBackup && (command != BootstrapCommand.Rotate || version != 2))
+                throw Invalid("backup_rotate_version_must_be_v2");
+            if (!rotateBackup && !RoleContract.IsAllowedLoginVersion(version))
+                throw Invalid("login_version_invalid");
             rotateVersion = version;
-            rotatePasswordFile = Required(values, "--password-file");
+            if (command is BootstrapCommand.Rotate or BootstrapCommand.ResetPassword)
+                rotatePasswordFile = Required(values, "--password-file");
             if (rotateBackup)
                 rotateBackupValidUntil = ParseTimestamp(
                     Required(values, "--valid-until"), "backup_valid_until_invalid");
+            if (command == BootstrapCommand.Retire)
+            {
+                if (!int.TryParse(Required(values, "--replacement-version"), NumberStyles.None,
+                        CultureInfo.InvariantCulture, out var replacement) ||
+                    !RoleContract.IsAllowedLoginVersion(replacement))
+                    throw Invalid("replacement_version_invalid");
+                replacementVersion = replacement;
+                drainTimeout = ParseDuration(
+                    values, "--drain-timeout-seconds", 30, 1, 120);
+            }
         }
 
         var allowed = CommonKeys().ToHashSet(StringComparer.Ordinal);
@@ -110,13 +134,20 @@ internal sealed record BootstrapOptions(
                 allowed.Add($"--{RoleContract.PurposeName(purpose).Replace('_', '-')}-password-file");
             allowed.Add("--backup-password-file");
         }
-        if (command == BootstrapCommand.Rotate)
+        if (command is BootstrapCommand.Rotate or BootstrapCommand.ResetPassword or
+            BootstrapCommand.Retire)
         {
             allowed.Add("--login");
             allowed.Add("--login-version");
-            allowed.Add("--password-file");
+            if (command is BootstrapCommand.Rotate or BootstrapCommand.ResetPassword)
+                allowed.Add("--password-file");
             if (rotateBackup)
                 allowed.Add("--valid-until");
+            if (command == BootstrapCommand.Retire)
+            {
+                allowed.Add("--replacement-version");
+                allowed.Add("--drain-timeout-seconds");
+            }
         }
         if (values.Keys.Any(key => !allowed.Contains(key)))
             throw Invalid("argument_unsupported");
@@ -125,7 +156,8 @@ internal sealed record BootstrapOptions(
             command, adminFile, RoleContract.Create(deployment, database, systemHash, prefix),
             timescaleVersion, uuidVersion, timeouts, passwordFiles,
             backupPasswordFile, backupV1ValidUntil, rotatePurpose, rotateBackup,
-            rotateVersion, rotatePasswordFile, rotateBackupValidUntil);
+            rotateVersion, rotatePasswordFile, rotateBackupValidUntil,
+            replacementVersion, drainTimeout);
     }
 
     private static Dictionary<string, string> ParsePairs(string[] args)

@@ -43,6 +43,14 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.CalendarData", "tool
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.CalendarData.Tests", "tools\calendar-data\tests\Saydin.CalendarData.Tests\Saydin.CalendarData.Tests.csproj", "{A1000000-0000-4000-8000-000000000003}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.DatabaseRoleBootstrap", "src\Saydin.DatabaseRoleBootstrap\Saydin.DatabaseRoleBootstrap.csproj", "{B7180AF4-F122-420A-9052-3C57E4D53E4B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.DatabaseSecurity", "src\Saydin.DatabaseSecurity\Saydin.DatabaseSecurity.csproj", "{BFF1D32A-3381-44C8-B5BF-CC23D9228BE4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.DatabaseRoleBootstrap.Tests", "tests\Saydin.DatabaseRoleBootstrap.Tests\Saydin.DatabaseRoleBootstrap.Tests.csproj", "{A24DF9AA-DABE-450B-980F-57FC01D5853A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Saydin.DatabaseRoleBootstrap.IntegrationTests", "tests\Saydin.DatabaseRoleBootstrap.IntegrationTests\Saydin.DatabaseRoleBootstrap.IntegrationTests.csproj", "{EF563BC2-65E0-4270-BA75-28D2E2B033DB}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -117,6 +125,22 @@ Global
 		{A1000000-0000-4000-8000-000000000003}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A1000000-0000-4000-8000-000000000003}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A1000000-0000-4000-8000-000000000003}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B7180AF4-F122-420A-9052-3C57E4D53E4B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B7180AF4-F122-420A-9052-3C57E4D53E4B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B7180AF4-F122-420A-9052-3C57E4D53E4B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B7180AF4-F122-420A-9052-3C57E4D53E4B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BFF1D32A-3381-44C8-B5BF-CC23D9228BE4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BFF1D32A-3381-44C8-B5BF-CC23D9228BE4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BFF1D32A-3381-44C8-B5BF-CC23D9228BE4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BFF1D32A-3381-44C8-B5BF-CC23D9228BE4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A24DF9AA-DABE-450B-980F-57FC01D5853A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A24DF9AA-DABE-450B-980F-57FC01D5853A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A24DF9AA-DABE-450B-980F-57FC01D5853A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A24DF9AA-DABE-450B-980F-57FC01D5853A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EF563BC2-65E0-4270-BA75-28D2E2B033DB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EF563BC2-65E0-4270-BA75-28D2E2B033DB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EF563BC2-65E0-4270-BA75-28D2E2B033DB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EF563BC2-65E0-4270-BA75-28D2E2B033DB}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -139,5 +163,9 @@ Global
 		{D3000000-0000-4000-8000-000000000003} = {1DD4C92D-A417-4A2C-B2D5-CA37690C2E4E}
 		{A1000000-0000-4000-8000-000000000002} = {A1000000-0000-4000-8000-000000000001}
 		{A1000000-0000-4000-8000-000000000003} = {1DD4C92D-A417-4A2C-B2D5-CA37690C2E4E}
+		{B7180AF4-F122-420A-9052-3C57E4D53E4B} = {2FEAEEF8-D693-461E-8F93-5C0BAAD979B3}
+		{BFF1D32A-3381-44C8-B5BF-CC23D9228BE4} = {2FEAEEF8-D693-461E-8F93-5C0BAAD979B3}
+		{A24DF9AA-DABE-450B-980F-57FC01D5853A} = {1DD4C92D-A417-4A2C-B2D5-CA37690C2E4E}
+		{EF563BC2-65E0-4270-BA75-28D2E2B033DB} = {1DD4C92D-A417-4A2C-B2D5-CA37690C2E4E}
 	EndGlobalSection
 EndGlobal

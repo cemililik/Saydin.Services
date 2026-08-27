@@ -35,14 +35,22 @@ veya GitHub environment dosyasına yazmayın. Normal runtime yalnız kendi passw
 Pull request en az build, unit coverage, integration, migration/role/DQA, production-assurance,
 supply-chain ve CodeQL işlerini geçmelidir. Lokal eşdeğerleri:
 
+Host SDK kullanılmaz. Pinned Docker SDK ile solution build ve yerel unit/coverage kapısı:
+
 ```bash
-dotnet restore Saydin.Services.sln --locked-mode
-UNIT_COVERAGE_DIR="$(mktemp -d /tmp/saydin-unit-coverage.XXXXXX)"
-.github/scripts/run-unit-coverage.sh "$UNIT_COVERAGE_DIR"
+docker run --rm -v "$PWD":/src -w /src \
+  mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c \
+  dotnet build Saydin.Services.sln -c Release
+docker compose --env-file .env --env-file .env.database-runtime --profile test run --rm tests
 infrastructure/deployment/validate-production-assets.sh
 .github/scripts/validate-development-compose.sh
 python3 .github/scripts/check-doc-links.py
 ```
+
+Root `tests` servisi yalnız yedi unit projesini locked restore ve coverage ratchet ile çalıştırır;
+solution/integration komutlarını purpose-specific DB credential taşımadığı için reddeder. Gerçek
+PostgreSQL/Redis kapısının kanonik yürütmesi `.github/workflows/ci.yml` içindeki izole
+`.github/compose.integration.yml` akışıdır; sıfır skip/fail şartı gevşetilmez.
 
 Detaylı kurulum için [geliştirme rehberi](docs/development-guide.md), mimari sınırlar için
 [architecture](docs/architecture.md), tamamlanmış review/remediation izi için

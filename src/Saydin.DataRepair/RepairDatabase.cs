@@ -20,9 +20,56 @@ internal sealed record PreparedRepair(
     DateTimeOffset CreatedAtUtc,
     IReadOnlyList<RepairOperationReceipt> Operations);
 
-internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
+internal enum RepairDatabaseCheckpoint
 {
-    private const int MaximumGuardRows = 100_000;
+    ApplyBeforeCas,
+    ApplyAfterCasBeforePostGuard,
+    RollbackBeforeCas,
+    RollbackAfterCasBeforeVerification,
+}
+
+internal interface IRepairDatabaseFaultInjector
+{
+    Task OnCheckpointAsync(
+        RepairDatabaseCheckpoint checkpoint,
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid windowId,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class NoopRepairDatabaseFaultInjector : IRepairDatabaseFaultInjector
+{
+    public static readonly NoopRepairDatabaseFaultInjector Instance = new();
+
+    public Task OnCheckpointAsync(
+        RepairDatabaseCheckpoint checkpoint,
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid windowId,
+        CancellationToken cancellationToken) => Task.CompletedTask;
+}
+
+internal sealed class RepairDatabase
+{
+    private const int DefaultMaximumGuardRows = 100_000;
+    private readonly NpgsqlDataSource dataSource;
+    private readonly IRepairTargetLease targetLease;
+    private readonly IRepairDatabaseFaultInjector faultInjector;
+    private readonly int maximumGuardRows;
+
+    public RepairDatabase(
+        NpgsqlDataSource dataSource,
+        IRepairTargetLease targetLease,
+        IRepairDatabaseFaultInjector? faultInjector = null,
+        int maximumGuardRows = DefaultMaximumGuardRows)
+    {
+        if (maximumGuardRows <= 0) throw new ArgumentOutOfRangeException(nameof(maximumGuardRows));
+        this.dataSource = dataSource;
+        this.targetLease = targetLease;
+        this.faultInjector = faultInjector ?? NoopRepairDatabaseFaultInjector.Instance;
+        this.maximumGuardRows = maximumGuardRows;
+    }
 
     public async Task VerifyPreflightAsync(CancellationToken cancellationToken)
     {
@@ -36,11 +83,15 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                    pg_catalog.has_table_privilege(current_user,'public.ingestion_jobs','UPDATE'),
                    pg_catalog.has_table_privilege(current_user,'public.price_observation_attributions','SELECT'),
                    pg_catalog.has_table_privilege(current_user,'public.inflation_observation_attributions','SELECT'),
+                   pg_catalog.has_table_privilege(current_user,'public.price_points','SELECT'),
+                   pg_catalog.has_table_privilege(current_user,'public.inflation_rates','SELECT'),
                    pg_catalog.has_table_privilege(current_user,'public.schema_migrations','SELECT'),
                    pg_catalog.to_regclass('public.ingestion_windows') IS NOT NULL,
                    pg_catalog.to_regclass('public.ingestion_jobs') IS NOT NULL,
                    pg_catalog.to_regclass('public.price_observation_attributions') IS NOT NULL,
-                   pg_catalog.to_regclass('public.inflation_observation_attributions') IS NOT NULL
+                   pg_catalog.to_regclass('public.inflation_observation_attributions') IS NOT NULL,
+                   pg_catalog.to_regclass('public.price_points') IS NOT NULL,
+                   pg_catalog.to_regclass('public.inflation_rates') IS NOT NULL
             """, connection);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken) ||
@@ -48,9 +99,11 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
             reader.GetString(1) != reader.GetString(2) ||
             !reader.GetBoolean(3) || !reader.GetBoolean(4) || reader.GetBoolean(5) ||
             !reader.GetBoolean(6) || !reader.GetBoolean(7) ||
-            !reader.GetBoolean(8) || !reader.GetBoolean(9) || reader.GetBoolean(10) ||
-            !reader.GetBoolean(11) || !reader.GetBoolean(12) ||
+            !reader.GetBoolean(8) || !reader.GetBoolean(9) ||
+            !reader.GetBoolean(10) || !reader.GetBoolean(11) || reader.GetBoolean(12) ||
             !reader.GetBoolean(13) || !reader.GetBoolean(14) ||
+            !reader.GetBoolean(15) || !reader.GetBoolean(16) ||
+            !reader.GetBoolean(17) || !reader.GetBoolean(18) ||
             await reader.ReadAsync(cancellationToken))
             throw TargetRejected("repair_database_acl_rejected");
     }
@@ -63,7 +116,9 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         await using var transaction = await connection.BeginTransactionAsync(
             IsolationLevel.RepeatableRead, cancellationToken);
         await ConfigureTransactionAsync(connection, transaction, readOnly: true, cancellationToken);
+        await targetLease.VerifyAliveAsync(cancellationToken);
         var ready = 0;
+        var guardBudget = new GuardBudget(maximumGuardRows);
         foreach (var indexed in plan.Plan.Operations.Select((operation, index) => (operation, index)))
         {
             if (indexed.operation.Type != "requeue_permanent_window") continue;
@@ -71,6 +126,9 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                 connection, transaction, indexed.operation.WindowId!.Value, false, cancellationToken);
             await ValidateApplyPreconditionsAsync(
                 connection, transaction, indexed.operation, row, cancellationToken);
+            _ = await ComputeGuardAsync(
+                connection, transaction, row.Snapshot.Id, guardBudget, cancellationToken,
+                lockRows: false);
             ready++;
         }
         await transaction.RollbackAsync(cancellationToken);
@@ -90,6 +148,7 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                 IsolationLevel.Serializable, cancellationToken);
             await ConfigureTransactionAsync(connection, transaction, readOnly: false, cancellationToken);
             await LockPlanAsync(connection, transaction, plan.PlanSha256, cancellationToken);
+            await targetLease.VerifyAliveAsync(cancellationToken);
 
             var mutable = plan.Plan.Operations.Select((operation, index) => (operation, index))
                 .Where(item => item.operation.Type == "requeue_permanent_window").ToArray();
@@ -99,7 +158,7 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                     connection, transaction, item.operation.WindowId!.Value, false, cancellationToken)));
 
             var results = new RepairOperationReceipt[plan.Plan.Operations.Count];
-            var guardBudget = new GuardBudget(MaximumGuardRows);
+            var guardBudget = new GuardBudget(maximumGuardRows);
             foreach (var item in preliminary.OrderBy(item => item.Row.ScopeKey, StringComparer.Ordinal))
             {
                 await LockScopeAsync(connection, transaction, item.Row.ScopeKey, cancellationToken);
@@ -109,13 +168,22 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                     connection, transaction, item.Operation, current, cancellationToken);
                 var guard = await ComputeGuardAsync(
                     connection, transaction, current.Snapshot.Id, guardBudget, cancellationToken);
+                await targetLease.VerifyAliveAsync(cancellationToken);
+                await faultInjector.OnCheckpointAsync(
+                    RepairDatabaseCheckpoint.ApplyBeforeCas, connection, transaction,
+                    current.Snapshot.Id, cancellationToken);
                 var updated = await RequeueCasAsync(
                     connection, transaction, current, item.Operation.NextAttemptAtUtc!.Value,
+                    plan.Plan.SchemaVersion >= 2 && current.Snapshot.CalendarReleaseId is not null,
                     cancellationToken);
+                await faultInjector.OnCheckpointAsync(
+                    RepairDatabaseCheckpoint.ApplyAfterCasBeforePostGuard, connection, transaction,
+                    current.Snapshot.Id, cancellationToken);
                 var postGuard = await ComputeGuardAsync(
                     connection, transaction, current.Snapshot.Id, guardBudget, cancellationToken);
                 if (!RepairCryptography.FixedEquals(guard, postGuard))
                     throw Rejected("repair_guard_changed_inside_transaction");
+                await targetLease.VerifyAliveAsync(cancellationToken);
                 results[item.Index] = new RepairOperationReceipt(
                     item.Index,
                     "requeued",
@@ -158,6 +226,7 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                 IsolationLevel.Serializable, cancellationToken);
             await ConfigureTransactionAsync(connection, transaction, readOnly: false, cancellationToken);
             await LockPlanAsync(connection, transaction, plan.PlanSha256, cancellationToken);
+            await targetLease.VerifyAliveAsync(cancellationToken);
             var receiptByIndex = applyReceipt.Receipt.Operations.ToDictionary(item => item.Index);
             var mutable = plan.Plan.Operations.Select((operation, index) => (operation, index))
                 .Where(item => item.operation.Type == "requeue_permanent_window").ToArray();
@@ -167,10 +236,12 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                     connection, transaction, item.operation.WindowId!.Value, false, cancellationToken)));
 
             var results = new RepairOperationReceipt[plan.Plan.Operations.Count];
-            var guardBudget = new GuardBudget(MaximumGuardRows);
+            var guardBudget = new GuardBudget(maximumGuardRows);
             foreach (var item in preliminary.OrderBy(item => item.Row.ScopeKey, StringComparer.Ordinal))
             {
                 var prior = receiptByIndex[item.Index];
+                var calendarRebind = applyReceipt.Receipt.SchemaVersion >= 2 &&
+                                     prior.RollbackState?.CalendarReleaseId is not null;
                 if (prior.Result != "requeued" || prior.RollbackState is null ||
                     prior.PostimageSha256 is null || prior.PreimageSha256 is null ||
                     prior.GuardSha256 is null)
@@ -179,9 +250,9 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                 var current = await ReadWindowAsync(
                     connection, transaction, item.Operation.WindowId!.Value, true, cancellationToken);
                 if (!RepairCryptography.FixedEquals(current.SnapshotSha256, prior.PostimageSha256) ||
-                    current.Snapshot.State != "retryable_failed" ||
-                    current.Snapshot.OutcomeCode != "operator_requeue" ||
-                    current.Snapshot.ErrorCode != "operator_requeue" ||
+                    current.Snapshot.State != (calendarRebind ? "pending" : "retryable_failed") ||
+                    current.Snapshot.OutcomeCode != (calendarRebind ? null : "operator_requeue") ||
+                    current.Snapshot.ErrorCode != (calendarRebind ? null : "operator_requeue") ||
                     current.Snapshot.LeaseOwner is not null || current.Snapshot.LeaseToken is not null ||
                     current.Snapshot.LeaseUntil is not null ||
                     await HasRunningJobAsync(
@@ -191,8 +262,18 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                     connection, transaction, current.Snapshot.Id, guardBudget, cancellationToken);
                 if (!RepairCryptography.FixedEquals(guard, prior.GuardSha256))
                     throw Rejected("rollback_related_state_changed");
+                await targetLease.VerifyAliveAsync(cancellationToken);
+                await faultInjector.OnCheckpointAsync(
+                    RepairDatabaseCheckpoint.RollbackBeforeCas, connection, transaction,
+                    current.Snapshot.Id, cancellationToken);
                 var restored = await RollbackCasAsync(
-                    connection, transaction, current, prior.RollbackState, cancellationToken);
+                    connection, transaction, current, prior.RollbackState,
+                    calendarRebind, cancellationToken);
+                await faultInjector.OnCheckpointAsync(
+                    RepairDatabaseCheckpoint.RollbackAfterCasBeforeVerification,
+                    connection, transaction, current.Snapshot.Id, cancellationToken);
+                restored = await ReadWindowAsync(
+                    connection, transaction, current.Snapshot.Id, true, cancellationToken);
                 if (!RepairCryptography.FixedEquals(restored.SnapshotSha256, prior.PreimageSha256) ||
                     !RepairCryptography.FixedEquals(
                         restored.SnapshotSha256, item.Operation.PreimageSha256!))
@@ -201,6 +282,7 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                     connection, transaction, current.Snapshot.Id, guardBudget, cancellationToken);
                 if (!RepairCryptography.FixedEquals(restoredGuard, prior.GuardSha256))
                     throw Rejected("rollback_related_state_changed");
+                await targetLease.VerifyAliveAsync(cancellationToken);
                 results[item.Index] = new RepairOperationReceipt(
                     item.Index, "rolled_back", current.SnapshotSha256,
                     restored.SnapshotSha256, restoredGuard, null);
@@ -230,14 +312,17 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         VerifiedRepairPlan plan,
         VerifiedRepairReceipt receipt,
         bool postState,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowNormalIngestionProgress = false,
+        bool verifyGuard = true)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(
             IsolationLevel.RepeatableRead, cancellationToken);
         await ConfigureTransactionAsync(connection, transaction, readOnly: true, cancellationToken);
         var byIndex = receipt.Receipt.Operations.ToDictionary(item => item.Index);
-        var guardBudget = new GuardBudget(MaximumGuardRows);
+        await targetLease.VerifyAliveAsync(cancellationToken);
+        var guardBudget = new GuardBudget(maximumGuardRows);
         foreach (var item in plan.Plan.Operations.Select((operation, index) => (operation, index)))
         {
             if (item.operation.Type != "requeue_permanent_window") continue;
@@ -246,8 +331,16 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
             if (hash is null) return false;
             var current = await ReadWindowAsync(
                 connection, transaction, item.operation.WindowId!.Value, false, cancellationToken);
-            if (!RepairCryptography.FixedEquals(current.SnapshotSha256, hash)) return false;
-            if (postState && expected.GuardSha256 is { } expectedGuard)
+            if (!RepairCryptography.FixedEquals(current.SnapshotSha256, hash))
+            {
+                if (!postState || !allowNormalIngestionProgress || receipt.Receipt.Mode != "apply" ||
+                    expected.Result != "requeued" || !await HasNormalIngestionProgressAsync(
+                        connection, transaction, current.Snapshot,
+                        receipt.Receipt.CreatedAtUtc, cancellationToken))
+                    return false;
+                continue;
+            }
+            if (postState && verifyGuard && expected.GuardSha256 is { } expectedGuard)
             {
                 var currentGuard = await ComputeGuardAsync(
                     connection, transaction, current.Snapshot.Id, guardBudget, cancellationToken,
@@ -257,6 +350,27 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         }
         await transaction.RollbackAsync(cancellationToken);
         return true;
+    }
+
+    private static async Task<bool> HasNormalIngestionProgressAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        WindowSnapshot window,
+        DateTimeOffset receiptCreatedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        if (window.UpdatedAt < receiptCreatedAtUtc || window.State is not (
+                "running" or "succeeded" or "expected_no_data" or "retryable_failed" or
+                "permanent_failed" or "cancelled" or "abandoned"))
+            return false;
+        await using var command = new NpgsqlCommand("""
+            SELECT EXISTS(
+                SELECT 1 FROM public.ingestion_jobs
+                 WHERE window_id=@window AND started_at>=@receipt_created)
+            """, connection, transaction);
+        command.Parameters.AddWithValue("window", window.Id);
+        command.Parameters.AddWithValue("receipt_created", receiptCreatedAtUtc.UtcDateTime);
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
     public static string SnapshotSha256(WindowSnapshot snapshot) =>
@@ -324,12 +438,14 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         NpgsqlTransaction transaction,
         DatabaseWindowRecord current,
         DateTimeOffset nextAttemptAtUtc,
+        bool calendarRebind,
         CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(UpdateRequeue, connection, transaction);
         command.Parameters.AddWithValue("id", current.Snapshot.Id);
         command.Parameters.AddWithValue("preimage", NpgsqlDbType.Jsonb, current.DatabaseJson);
         command.Parameters.AddWithValue("next_attempt", nextAttemptAtUtc.UtcDateTime);
+        command.Parameters.AddWithValue("calendar_rebind", calendarRebind);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) throw Rejected("repair_cas_failed");
         var result = ReadWindow(reader);
@@ -342,6 +458,7 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         NpgsqlTransaction transaction,
         DatabaseWindowRecord current,
         RollbackState state,
+        bool restoreCalendarRelease,
         CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(UpdateRollback, connection, transaction);
@@ -352,6 +469,11 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         AddNullableText(command, "outcome", state.OutcomeCode);
         AddNullableText(command, "error", state.ErrorCode);
         command.Parameters.AddWithValue("updated", state.UpdatedAt.UtcDateTime);
+        command.Parameters.AddWithValue("restore_calendar", restoreCalendarRelease);
+        command.Parameters.Add(new NpgsqlParameter("calendar_release", NpgsqlDbType.Uuid)
+        {
+            Value = state.CalendarReleaseId ?? (object)DBNull.Value,
+        });
         command.Parameters.Add(new NpgsqlParameter("completed", NpgsqlDbType.TimestampTz)
         {
             Value = state.CompletedAt?.UtcDateTime ?? (object)DBNull.Value,
@@ -434,7 +556,8 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
                  WHERE newer.id<>@id AND newer.source=@source
                    AND newer.asset_id IS NOT DISTINCT FROM @asset
                    AND newer.job_type=@job AND newer.contract_version=@contract
-                   AND newer.range_end>@range_end
+                   AND (newer.range_end>@range_end OR
+                        (newer.range_end=@range_end AND newer.range_start<@range_start))
                    AND newer.state IN ('succeeded','expected_no_data','permanent_failed'))
             """, connection, transaction);
         command.Parameters.AddWithValue("id", window.Id);
@@ -446,6 +569,7 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         command.Parameters.AddWithValue("job", window.JobType);
         command.Parameters.AddWithValue("contract", window.ContractVersion);
         command.Parameters.AddWithValue("range_end", window.RangeEnd);
+        command.Parameters.AddWithValue("range_start", window.RangeStart);
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
@@ -506,7 +630,8 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
 
     private static RollbackState Rollback(WindowSnapshot snapshot) =>
         new(snapshot.State, snapshot.NextAttemptAt, snapshot.OutcomeCode,
-            snapshot.ErrorCode, snapshot.UpdatedAt, snapshot.CompletedAt);
+            snapshot.ErrorCode, snapshot.UpdatedAt, snapshot.CompletedAt,
+            snapshot.CalendarReleaseId);
 
     private static void AddNullableText(NpgsqlCommand command, string name, string? value) =>
         command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text)
@@ -541,9 +666,14 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
 
     private const string UpdateRequeue = """
         UPDATE public.ingestion_windows
-           SET state='retryable_failed',lease_owner=NULL,lease_token=NULL,lease_until=NULL,
-               next_attempt_at=@next_attempt,outcome_code='operator_requeue',error_code='operator_requeue',
-               completed_at=NULL,updated_at=pg_catalog.clock_timestamp()
+           SET state=CASE WHEN @calendar_rebind THEN 'pending' ELSE 'retryable_failed' END,
+               lease_owner=NULL,lease_token=NULL,lease_until=NULL,
+               next_attempt_at=@next_attempt,
+               outcome_code=CASE WHEN @calendar_rebind THEN NULL ELSE 'operator_requeue' END,
+               error_code=CASE WHEN @calendar_rebind THEN NULL ELSE 'operator_requeue' END,
+               completed_at=NULL,
+               calendar_release_id=CASE WHEN @calendar_rebind THEN NULL ELSE calendar_release_id END,
+               updated_at=pg_catalog.clock_timestamp()
          WHERE id=@id AND state='permanent_failed'
            AND pg_catalog.to_jsonb(ingestion_windows)=@preimage::jsonb
         RETURNING
@@ -553,8 +683,10 @@ internal sealed class RepairDatabase(NpgsqlDataSource dataSource)
         UPDATE public.ingestion_windows
            SET state=@state,next_attempt_at=@next_attempt,outcome_code=@outcome,error_code=@error,
                updated_at=@updated,completed_at=@completed,
+               calendar_release_id=CASE WHEN @restore_calendar THEN @calendar_release
+                                        ELSE calendar_release_id END,
                lease_owner=NULL,lease_token=NULL,lease_until=NULL
-         WHERE id=@id AND state='retryable_failed'
+         WHERE id=@id AND state IN ('pending','retryable_failed')
            AND pg_catalog.to_jsonb(ingestion_windows)=@postimage::jsonb
         RETURNING
         """ + " " + WindowColumns;

@@ -45,7 +45,10 @@ internal static class MigratorApplication
         }
         catch (MigratorRejectedException ex)
         {
-            await error.WriteLineAsync($"migration rejected: code={ex.Code}");
+            var fingerprint = ex.Code == "schema_fingerprint_mismatch" && ex.Detail is not null
+                ? $"; fingerprint={ex.Detail}"
+                : string.Empty;
+            await error.WriteLineAsync($"migration rejected: code={ex.Code}{fingerprint}");
             return 3;
         }
         catch (DatabaseSecurityRejectedException ex)

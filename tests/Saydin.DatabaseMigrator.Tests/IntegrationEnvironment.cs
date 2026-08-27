@@ -7,17 +7,60 @@ using Saydin.DatabaseSecurity;
 
 namespace Saydin.DatabaseMigrator.Tests;
 
+internal enum HbaBoundTestFixture
+{
+    BackupRotation,
+    LegacyAck,
+}
+
+internal sealed record HbaBoundTestTarget(
+    string Database,
+    string DeploymentId,
+    string RolePrefix);
+
 internal static class IntegrationEnvironment
 {
-    public static string RequirePrimary() => Require("SAYDIN_MIGRATOR_TEST_DATABASE_FILE");
+    public static string RequirePrimary() =>
+        RequireConnectionString("SAYDIN_MIGRATOR_TEST_DATABASE_FILE");
 
-    public static string RequireSecondary() => Require("SAYDIN_MIGRATOR_SECONDARY_DATABASE_FILE");
+    public static string RequireSecondary() =>
+        RequireConnectionString("SAYDIN_MIGRATOR_SECONDARY_DATABASE_FILE");
 
-    private static string Require(string variable)
+    public static HbaBoundTestTarget RequireHbaBoundTarget(HbaBoundTestFixture fixture)
+    {
+        var runId = RequireValue("SAYDIN_INTEGRATION_RUN_ID");
+        if (runId.Length != 32 || runId.Any(character =>
+                character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new InvalidOperationException("SAYDIN_INTEGRATION_RUN_ID must be 32 lowercase hex characters.");
+        var (label, deploymentSlug, environmentPrefix) = fixture switch
+        {
+            HbaBoundTestFixture.BackupRotation =>
+                ("backup-rotation", "mbr", "SAYDIN_MIGRATOR_BACKUP_ROTATION"),
+            HbaBoundTestFixture.LegacyAck =>
+                ("legacy-ack", "mla", "SAYDIN_MIGRATOR_LEGACY_ACK"),
+            _ => throw new ArgumentOutOfRangeException(nameof(fixture)),
+        };
+        var suffix = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"saydin-migrator-hba-fixture/v1\0{runId}\0{label}")))[..32];
+        var expectedDatabase = $"saydin_migrator_{suffix}";
+        var expectedDeployment = $"{deploymentSlug}-{runId[..8]}";
+        var database = RequireValue($"{environmentPrefix}_DATABASE");
+        var deployment = RequireValue($"{environmentPrefix}_DEPLOYMENT_ID");
+        var rolePrefix = RequireValue($"{environmentPrefix}_ROLE_PREFIX");
+        if (!string.Equals(database, expectedDatabase, StringComparison.Ordinal) ||
+            !string.Equals(deployment, expectedDeployment, StringComparison.Ordinal))
+            throw new InvalidOperationException($"{environmentPrefix} target is not bound to this CI run.");
+        return new HbaBoundTestTarget(database, deployment, rolePrefix);
+    }
+
+    private static string RequireConnectionString(string variable) =>
+        SecureSecretFile.ReadConnectionString(RequireValue(variable));
+
+    private static string RequireValue(string variable)
     {
         var value = Environment.GetEnvironmentVariable(variable);
         return !string.IsNullOrWhiteSpace(value)
-            ? SecureSecretFile.ReadConnectionString(value)
+            ? value
             : throw new InvalidOperationException($"{variable} is required; real PostgreSQL tests never skip.");
     }
 }
@@ -74,11 +117,22 @@ internal sealed class TestDatabase : IAsyncDisposable
         return Path.Combine(_secretDirectory, name);
     }
 
-    public static async Task<TestDatabase> CreateAsync(string adminConnectionString)
+    public static Task<TestDatabase> CreateAsync(string adminConnectionString) =>
+        CreateAsync(adminConnectionString, target: null);
+
+    public static Task<TestDatabase> CreateHbaBoundAsync(
+        string adminConnectionString,
+        HbaBoundTestFixture fixture) =>
+        CreateAsync(adminConnectionString, IntegrationEnvironment.RequireHbaBoundTarget(fixture));
+
+    private static async Task<TestDatabase> CreateAsync(
+        string adminConnectionString,
+        HbaBoundTestTarget? target)
     {
-        var suffix = Guid.NewGuid().ToString("N");
-        var name = $"saydin_migrator_{suffix}";
+        var generatedSuffix = Guid.NewGuid().ToString("N");
+        var name = target?.Database ?? $"saydin_migrator_{generatedSuffix}";
         ValidateName(name);
+        var suffix = name["saydin_migrator_".Length..];
         var secretRoot = OperatingSystem.IsLinux() ? "/run/secrets" : Path.GetTempPath();
         Directory.CreateDirectory(secretRoot);
         var secretDirectory = Path.Combine(secretRoot, $"saydin-migrator-{suffix}");
@@ -109,6 +163,13 @@ internal sealed class TestDatabase : IAsyncDisposable
             var uuid = Convert.ToString(await ScalarAsync(admin, """
                 SELECT default_version FROM pg_catalog.pg_available_extensions WHERE name='uuid-ossp'
                 """)) ?? throw new InvalidOperationException("uuid-ossp unavailable");
+            var deployment = target?.DeploymentId ?? $"mig-{suffix[..8]}";
+            var derivedPrefix = RoleContract.DerivePrefix(deployment, name, systemHash);
+            if (target is not null && !string.Equals(
+                    target.RolePrefix, derivedPrefix, StringComparison.Ordinal))
+                throw new InvalidOperationException("HBA-bound role prefix does not match the live target contract.");
+            var contract = RoleContract.Create(
+                deployment, name, systemHash, target?.RolePrefix ?? derivedPrefix);
             await ExecuteFormattedAsync(admin, "CREATE DATABASE %I TEMPLATE template0", name);
 
             var targetBuilder = new NpgsqlConnectionStringBuilder(clusterAdmin.ConnectionString)
@@ -116,9 +177,6 @@ internal sealed class TestDatabase : IAsyncDisposable
                 Database = name,
                 Pooling = false,
             };
-            var deployment = $"mig-{suffix[..8]}";
-            var prefix = RoleContract.DerivePrefix(deployment, name, systemHash);
-            var contract = RoleContract.Create(deployment, name, systemHash, prefix);
             var passwords = Enum.GetValues<LoginPurpose>().ToDictionary(
                 purpose => purpose,
                 purpose => $"MIGRATOR-TEST-{RoleContract.PurposeName(purpose)}-{Guid.NewGuid():N}-A9!");
@@ -251,6 +309,30 @@ internal sealed class TestDatabase : IAsyncDisposable
             throw new InvalidOperationException($"migrator v2 rotation failed: {error}");
     }
 
+    public async Task RetireMigratorV1Async()
+    {
+        var args = new[]
+        {
+            "retire", "--admin-connection-file", AdminConnectionFile,
+            "--deployment-id", Contract.DeploymentId,
+            "--target-database", Name,
+            "--system-identifier-sha256", Contract.SystemIdentifierSha256,
+            "--role-prefix", Contract.Prefix,
+            "--timescaledb-version", TimescaleVersion,
+            "--uuid-ossp-version", UuidVersion,
+            "--backup-v1-valid-until", RoleContract.FormatBackupValidUntil(BackupV1ValidUntilUtc),
+            "--connect-timeout-seconds", "10", "--lock-timeout-seconds", "20",
+            "--statement-timeout-seconds", "30", "--total-timeout-seconds", "90",
+            "--login", "migrator", "--login-version", "1",
+            "--replacement-version", "2", "--drain-timeout-seconds", "5",
+        };
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await BootstrapApplication.RunAsync(args, output, error);
+        if (exit != BootstrapExitCodes.Success)
+            throw new InvalidOperationException($"migrator v1 retirement failed: {error}");
+    }
+
     public async Task<(DateTimeOffset ValidUntilUtc, string Password)> RotateBackupV2Async()
     {
         var password = $"MIGRATOR-BACKUP-TEST-V2-{Guid.NewGuid():N}-A9!";
@@ -283,7 +365,38 @@ internal sealed class TestDatabase : IAsyncDisposable
         return (validUntil, password);
     }
 
-    public Task EnsureRolesAsync() => BootstrapRolesAsync();
+    public async Task EnsureRolesAsync()
+    {
+        var options = new BootstrapOptions(
+            Command: BootstrapCommand.Ensure,
+            AdminConnectionFile: AdminConnectionFile,
+            Contract: Contract,
+            TimescaleVersion: TimescaleVersion,
+            UuidOsspVersion: UuidVersion,
+            Timeouts: new BootstrapTimeouts(
+                TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(20),
+                TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(90)),
+            PasswordFiles: new Dictionary<LoginPurpose, string>(),
+            BackupPasswordFile: Path.Combine(_secretDirectory, "backup-v1"),
+            BackupV1ValidUntilUtc: BackupV1ValidUntilUtc,
+            RotatePurpose: null,
+            RotateBackup: false,
+            RotateVersion: null,
+            RotatePasswordFile: null,
+            RotateBackupValidUntilUtc: null);
+        var runner = new RoleBootstrapRunner(options, TextWriter.Null);
+        await using var connection = new NpgsqlConnection(ConnectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var backupVerifier = PostgresScramSha256Verifier.Create(
+            Encoding.UTF8.GetBytes(_backupPassword));
+        await runner.EnsureRoleAsync(
+            connection, transaction, Contract.BackupLogin(1, BackupV1ValidUntilUtc),
+            backupVerifier, CancellationToken.None, allowBackupValidityExtension: true);
+        await transaction.CommitAsync();
+    }
+
+    public Task EnsureRolesThroughApplicationAsync() => BootstrapRolesAsync();
 
     public async Task ExecuteAsync(string sql)
     {

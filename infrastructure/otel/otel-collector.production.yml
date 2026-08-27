@@ -1,6 +1,8 @@
 extensions:
   health_check:
-    endpoint: 127.0.0.1:13133
+    # deploy-release probes this endpoint from the Prometheus container on the
+    # internal monitoring-core network. The port is never published to the host.
+    endpoint: 0.0.0.0:13133
   file_storage:
     directory: /var/lib/otelcol/queue
     create_directory: true
@@ -33,7 +35,10 @@ processors:
         action: upsert
       - key: service.instance.id
         value: ${env:SAYDIN_DEPLOYMENT_ID}
-        action: upsert
+        # SDKs provide a service-specific instance id. The deployment fallback is
+        # inserted only for legacy producers; it must never collapse every service
+        # and restart into one identity.
+        action: insert
       - key: vcs.ref.head.revision
         value: ${env:SAYDIN_GIT_SHA}
         action: upsert
@@ -46,7 +51,10 @@ exporters:
     endpoint: 0.0.0.0:8889
     enable_open_metrics: true
     resource_to_telemetry_conversion:
-      enabled: true
+      # Scrape job labels carry the bounded routing identity. Converting every
+      # resource attribute (host/process/URL attributes included) into metric
+      # labels creates unreviewed cardinality and privacy exposure.
+      enabled: false
   otlp/tempo:
     endpoint: tempo:4317
     tls:

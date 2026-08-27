@@ -55,6 +55,21 @@ public sealed class ScenarioRequestBodyReaderTests
             .Where(ex => ex.MaxBytes == 32 * 1024);
     }
 
+    [Fact]
+    public async Task ReadAsync_Utf8Bom_UsesTheSameJsonContractAndAccepts()
+    {
+        const string json = "{\"assetSymbol\":\"BTC\",\"assetDisplayName\":\"Bitcoin\",\"buyDate\":\"2020-01-01\",\"amount\":100,\"amountType\":\"try\"}";
+        var context = new DefaultHttpContext();
+        var payload = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(json)).ToArray();
+        context.Request.Body = new MemoryStream(payload);
+        context.Request.ContentType = "application/json; charset=utf-8";
+
+        var result = await ScenarioRequestBodyReader.ReadAsync(
+            context.Request, JsonOptions, _localizer, CancellationToken.None);
+
+        result.AssetSymbol.Should().Be("BTC");
+    }
+
     [Theory]
     [InlineData("{\"assetSymbol\":")]
     [InlineData("")]

@@ -158,8 +158,12 @@ public sealed class RoleContractTests
         Assert.Equal(24, prefix[(prefix.LastIndexOf('_') + 1)..].Length);
         Assert.All(contract.AllRolesForVersion(2), role =>
             Assert.InRange(Encoding.UTF8.GetByteCount(role.Name), 1, 63));
+        Assert.All(RoleContract.AllowedLoginVersions, version =>
+            Assert.InRange(
+                Encoding.UTF8.GetByteCount(contract.Login(LoginPurpose.CalendarImporter, version).Name),
+                1, 63));
         var exception = Assert.Throws<DatabaseSecurityRejectedException>(() =>
-            contract.Login(LoginPurpose.CalendarImporter, 999));
-        Assert.Equal("role_name_too_long", exception.Code);
+            contract.Login(LoginPurpose.CalendarImporter, 33));
+        Assert.Equal("login_version_invalid", exception.Code);
     }
 }

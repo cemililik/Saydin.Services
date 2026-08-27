@@ -29,12 +29,19 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
         AuditInputManifest Manifest,
         Guid InflationWindowId,
         DateOnly InflationPeriod);
-    internal sealed record Dq009DataDrift(Guid? WindowId, byte[]? PayloadSha256);
+    internal sealed record Dq009DataDrift(
+        AuditInputManifest Manifest,
+        Guid? WindowId,
+        byte[]? PayloadSha256);
 
     private IntegrationEnvironment _environment = null!;
     private string _roleName = null!;
     private Guid[] _anomalyWindowIds = [];
     private DateOnly _anomalyUnattestedDate;
+    private Guid _calendarPayloadReleaseId;
+    private string? _calendarPayloadOriginalHash;
+    private readonly Dictionary<string, (string Relation, string Definition)> _pinnedConstraints =
+        new(StringComparer.Ordinal);
 
     public string Root { get; private set; } = null!;
     public string InputPrivateKeyPath { get; private set; } = null!;
@@ -56,6 +63,9 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
         if (Directory.Exists(Root))
             throw new InvalidOperationException("Audit fixture directory already exists.");
         Directory.CreateDirectory(Root);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(Root,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         using (var key = ECDsa.Create(ECCurve.NamedCurves.nistP256))
         {
             InputPrivateKeyPath = Write("input-private.pem", key.ExportECPrivateKeyPem());
@@ -68,11 +78,13 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
         }
         HmacKeyPath = Path.Combine(Root, "hmac.key");
         await File.WriteAllBytesAsync(HmacKeyPath, RandomNumberGenerator.GetBytes(32));
+        SetSecretFileMode(HmacKeyPath);
 
         await using var admin = new NpgsqlConnection(_environment.AdminConnectionString);
         await admin.OpenAsync();
         AssetId = await FindCoinGeckoAssetAsync(admin);
         await SeedCleanLaneAsync(admin);
+        await CapturePinnedConstraintsAsync(admin);
     }
 
     public async Task DisposeAsync()
@@ -132,6 +144,11 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
         await File.WriteAllBytesAsync(inputSignaturePath,
             AuditCryptography.Sign(raw, InputPrivateKeyPath), CancellationToken.None);
         var evidenceKeyId = AuditCryptography.PublicKeyId(PublicKeyPath);
+        var authorityPath = Path.Combine(Root, $"production-target-{Guid.NewGuid():N}.authority");
+        await File.WriteAllBytesAsync(authorityPath, SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"saydin-dqa-production-target/v1\0{manifest.Target.Database}\0{manifest.Target.SystemIdentifierSha256}")),
+            CancellationToken.None);
+        SetSecretFileMode(authorityPath);
         var output = new StringWriter();
         var error = new StringWriter();
         var exit = await AuditApplication.RunAsync([
@@ -150,9 +167,16 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
             "--evidence-public-key", PublicKeyPath,
             "--allowed-evidence-key-ids", evidenceKeyId,
             "--kms-timeout-seconds", "1",
+            "--production-target-authority-file", authorityPath,
         ], output, error, TimeProvider.System, cancellationToken, RuntimeEnvironment,
             _ => kmsClient);
         return (exit, output.ToString(), error.ToString(), bundle);
+    }
+
+    private static void SetSecretFileMode(string path)
+    {
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
     internal async Task<AuditInputManifest> CreateManifestAsync(
@@ -168,7 +192,7 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
         var identifier = (string)(await command.ExecuteScalarAsync())!;
         var now = DateTimeOffset.UtcNow;
         return new AuditInputManifest(
-            1,
+            2,
             AuditCryptography.PublicKeyId(InputPublicKeyPath),
             AuditCryptography.PublicKeyId(PublicKeyPath),
             now.AddMinutes(-1),
@@ -188,7 +212,9 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
                 10_000_000,
                 statementTimeoutMilliseconds,
                 1_000,
-                120),
+                120,
+                100_000,
+                1_000),
             new AuditScope(
                 now,
                 now.AddHours(-1),
@@ -201,6 +227,191 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
                     Through,
                     "day")]));
     }
+
+    internal async Task<AuditInputManifest> CreateMultiWindowLedgerMismatchAsync()
+    {
+        var priceFrom = new DateOnly(2090, 1, 1);
+        var priceThrough = new DateOnly(2090, 1, 2);
+        var inflationFrom = new DateOnly(2090, 2, 1);
+        var inflationThrough = new DateOnly(2090, 3, 1);
+        await ExecuteAdminTransactionAsync(
+            ("SET LOCAL session_replication_role=replica", []),
+            ("""
+             DELETE FROM public.ingestion_windows
+              WHERE job_type IN ('audit_multi_price','audit_multi_inflation')
+             """, []),
+            ("""
+             INSERT INTO public.ingestion_windows(
+                source,asset_id,job_type,range_start,range_end,contract_version,state,
+                requested_calendar_count,expected_observation_count,raw_item_count,
+                accepted_distinct_count,rejected_count,expected_no_data_count,
+                outcome_code,completed_at)
+             VALUES ('coingecko',$1,'audit_multi_price',$2,$2,1,'succeeded',
+                        2,2,2,2,0,0,'data_complete',clock_timestamp()),
+                    ('coingecko',$1,'audit_multi_price',$3,$3,1,'succeeded',
+                        2,2,2,2,0,0,'data_complete',clock_timestamp()),
+                    ('evds',NULL,'audit_multi_inflation',$4,$4,1,'succeeded',
+                        2,2,2,2,0,0,'data_complete',clock_timestamp()),
+                    ('evds',NULL,'audit_multi_inflation',$5,$5,1,'succeeded',
+                        2,2,2,2,0,0,'data_complete',clock_timestamp())
+             """, [AssetId, priceFrom, priceThrough, inflationFrom, inflationThrough]));
+        var baseline = await CreateManifestAsync();
+        return baseline with
+        {
+            Scope = baseline.Scope with
+            {
+                Lanes =
+                [
+                    new AuditLane("coingecko", AssetId, "audit_multi_price", 1,
+                        priceFrom, priceThrough, "day"),
+                    new AuditLane("evds", null, "audit_multi_inflation", 1,
+                        inflationFrom, inflationThrough, "month"),
+                ],
+            },
+        };
+    }
+
+    internal Task CleanupMultiWindowLedgerMismatchAsync() => ExecuteAdminTransactionAsync(
+        ("SET LOCAL session_replication_role=replica", []),
+        ("""
+         DELETE FROM public.ingestion_windows
+          WHERE job_type IN ('audit_multi_price','audit_multi_inflation')
+         """, []));
+
+    internal async Task SetPreflightMutationAsync(string mutation, bool enabled)
+    {
+        var sql = (mutation, enabled) switch
+        {
+            ("required_schema_object_missing", true) =>
+                "ALTER TABLE public.saved_scenarios RENAME TO saved_scenarios_m48_missing",
+            ("required_schema_object_missing", false) =>
+                "ALTER TABLE public.saved_scenarios_m48_missing RENAME TO saved_scenarios",
+            ("migration_set_mismatch", true) => """
+                INSERT INTO public.schema_migrations(version,checksum,state,completed_at)
+                VALUES ('999_m48_fixture',repeat('0',64),'succeeded',clock_timestamp())
+                """,
+            ("migration_set_mismatch", false) =>
+                "DELETE FROM public.schema_migrations WHERE version='999_m48_fixture'",
+            ("migration_checksum", true) =>
+                "UPDATE public.schema_migrations SET checksum=repeat('0',64) WHERE version='001_initial'",
+            ("migration_checksum", false) =>
+                "UPDATE public.schema_migrations SET checksum=$1 WHERE version='001_initial'",
+            ("migration_state", true) =>
+                "UPDATE public.schema_migrations SET state='failed' WHERE version='001_initial'",
+            ("migration_state", false) =>
+                "UPDATE public.schema_migrations SET state='succeeded' WHERE version='001_initial'",
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+        };
+        var values = mutation == "migration_checksum" && !enabled
+            ? new object[] { EmbeddedMigrations.PinnedChecksums["001_initial"] }
+            : [];
+        await ExecuteAdminTransactionAsync(
+            ("SET LOCAL session_replication_role=replica", []),
+            (sql, values));
+    }
+
+    internal async Task SetReportedViolationMutationAsync(string mutation, bool enabled)
+    {
+        if (mutation == "backup_role_version_set_drift")
+        {
+            var contract = RoleContract.Create(
+                _environment.DeploymentId,
+                _environment.DatabaseName,
+                _environment.SystemIdentifierSha256,
+                _environment.RolePrefix);
+            var original = contract.BackupLogin(1, _environment.BackupV1ValidUntilUtc).Name;
+            var drifted = $"m48_backup_{_environment.RunId[..12]}";
+            var from = new NpgsqlCommandBuilder().QuoteIdentifier(enabled ? original : drifted);
+            var to = new NpgsqlCommandBuilder().QuoteIdentifier(enabled ? drifted : original);
+            await ExecuteAdminTransactionAsync(($"ALTER ROLE {from} RENAME TO {to}", []));
+            return;
+        }
+
+        if (mutation == "calendar_payload_invalid")
+        {
+            await using var admin = new NpgsqlConnection(_environment.AdminConnectionString);
+            await admin.OpenAsync();
+            if (enabled)
+            {
+                await using var read = new NpgsqlCommand("""
+                    SELECT id,normalized_sha256
+                      FROM public.market_calendar_releases
+                     ORDER BY calendar_code COLLATE "C",release_version LIMIT 1
+                    """, admin);
+                await using var reader = await read.ExecuteReaderAsync();
+                await reader.ReadAsync();
+                _calendarPayloadReleaseId = reader.GetGuid(0);
+                _calendarPayloadOriginalHash = reader.GetString(1);
+            }
+            if (_calendarPayloadReleaseId == Guid.Empty || _calendarPayloadOriginalHash is null)
+                throw new InvalidOperationException("Calendar payload mutation state is missing.");
+            await using var transaction = await admin.BeginTransactionAsync();
+            await ExecuteAsync(admin, transaction, "SET LOCAL session_replication_role=replica");
+            await ExecuteAsync(admin, transaction, """
+                UPDATE public.market_calendar_releases SET normalized_sha256=$1 WHERE id=$2
+                """, enabled ? new string('0', 64) : _calendarPayloadOriginalHash,
+                _calendarPayloadReleaseId);
+            await transaction.CommitAsync();
+            if (!enabled)
+            {
+                _calendarPayloadReleaseId = Guid.Empty;
+                _calendarPayloadOriginalHash = null;
+            }
+            return;
+        }
+
+        var sql = (mutation, enabled) switch
+        {
+            ("price_primary_key_drift", true) =>
+                "ALTER TABLE public.price_points RENAME CONSTRAINT pk_price_points TO pk_price_points_m48_drift",
+            ("price_primary_key_drift", false) =>
+                "ALTER TABLE public.price_points RENAME CONSTRAINT pk_price_points_m48_drift TO pk_price_points",
+            ("inflation_primary_key_drift", true) =>
+                "ALTER TABLE public.inflation_rates RENAME CONSTRAINT pk_inflation_rates TO pk_inflation_rates_m48_drift",
+            ("inflation_primary_key_drift", false) =>
+                "ALTER TABLE public.inflation_rates RENAME CONSTRAINT pk_inflation_rates_m48_drift TO pk_inflation_rates",
+            ("inflation_fence_trigger_drift", true) =>
+                "ALTER TRIGGER trg_inflation_rates_ingestion_fence ON public.inflation_rates RENAME TO trg_inflation_rates_ingestion_fence_m48_drift",
+            ("inflation_fence_trigger_drift", false) =>
+                "ALTER TRIGGER trg_inflation_rates_ingestion_fence_m48_drift ON public.inflation_rates RENAME TO trg_inflation_rates_ingestion_fence",
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+        };
+        await ExecuteAdminTransactionAsync((sql, []));
+    }
+
+    internal async Task<AuditInputManifest> CreateCalendarReleaseMissingAsync()
+    {
+        await using var admin = new NpgsqlConnection(_environment.AdminConnectionString);
+        await admin.OpenAsync();
+        var assetId = await ScalarAsync<Guid>(admin,
+            "SELECT id FROM public.assets WHERE source='tcmb' ORDER BY symbol LIMIT 1");
+        var date = new DateOnly(2092, 1, 1);
+        await ExecuteAdminTransactionAsync(
+            ("SET LOCAL session_replication_role=replica", []),
+            ("DELETE FROM public.ingestion_windows WHERE job_type='audit_calendar_missing'", []),
+            ("""
+             INSERT INTO public.ingestion_windows(
+                source,asset_id,job_type,range_start,range_end,contract_version,state,
+                requested_calendar_count,expected_observation_count,raw_item_count,
+                accepted_distinct_count,rejected_count,expected_no_data_count,
+                outcome_code,completed_at,calendar_release_id)
+             VALUES ('tcmb',$1,'audit_calendar_missing',$2,$2,1,'succeeded',
+                     1,1,1,1,0,0,'data_complete',clock_timestamp(),NULL)
+             """, [assetId, date]));
+        var baseline = await CreateManifestAsync();
+        return baseline with
+        {
+            Scope = baseline.Scope with
+            {
+                Lanes = [new AuditLane("tcmb", assetId, "audit_calendar_missing", 1,
+                    date, date, "day")],
+            },
+        };
+    }
+
+    internal Task CleanupCalendarReleaseMissingAsync() => ExecuteAdminTransactionAsync(
+        ("SET LOCAL session_replication_role=replica", []),
+        ("DELETE FROM public.ingestion_windows WHERE job_type='audit_calendar_missing'", []));
 
     public async Task MakePriceGapAndInvalidAsync()
     {
@@ -224,18 +435,8 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
                      jsonb_set(source_raw,'{close}',to_jsonb(-1::numeric)))::text,'UTF8'))
              WHERE asset_id=$1 AND price_date=$2
             """, AssetId, From);
-        await ExecuteAsync(connection, transaction, """
-            ALTER TABLE public.price_points ADD CONSTRAINT chk_price_points_numeric CHECK (
-              close::text NOT IN ('NaN','Infinity','-Infinity') AND close>0
-              AND (volume IS NULL OR (volume::text NOT IN ('NaN','Infinity','-Infinity') AND volume>=0))
-              AND (open IS NULL OR open::text NOT IN ('NaN','Infinity','-Infinity'))
-              AND (high IS NULL OR high::text NOT IN ('NaN','Infinity','-Infinity'))
-              AND (low IS NULL OR low::text NOT IN ('NaN','Infinity','-Infinity'))
-              AND ((open IS NULL AND high IS NULL AND low IS NULL)
-                OR (open IS NOT NULL AND high IS NOT NULL AND low IS NOT NULL
-                    AND open>0 AND high>0 AND low>0
-                    AND high>=GREATEST(open,close,low) AND low<=LEAST(open,close,high)))) NOT VALID
-            """);
+        await RestorePinnedConstraintAsync(
+            connection, transaction, "chk_price_points_numeric");
         await transaction.CommitAsync();
     }
 
@@ -438,7 +639,24 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
                 throw new ArgumentOutOfRangeException(nameof(drift));
         }
         await transaction.CommitAsync();
-        return new Dq009DataDrift(windowId,
+        var manifest = await CreateManifestAsync();
+        if (drift == "forged_inflation_attribution")
+        {
+            manifest = manifest with
+            {
+                Scope = manifest.Scope with
+                {
+                    Lanes =
+                    [
+                        .. manifest.Scope.Lanes,
+                        new AuditLane(
+                            "evds", null, "inflation_backfill", 1,
+                            new DateOnly(2003, 1, 1), new DateOnly(2003, 1, 1), "month"),
+                    ],
+                },
+            };
+        }
+        return new Dq009DataDrift(manifest, windowId,
             drift is "orphan_fetch_payload" or "forged_inflation_attribution" ? payloadSha : null);
     }
 
@@ -555,11 +773,8 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
             "DELETE FROM public.inflation_rates WHERE period_date=$1 AND source='tuik'", evdsDate);
         await ExecuteAsync(connection, transaction,
             "ALTER TABLE public.inflation_rates ENABLE ALWAYS TRIGGER trg_inflation_rates_ingestion_fence");
-        await ExecuteAsync(connection, transaction, """
-            ALTER TABLE public.inflation_rates ADD CONSTRAINT chk_inflation_rates_numeric CHECK (
-              index_value::text NOT IN ('NaN','Infinity','-Infinity') AND index_value>0
-              AND EXTRACT(day FROM period_date)=1) NOT VALID
-            """);
+        await RestorePinnedConstraintAsync(
+            connection, transaction, "chk_inflation_rates_numeric");
 
         await ExecuteAsync(connection, transaction,
             "ALTER TABLE public.ingestion_windows DISABLE TRIGGER trg_ingestion_window_calendar_release");
@@ -958,26 +1173,10 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
         return parts.Length >= 3 ? parts[2] : sourceId;
     }
 
-    private static Task RestorePriceAuthorityTupleAsync(
+    private Task RestorePriceAuthorityTupleAsync(
         NpgsqlConnection connection,
-        NpgsqlTransaction transaction) => ExecuteAsync(connection, transaction, """
-        ALTER TABLE public.price_points ADD CONSTRAINT chk_price_points_authority_tuple CHECK (
-          (provider_source IS NULL AND source_observation_id IS NULL AND as_of_at IS NULL
-           AND price_kind IS NULL AND is_final IS NULL AND observation_sha256 IS NULL
-           AND authority_contract_version IS NULL)
-          OR (provider_source IS NOT NULL AND source_observation_id IS NOT NULL AND as_of_at IS NOT NULL
-           AND price_kind IS NOT NULL AND is_final IS TRUE AND observation_sha256 IS NOT NULL
-           AND authority_contract_version>0 AND source_raw IS NOT NULL
-           AND octet_length(source_observation_id) BETWEEN 1 AND 256
-           AND octet_length(observation_sha256)=32
-           AND observation_sha256<>decode(repeat('00',32),'hex')
-           AND public.saydin_source_raw_allowed(source_raw)
-           AND source_raw->>'provider_source'=provider_source
-           AND source_raw->>'observation_id'=source_observation_id
-           AND observation_sha256=sha256(convert_to(
-               public.saydin_canonical_observation(source_raw)::text,'UTF8')))
-        ) NOT VALID
-        """);
+        NpgsqlTransaction transaction) => RestorePinnedConstraintAsync(
+            connection, transaction, "chk_price_points_authority_tuple");
 
     internal async Task GrantAuditRolePrivilegeAsync(string table, string privilege, bool grant)
     {
@@ -1111,6 +1310,36 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
             default:
                 throw new ArgumentOutOfRangeException(nameof(drift));
         }
+    }
+
+    internal Task RenameContractFunctionAsync(string signature, bool restore)
+    {
+        var open = signature.IndexOf('(');
+        if (open < 1 || !signature.EndsWith(')'))
+            throw new ArgumentOutOfRangeException(nameof(signature));
+        var originalName = signature[..open];
+        var arguments = signature[open..];
+        if (!originalName.All(character => char.IsAsciiLetterOrDigit(character) || character == '_') ||
+            arguments.Any(character => !(char.IsAsciiLetterOrDigit(character) ||
+                character is '_' or ' ' or ',' or '(' or ')')))
+            throw new ArgumentOutOfRangeException(nameof(signature));
+        var driftName = $"{originalName}__dqa_drift";
+        var fromName = restore ? driftName : originalName;
+        var toName = restore ? originalName : driftName;
+        return ExecuteAdminTransactionAsync((
+            $"ALTER FUNCTION public.{fromName}{arguments} RENAME TO {toName}", []));
+    }
+
+    internal Task RenameContractTriggerAsync(string relationAndTrigger, bool restore)
+    {
+        var parts = relationAndTrigger.Split('.', StringSplitOptions.None);
+        if (parts.Length != 2 || parts.Any(part => part.Length == 0 ||
+            part.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '_')))
+            throw new ArgumentOutOfRangeException(nameof(relationAndTrigger));
+        var driftName = $"{parts[1]}__dqa_drift";
+        return ExecuteAdminTransactionAsync((
+            $"ALTER TRIGGER {(restore ? driftName : parts[1])} ON public.{parts[0]} " +
+            $"RENAME TO {(restore ? parts[1] : driftName)}", []));
     }
 
     internal Task RestoreApiTrustStructureDriftAsync(string drift, string? originalDefinition) =>
@@ -1314,18 +1543,20 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
         ("ALTER TABLE public.asset_catalog_state DROP CONSTRAINT chk_asset_catalog_state_sha256", []),
         ("UPDATE public.asset_catalog_state SET catalog_sha256=decode('01','hex') WHERE singleton=1", []));
 
-    internal Task RestoreAssetCatalogEvidenceAsync() => ExecuteAdminTransactionAsync(
-        ("""
-         UPDATE public.asset_catalog_state
-            SET catalog_sha256=public.compute_asset_catalog_sha256(),
-                updated_at=clock_timestamp()
-          WHERE singleton=1
-         """, []),
-        ("""
-         ALTER TABLE public.asset_catalog_state
-           ADD CONSTRAINT chk_asset_catalog_state_sha256
-           CHECK(octet_length(catalog_sha256)=32)
-         """, []));
+    internal async Task RestoreAssetCatalogEvidenceAsync()
+    {
+        await using var connection = await OpenAdminConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await ExecuteAsync(connection, transaction, """
+            UPDATE public.asset_catalog_state
+               SET catalog_sha256=public.compute_asset_catalog_sha256(),
+                   updated_at=clock_timestamp()
+             WHERE singleton=1
+            """);
+        await RestorePinnedConstraintAsync(
+            connection, transaction, "chk_asset_catalog_state_sha256");
+        await transaction.CommitAsync();
+    }
 
     private async Task<string> ApiTrustGrantSqlAsync(string format)
     {
@@ -1392,36 +1623,37 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
             return;
         }
 
+        if (drift is "wrong_kind" or "replaced_pk" or "fk_action")
+        {
+            await using var connection = await OpenAdminConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+            if (drift == "wrong_kind")
+            {
+                await RestorePinnedConstraintAsync(
+                    connection, transaction, "pk_provider_fetch_payloads");
+                await RestorePinnedConstraintAsync(
+                    connection, transaction, "fk_price_attribution_payload");
+                await RestorePinnedConstraintAsync(
+                    connection, transaction, "fk_inflation_attribution_payload");
+            }
+            else if (drift == "replaced_pk")
+            {
+                await ExecuteAsync(connection, transaction,
+                    "DROP INDEX public.pk_price_observation_attributions");
+                await RestorePinnedConstraintAsync(
+                    connection, transaction, "pk_price_observation_attributions");
+            }
+            else
+            {
+                await RestorePinnedConstraintAsync(
+                    connection, transaction, "fk_price_attribution_window");
+            }
+            await transaction.CommitAsync();
+            return;
+        }
+
         var sql = drift switch
         {
-            "wrong_kind" => """
-                ALTER TABLE public.provider_fetch_payloads DROP CONSTRAINT pk_provider_fetch_payloads;
-                ALTER TABLE public.provider_fetch_payloads ADD CONSTRAINT pk_provider_fetch_payloads
-                  PRIMARY KEY(provider_source,payload_sha256);
-                ALTER TABLE public.price_observation_attributions
-                  ADD CONSTRAINT fk_price_attribution_payload
-                  FOREIGN KEY(provider_source,payload_sha256)
-                  REFERENCES public.provider_fetch_payloads(provider_source,payload_sha256)
-                  ON DELETE RESTRICT;
-                ALTER TABLE public.inflation_observation_attributions
-                  ADD CONSTRAINT fk_inflation_attribution_payload
-                  FOREIGN KEY(provider_source,payload_sha256)
-                  REFERENCES public.provider_fetch_payloads(provider_source,payload_sha256)
-                  ON DELETE RESTRICT
-                """,
-            "replaced_pk" => """
-                DROP INDEX public.pk_price_observation_attributions;
-                ALTER TABLE public.price_observation_attributions
-                  ADD CONSTRAINT pk_price_observation_attributions
-                  PRIMARY KEY(asset_id,price_date,ingestion_window_id,payload_sha256)
-                """,
-            "fk_action" => """
-                ALTER TABLE public.price_observation_attributions
-                  DROP CONSTRAINT fk_price_attribution_window;
-                ALTER TABLE public.price_observation_attributions
-                  ADD CONSTRAINT fk_price_attribution_window FOREIGN KEY(ingestion_window_id)
-                  REFERENCES public.ingestion_windows(id) ON DELETE RESTRICT
-                """,
             "foreign_table_grant" => await AuthorityGrantSqlAsync(
                 "api_capability_role", "REVOKE UPDATE ON public.provider_fetch_payloads FROM {0}"),
             "column_grant" => await AuthorityGrantSqlAsync(
@@ -1648,16 +1880,15 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
 
     internal async Task RestoreWindowUniqueConstraintAsync()
     {
-        await ExecuteAdminTransactionAsync(
-            ("""
-             DELETE FROM public.ingestion_windows
-              WHERE source='coingecko' AND asset_id=$1 AND job_type='audit_constraint'
-             """, [AssetId]),
-            ("ALTER TABLE public.ingestion_windows DROP CONSTRAINT uq_ingestion_windows_logical", []),
-            ("""
-             ALTER TABLE public.ingestion_windows ADD CONSTRAINT uq_ingestion_windows_logical
-             UNIQUE NULLS NOT DISTINCT(source,asset_id,job_type,range_start,range_end,contract_version)
-             """, []));
+        await using var connection = await OpenAdminConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await ExecuteAsync(connection, transaction, """
+            DELETE FROM public.ingestion_windows
+             WHERE source='coingecko' AND asset_id=$1 AND job_type='audit_constraint'
+            """, AssetId);
+        await RestorePinnedConstraintAsync(
+            connection, transaction, "uq_ingestion_windows_logical");
+        await transaction.CommitAsync();
     }
 
     internal async Task<AuditInputManifest> CreateContainingMonthlyLaneAsync()
@@ -1764,16 +1995,42 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
                AND status='running' AND date_range_start=$2 AND date_range_end=$3
             """, [AssetId, From, Through]));
 
-    internal async Task RemoveCalendarPointerAndEligibleBindingAsync()
+    internal async Task<AuditInputManifest> RemoveCalendarPointerAndEligibleBindingAsync()
     {
+        var baseline = await CreateManifestAsync();
+        await using var connection = new NpgsqlConnection(_environment.AdminConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT id FROM public.assets
+             WHERE source='tcmb' AND is_active
+             ORDER BY symbol COLLATE "C" LIMIT 2
+            """, connection);
+        var tcmbAssets = new List<Guid>(2);
+        await using (var reader = await command.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+                tcmbAssets.Add(reader.GetGuid(0));
+        }
+        if (tcmbAssets.Count != 2)
+            throw new InvalidOperationException(
+                "Two active TCMB assets are required for the scoped calendar metadata fixture.");
+
         await ExecuteAdminTransactionAsync(
             ("SET LOCAL session_replication_role=replica", []),
             ("DELETE FROM public.market_calendar_active_releases WHERE calendar_code='tcmb_indicative_fx'", []),
             ("""
              DELETE FROM public.asset_market_calendars
-              WHERE asset_id=(SELECT id FROM public.assets WHERE source='tcmb' AND is_active
-                               ORDER BY symbol LIMIT 1)
-             """, []));
+              WHERE asset_id=$1
+             """, [tcmbAssets[0]]));
+
+        return baseline with
+        {
+            Scope = baseline.Scope with
+            {
+                Lanes = tcmbAssets.Select(assetId => new AuditLane(
+                    "tcmb", assetId, "daily_update", 1, From, Through, "day")).ToArray(),
+            },
+        };
     }
 
     internal async Task RestoreCalendarPointerAndEligibleBindingAsync()
@@ -1789,7 +2046,7 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
             ("""
              INSERT INTO public.asset_market_calendars(asset_id,source,calendar_code)
              SELECT id,'tcmb','tcmb_indicative_fx' FROM public.assets
-              WHERE source='tcmb' AND is_active ORDER BY symbol LIMIT 1
+              WHERE source='tcmb' AND is_active ORDER BY symbol COLLATE "C" LIMIT 1
              ON CONFLICT(asset_id) DO UPDATE SET source=excluded.source,
                  calendar_code=excluded.calendar_code
              """, []));
@@ -1938,6 +2195,40 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
             ?? throw new InvalidOperationException("CoinGecko fixture asset is missing."));
     }
 
+    private async Task CapturePinnedConstraintsAsync(NpgsqlConnection connection)
+    {
+        await using var command = new NpgsqlCommand("""
+            SELECT relation.relname,candidate.conname,
+                   pg_catalog.pg_get_constraintdef(candidate.oid,true)
+              FROM pg_catalog.pg_constraint candidate
+              JOIN pg_catalog.pg_class relation ON relation.oid=candidate.conrelid
+             WHERE candidate.connamespace='public'::regnamespace
+             ORDER BY candidate.conname COLLATE "C"
+            """, connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var name = reader.GetString(1);
+            if (!_pinnedConstraints.TryAdd(name, (reader.GetString(0), reader.GetString(2))))
+                throw new InvalidOperationException($"Constraint name is not unique: {name}");
+        }
+    }
+
+    private async Task RestorePinnedConstraintAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        string name)
+    {
+        if (!_pinnedConstraints.TryGetValue(name, out var pinned))
+            throw new InvalidOperationException($"Pinned constraint is missing: {name}");
+        var commandBuilder = new NpgsqlCommandBuilder();
+        string Quote(string identifier) => commandBuilder.QuoteIdentifier(identifier);
+        await ExecuteAsync(connection, transaction,
+            $"ALTER TABLE public.{Quote(pinned.Relation)} DROP CONSTRAINT IF EXISTS {Quote(name)}");
+        await ExecuteAsync(connection, transaction,
+            $"ALTER TABLE public.{Quote(pinned.Relation)} ADD CONSTRAINT {Quote(name)} {pinned.Definition}");
+    }
+
     private static async Task ExecuteAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
@@ -1977,6 +2268,8 @@ public sealed class AuditDatabaseFixture : IAsyncLifetime
     {
         var path = Path.Combine(Root, name);
         File.WriteAllText(path, value, Encoding.UTF8);
+        if (name.Contains("private", StringComparison.Ordinal))
+            SetSecretFileMode(path);
         return path;
     }
 }

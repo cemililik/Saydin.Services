@@ -165,11 +165,30 @@ public sealed class DataQualityAuditAcceptanceTests(AuditDatabaseFixture databas
         var fixture = await database.ApplyDq009DataDriftAsync(drift);
         try
         {
-            var result = await database.RunAuditAsync();
+            var result = await database.RunAuditAsync(fixture.Manifest);
             result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
             (await ReadContentAsync(result.Bundle)).Checks
                 .Single(check => check.CheckId == "DQ-009").Samples
                 .Should().Contain(sample => sample.ViolationCode == violationCode);
+        }
+        finally
+        {
+            await database.CleanupDq009DataDriftAsync(fixture);
+        }
+
+        var clean = await database.RunAuditAsync();
+        clean.ExitCode.Should().Be(AuditExitCodes.Clean, clean.Error);
+    }
+
+    [Fact]
+    public async Task ForgedInflationAttribution_OutsideSignedLane_RemainsOutOfScope()
+    {
+        var fixture = await database.ApplyDq009DataDriftAsync(
+            "forged_inflation_attribution");
+        try
+        {
+            var result = await database.RunAuditAsync();
+            result.ExitCode.Should().Be(AuditExitCodes.Clean, result.Error);
         }
         finally
         {
@@ -322,6 +341,67 @@ public sealed class DataQualityAuditAcceptanceTests(AuditDatabaseFixture databas
         clean.ExitCode.Should().Be(AuditExitCodes.Clean, clean.Error);
     }
 
+    [Theory]
+    [InlineData("compute_asset_catalog_sha256()")]
+    [InlineData("refresh_asset_catalog_state()")]
+    [InlineData("register_installation(uuid,uuid,bytea,smallint)")]
+    [InlineData("resolve_installation(bytea,smallint)")]
+    [InlineData("resolve_installation_and_rehash(bytea,smallint,bytea,smallint)")]
+    [InlineData("begin_installation_rotation(bytea,smallint,uuid,uuid,bytea,smallint)")]
+    [InlineData("commit_installation_rotation(uuid,bytea,smallint)")]
+    [InlineData("revoke_installation(bytea,smallint)")]
+    [InlineData("get_asset_catalog_state()")]
+    [InlineData("installation_verifier_matches(bytea,bytea)")]
+    [InlineData("resolve_installation_rotation_commit(uuid,bytea,smallint)")]
+    [InlineData("enforce_activity_action_allowlist()")]
+    [InlineData("redact_activity_logs_before_principal_delete()")]
+    public async Task EveryAuditedFunctionMutation_IsDetectedAndRestored(string signature)
+    {
+        await database.RenameContractFunctionAsync(signature, restore: false);
+        try
+        {
+            var result = await database.RunAuditAsync();
+            result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
+            var expected = signature.StartsWith(
+                "redact_activity_logs", StringComparison.Ordinal)
+                ? "principal_retention_structure_drift"
+                : "api_trust_structure_drift";
+            (await ReadContentAsync(result.Bundle)).Checks
+                .Single(check => check.CheckId == "DQ-003").Samples
+                .Should().Contain(sample => sample.ViolationCode == expected);
+        }
+        finally
+        {
+            await database.RenameContractFunctionAsync(signature, restore: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("assets.trg_asset_catalog_revision_insert", "api_trust_structure_drift")]
+    [InlineData("assets.trg_asset_catalog_revision_update", "api_trust_structure_drift")]
+    [InlineData("assets.trg_asset_catalog_revision_delete", "api_trust_structure_drift")]
+    [InlineData("assets.trg_asset_catalog_revision_truncate", "api_trust_structure_drift")]
+    [InlineData("activity_logs.trg_activity_action_allowlist", "api_trust_structure_drift")]
+    [InlineData("users.trg_users_principal_retention_redact", "principal_retention_structure_drift")]
+    public async Task EveryAuditedTriggerMutation_IsDetectedAndRestored(
+        string relationAndTrigger,
+        string violationCode)
+    {
+        await database.RenameContractTriggerAsync(relationAndTrigger, restore: false);
+        try
+        {
+            var result = await database.RunAuditAsync();
+            result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
+            (await ReadContentAsync(result.Bundle)).Checks
+                .Single(check => check.CheckId == "DQ-003").Samples
+                .Should().Contain(sample => sample.ViolationCode == violationCode);
+        }
+        finally
+        {
+            await database.RenameContractTriggerAsync(relationAndTrigger, restore: true);
+        }
+    }
+
     [Fact]
     public async Task MalformedAssetCatalogHash_IsFindingAndNeverOperationalAbort()
     {
@@ -352,10 +432,16 @@ public sealed class DataQualityAuditAcceptanceTests(AuditDatabaseFixture databas
         {
             var result = await database.RunAuditAsync();
             result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
-            var evidence = await File.ReadAllTextAsync(Path.Combine(result.Bundle, "evidence-content.json"));
-            evidence.Should().Contain("missing_expected_observation")
-                .And.Contain("nonpositive_close")
-                .And.NotContain(database.AssetId.ToString("D"));
+            var content = await ReadContentAsync(result.Bundle);
+            content.Checks.Single(check => check.CheckId == "DQ-001").Should()
+                .Match<AuditCheckResult>(check => check.Severity == AuditSeverity.Critical &&
+                    check.Samples.Any(sample => sample.ViolationCode == "missing_expected_observation"));
+            content.Checks.Single(check => check.CheckId == "DQ-004").Should()
+                .Match<AuditCheckResult>(check => check.Severity == AuditSeverity.High &&
+                    check.Samples.Any(sample => sample.ViolationCode == "nonpositive_close"));
+            foreach (var file in Directory.EnumerateFiles(result.Bundle, "*", SearchOption.AllDirectories)
+                         .Where(path => Path.GetExtension(path) != ".sig"))
+                (await File.ReadAllTextAsync(file)).Should().NotContain(database.AssetId.ToString("D"));
         }
         finally
         {
@@ -392,17 +478,188 @@ public sealed class DataQualityAuditAcceptanceTests(AuditDatabaseFixture databas
         var wrongTarget = await database.CreateManifestAsync(database: "wrong_database");
         var targetResult = await database.RunAuditAsync(wrongTarget);
         targetResult.ExitCode.Should().Be(AuditExitCodes.PreflightRejected);
+        targetResult.Error.Should().Contain("code=target_or_read_only_mismatch");
         Directory.Exists(targetResult.Bundle).Should().BeFalse();
+
+        var baseline = await database.CreateManifestAsync();
+        var wrongSystemIdentifier = baseline with
+        {
+            Target = baseline.Target with { SystemIdentifierSha256 = new string('0', 64) },
+        };
+        var systemIdentifierResult = await database.RunAuditAsync(wrongSystemIdentifier);
+        systemIdentifierResult.ExitCode.Should().Be(AuditExitCodes.PreflightRejected);
+        systemIdentifierResult.Error.Should().Contain("code=target_system_identifier_mismatch");
+        Directory.Exists(systemIdentifierResult.Bundle).Should().BeFalse();
 
         var tinyBudget = await database.CreateManifestAsync(maxDatabaseBytes: 1);
         var budgetResult = await database.RunAuditAsync(tinyBudget);
         budgetResult.ExitCode.Should().Be(AuditExitCodes.BudgetRejected);
+        budgetResult.Error.Should().Contain("code=query_budget_exceeded");
         Directory.Exists(budgetResult.Bundle).Should().BeFalse();
 
         var relationBudget = await database.CreateManifestAsync(maxRelationBytes: 1);
         var relationResult = await database.RunAuditAsync(relationBudget);
         relationResult.ExitCode.Should().Be(AuditExitCodes.BudgetRejected);
+        relationResult.Error.Should().Contain("code=query_budget_exceeded");
         Directory.Exists(relationResult.Bundle).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("required_schema_object_missing", "required_schema_object_missing")]
+    [InlineData("migration_set_mismatch", "migration_set_mismatch")]
+    [InlineData("migration_checksum", "migration_checksum_or_state_mismatch")]
+    [InlineData("migration_state", "migration_checksum_or_state_mismatch")]
+    public async Task PreflightDatabaseMutation_EmitsExactCode_ThenCleanupReturnsClean(
+        string mutation,
+        string expectedCode)
+    {
+        var applied = false;
+        try
+        {
+            await database.SetPreflightMutationAsync(mutation, enabled: true);
+            applied = true;
+            var result = await database.RunAuditAsync();
+            result.ExitCode.Should().Be(AuditExitCodes.PreflightRejected, result.Error);
+            result.Error.Should().Contain($"code={expectedCode}");
+            Directory.Exists(result.Bundle).Should().BeFalse();
+        }
+        finally
+        {
+            if (applied)
+                await database.SetPreflightMutationAsync(mutation, enabled: false);
+        }
+
+        var clean = await database.RunAuditAsync();
+        clean.ExitCode.Should().Be(AuditExitCodes.Clean, clean.Error);
+    }
+
+    [Fact]
+    public async Task MultipleMatchingWindows_ExceedSignedWindowBudget_ThenCleanupReturnsClean()
+    {
+        var applied = false;
+        try
+        {
+            applied = true;
+            var manifest = await database.CreateOverlapShortLaneAsync();
+            manifest = manifest with { Budget = manifest.Budget with { MaxWindows = 1 } };
+            var result = await database.RunAuditAsync(manifest);
+            result.ExitCode.Should().Be(AuditExitCodes.BudgetRejected, result.Error);
+            result.Error.Should().Contain("code=window_budget_exceeded");
+            Directory.Exists(result.Bundle).Should().BeFalse();
+        }
+        finally
+        {
+            if (applied)
+                await database.CleanupOverlapShortLaneAsync();
+        }
+
+        var clean = await database.RunAuditAsync();
+        clean.ExitCode.Should().Be(AuditExitCodes.Clean, clean.Error);
+    }
+
+    [Theory]
+    [InlineData("global", "global_scan_budget_exceeded")]
+    [InlineData("calendar", "calendar_release_budget_exceeded")]
+    public async Task SignedGlobalAndCalendarBudgets_BoundOtherwiseGlobalScans(
+        string budget,
+        string expectedCode)
+    {
+        var manifest = await database.CreateManifestAsync();
+        manifest = manifest with
+        {
+            Budget = budget == "global"
+                ? manifest.Budget with { MaxGlobalRows = 1 }
+                : manifest.Budget with { MaxCalendarReleases = 1 },
+        };
+
+        var result = await database.RunAuditAsync(manifest);
+
+        result.ExitCode.Should().Be(AuditExitCodes.BudgetRejected, result.Error);
+        result.Error.Should().Contain($"code={expectedCode}");
+        Directory.Exists(result.Bundle).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("price_primary_key_drift", "DQ-003")]
+    [InlineData("inflation_primary_key_drift", "DQ-003")]
+    [InlineData("backup_role_version_set_drift", "DQ-003")]
+    [InlineData("inflation_fence_trigger_drift", "DQ-003")]
+    [InlineData("calendar_payload_invalid", "DQ-006")]
+    public async Task ReportedViolationMutation_EmitsExactCode_ThenCleanupReturnsClean(
+        string violationCode,
+        string checkId)
+    {
+        var applied = false;
+        try
+        {
+            await database.SetReportedViolationMutationAsync(violationCode, enabled: true);
+            applied = true;
+            var result = await database.RunAuditAsync();
+            result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
+            var check = (await ReadContentAsync(result.Bundle)).Checks
+                .Single(item => item.CheckId == checkId);
+            check.Samples.Should().Contain(sample => sample.ViolationCode == violationCode);
+        }
+        finally
+        {
+            if (applied)
+                await database.SetReportedViolationMutationAsync(violationCode, enabled: false);
+        }
+
+        var clean = await database.RunAuditAsync();
+        clean.ExitCode.Should().Be(AuditExitCodes.Clean, clean.Error);
+    }
+
+    [Fact]
+    public async Task TerminalCalendarLaneWithoutRelease_EmitsExactCode_ThenCleanupReturnsClean()
+    {
+        var applied = false;
+        try
+        {
+            applied = true;
+            var manifest = await database.CreateCalendarReleaseMissingAsync();
+            var result = await database.RunAuditAsync(manifest);
+            result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
+            var calendar = (await ReadContentAsync(result.Bundle)).Checks
+                .Single(item => item.CheckId == "DQ-006");
+            calendar.Samples.Should().Contain(sample =>
+                sample.ViolationCode == "calendar_release_missing");
+        }
+        finally
+        {
+            if (applied)
+                await database.CleanupCalendarReleaseMissingAsync();
+        }
+
+        var clean = await database.RunAuditAsync();
+        clean.ExitCode.Should().Be(AuditExitCodes.Clean, clean.Error);
+    }
+
+    [Fact]
+    public async Task MultiWindowPriceAndInflation_MetadataMismatchIsAuditedWithinSignedScope()
+    {
+        var applied = false;
+        try
+        {
+            applied = true;
+            var manifest = await database.CreateMultiWindowLedgerMismatchAsync();
+            var result = await database.RunAuditAsync(manifest);
+            result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
+            var codes = (await ReadContentAsync(result.Bundle)).Checks
+                .Single(item => item.CheckId == "DQ-001").Samples
+                .Select(sample => sample.ViolationCode);
+            codes.Should().Contain("ledger_requested_count_mismatch")
+                .And.Contain("ledger_success_actual_count_mismatch")
+                .And.Contain("ledger_month_count_mismatch");
+        }
+        finally
+        {
+            if (applied)
+                await database.CleanupMultiWindowLedgerMismatchAsync();
+        }
+
+        var clean = await database.RunAuditAsync();
+        clean.ExitCode.Should().Be(AuditExitCodes.Clean, clean.Error);
     }
 
     [Fact]
@@ -603,10 +860,10 @@ public sealed class DataQualityAuditAcceptanceTests(AuditDatabaseFixture databas
     [Fact]
     public async Task MissingActiveCalendarPointerAndEligibleBinding_AreDq006()
     {
-        await database.RemoveCalendarPointerAndEligibleBindingAsync();
+        var manifest = await database.RemoveCalendarPointerAndEligibleBindingAsync();
         try
         {
-            var result = await database.RunAuditAsync();
+            var result = await database.RunAuditAsync(manifest);
             result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
             var codes = (await ReadContentAsync(result.Bundle)).Checks
                 .Single(check => check.CheckId == "DQ-006").Samples
@@ -714,21 +971,24 @@ public sealed class DataQualityAuditAcceptanceTests(AuditDatabaseFixture databas
         {
             var result = await database.RunAuditAsync(manifest);
             result.ExitCode.Should().Be(AuditExitCodes.Violations, result.Error);
-            var evidence = await File.ReadAllTextAsync(
-                Path.Combine(result.Bundle, "evidence-content.json"));
-            foreach (var expected in new[]
+            var content = await ReadContentAsync(result.Bundle);
+            foreach (var expected in new (string CheckId, AuditSeverity Severity, string Code)[]
                      {
-                         "trailing_gap",
-                         "price_fence_trigger_drift",
-                         "nonpositive_cpi",
-                         "seed_without_tuik",
-                         "window_calendar_release_scope_or_coverage_mismatch",
-                         "expired_running_lease",
-                         "job_window_scope_mismatch",
-                         "post_fence_price_without_succeeded_window",
-                         "post_grace_job_without_window",
+                         ("DQ-002", AuditSeverity.Critical, "trailing_gap"),
+                         ("DQ-003", AuditSeverity.Critical, "price_fence_trigger_drift"),
+                         ("DQ-004", AuditSeverity.High, "nonpositive_cpi"),
+                         ("DQ-005", AuditSeverity.High, "seed_without_tuik"),
+                         ("DQ-006", AuditSeverity.Critical, "window_calendar_release_scope_or_coverage_mismatch"),
+                         ("DQ-007", AuditSeverity.Critical, "expired_running_lease"),
+                         ("DQ-007", AuditSeverity.Critical, "job_window_scope_mismatch"),
+                         ("DQ-008", AuditSeverity.Critical, "post_fence_price_without_succeeded_window"),
+                         ("DQ-008", AuditSeverity.Critical, "post_grace_job_without_window"),
                      })
-                evidence.Should().Contain(expected);
+            {
+                var check = content.Checks.Single(item => item.CheckId == expected.CheckId);
+                check.Severity.Should().Be(expected.Severity);
+                check.Samples.Should().Contain(sample => sample.ViolationCode == expected.Code);
+            }
         }
         finally
         {

@@ -6,7 +6,7 @@
       "calendarCode": "bist_pay_xist",
       "outputPath": "normalized/bist_pay_xist.csv",
       "rowCount": 1096,
-      "normalizedSha256": "82c463fec5abf9663b689d863da9e7efcd93b976747e869c5aaeccfe7a4feed0",
+      "normalizedSha256": "6e67ff85fd9a2c54e9c4bf733640c744b6792a39cfa51c621473f7dde39986b1",
       "sourceBundleSha256": "a93a6905c5213cdd30ad5a4ab4b9bcdb0698cf943c890aa44f462a1f3323c9b3"
     },
     {

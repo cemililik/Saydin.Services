@@ -45,17 +45,27 @@ internal static class ScenarioRequestBodyReader
 
             try
             {
+                var json = buffer.AsMemory(0, length);
+                if (length >= 3
+                    && buffer[0] == 0xEF
+                    && buffer[1] == 0xBB
+                    && buffer[2] == 0xBF)
+                {
+                    json = buffer.AsMemory(3, length - 3);
+                }
+                if (json.IsEmpty)
+                    throw new ValidationException(
+                        string.Format(localizer["RequestPayloadMissing"], "request"),
+                        field: "request");
+
                 using var document = JsonDocument.Parse(
-                    buffer.AsMemory(0, length),
+                    json,
                     new JsonDocumentOptions { MaxDepth = MaxRequestJsonDepth });
                 EnsureNoDuplicateProperties(document.RootElement, localizer);
 
-                var endpointOptions = new JsonSerializerOptions(serializerOptions)
-                {
-                    MaxDepth = MaxRequestJsonDepth,
-                };
-                return JsonSerializer.Deserialize<SaveScenarioRequest>(
-                           buffer.AsSpan(0, length), endpointOptions)
+                // Parse once: duplicate/depth validation and binding share the same
+                // JsonDocument. The configured web serializer options are reused.
+                return document.RootElement.Deserialize<SaveScenarioRequest>(serializerOptions)
                        ?? throw new ValidationException(
                            string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
             }

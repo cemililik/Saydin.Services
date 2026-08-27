@@ -26,6 +26,7 @@ REQUIRED_CANONICAL = (
 INLINE_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
 REFERENCE_LINK = re.compile(r"^\s*\[[^\]]+\]:\s*(?P<target><[^>]+>|\S+)", re.MULTILINE)
 URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+DEV_COMPOSE_COMMAND = re.compile(r"^docker compose\s+.*$", re.MULTILINE)
 
 
 def markdown_files() -> list[Path]:
@@ -95,6 +96,15 @@ def main() -> int:
                 errors.append(
                     f"link_missing:{source.relative_to(ROOT)}:{match.start()}:{raw}"
                 )
+
+        if source.relative_to(ROOT).as_posix() in {"CLAUDE.md", "CONTRIBUTING.md"}:
+            for command in DEV_COMPOSE_COMMAND.findall(body):
+                if ("--env-file .env" not in command
+                        or "--env-file .env.database-runtime" not in command):
+                    errors.append(
+                        f"development_compose_env_files_missing:"
+                        f"{source.relative_to(ROOT)}:{command}"
+                    )
 
     for error in sorted(set(errors)):
         print(error, file=sys.stderr)

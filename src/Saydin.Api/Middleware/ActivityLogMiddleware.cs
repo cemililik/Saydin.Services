@@ -48,6 +48,13 @@ public sealed class ActivityLogMiddleware(
             {
                 try
                 {
+                    // Credential endpoint filters run after this middleware creates the
+                    // builder. Bind the server-resolved principal as late as possible so
+                    // authentication/rate-limit/handler failures retain attribution.
+                    var principal = context.RequestServices
+                        .GetService<IInstallationPrincipalContext>();
+                    if (principal?.IsResolved == true)
+                        builder.WithUserId(principal.PrincipalId);
                     builder.WithResponseStatus((short)context.Response.StatusCode);
                     builder.Send(activityLogger);
                 }
@@ -78,6 +85,10 @@ public sealed class ActivityLogMiddleware(
             "SaveScenario" => ActivityActions.ScenarioSave,
             "DeleteScenario" => ActivityActions.ScenarioDelete,
             "GetAppConfig" => ActivityActions.ConfigFetch,
+            "RegisterInstallation" => ActivityActions.InstallationRegister,
+            "BeginInstallationRotation" => ActivityActions.InstallationRotationBegin,
+            "CommitInstallationRotation" => ActivityActions.InstallationRotationCommit,
+            "RevokeInstallation" => ActivityActions.InstallationRevoke,
             _ => null,
         };
     }

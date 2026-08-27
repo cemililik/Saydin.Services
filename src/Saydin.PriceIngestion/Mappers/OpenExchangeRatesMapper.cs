@@ -30,11 +30,16 @@ public static class OpenExchangeRatesMapper
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new ProviderContractException("contract_value_kind_invalid");
 
         if (!root.TryGetProperty("base", out var baseElement)
-            || baseElement.GetString() != "USD"
-            || !root.TryGetProperty("timestamp", out var timestampElement)
-            || !timestampElement.TryGetInt64(out var timestamp))
+            || ProviderValueParser.ReadString(baseElement) != "USD"
+            || !root.TryGetProperty("timestamp", out var timestampElement))
+            throw new ProviderContractException("contract_identity_mismatch");
+        if (timestampElement.ValueKind != JsonValueKind.Number)
+            throw new ProviderContractException("contract_value_kind_invalid");
+        if (!timestampElement.TryGetInt64(out var timestamp))
             throw new ProviderContractException("contract_identity_mismatch");
         var providerAsOf = DateTimeOffset.FromUnixTimeSeconds(timestamp);
         if (DateOnly.FromDateTime(providerAsOf.UtcDateTime) != date)
@@ -42,16 +47,18 @@ public static class OpenExchangeRatesMapper
 
         if (!root.TryGetProperty("rates", out var rates))
             return null;
+        if (rates.ValueKind != JsonValueKind.Object)
+            throw new ProviderContractException("contract_value_kind_invalid");
 
         // rates["XAU"] = troy oz başına USD'nin karşılığı (1 USD = X troy oz)
         // → 1 troy oz fiyatı USD = 1 / rates["XAU"]
         if (!rates.TryGetProperty(metalCode, out var metalRateEl) ||
-            !metalRateEl.TryGetDecimal(out var metalRate) || metalRate <= 0)
+            !ProviderValueParser.TryReadDecimal(metalRateEl, out var metalRate) || metalRate <= 0)
             return null;
 
         // rates["TRY"] = 1 USD kaç TRY
         if (!rates.TryGetProperty("TRY", out var tryRateEl) ||
-            !tryRateEl.TryGetDecimal(out var tryRate) || tryRate <= 0)
+            !ProviderValueParser.TryReadDecimal(tryRateEl, out var tryRate) || tryRate <= 0)
             return null;
 
         var priceUsdPerOz  = 1m / metalRate;

@@ -16,6 +16,7 @@ namespace Saydin.Api.Tests.Services;
 public sealed class DailyLimitGuardTests
 {
     private const string Prefix = "usage:test:";
+    private const string QuotaPseudonym = "q1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const long UnixSeconds = 1_783_000_000;
     private readonly IConnectionMultiplexer _redis = Substitute.For<IConnectionMultiplexer>();
     private readonly IDatabase _database = Substitute.For<IDatabase>();
@@ -41,9 +42,12 @@ public sealed class DailyLimitGuardTests
     {
         _redis.GetDatabase(Arg.Any<int>(), Arg.Any<object>()).Returns(_database);
         _database.ExecuteAsync("TIME", Arg.Any<object[]>()).Returns(TimeResult(UnixSeconds));
+        var pseudonymizer = Substitute.For<IQuotaSubjectPseudonymizer>();
+        pseudonymizer.PseudonymizeQuotaSubject(Arg.Any<string>()).Returns(QuotaPseudonym);
         _guard = new DailyLimitGuard(
             _redis,
             Microsoft.Extensions.Options.Options.Create(new PlanOptions()),
+            pseudonymizer,
             new FakeTimeProvider(),
             NullLogger<DailyLimitGuard>.Instance);
     }
@@ -73,7 +77,8 @@ public sealed class DailyLimitGuardTests
         lease.Acquired.Should().BeTrue();
         lease.IsNoop.Should().BeFalse();
         lease.RedisKey.Should().Be(DailyLimitGuard.BuildUsageKey(
-            FreeUser, "ignored", Prefix, UnixSeconds / 86400));
+            QuotaPseudonym, Prefix, UnixSeconds / 86400));
+        lease.RedisKey.Should().NotContain(FreeUser.Id.ToString("N"));
         lease.Nonce.Should().MatchRegex("^[0-9a-f]{32}$");
     }
 
@@ -165,7 +170,7 @@ public sealed class DailyLimitGuardTests
         var lease = await _guard.TryAcquireAsync(FreeUser, "ignored", Prefix);
 
         lease.RedisKey.Should().Be(DailyLimitGuard.BuildUsageKey(
-            FreeUser, "ignored", Prefix, newDay));
+            QuotaPseudonym, Prefix, newDay));
         await _database.Received(2).ScriptEvaluateAsync(
             Arg.Any<string>(), Arg.Any<RedisKey[]?>(), Arg.Any<RedisValue[]?>(),
             Arg.Any<CommandFlags>());
@@ -254,9 +259,11 @@ public sealed class DailyLimitGuardTests
         try
         {
             CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("ar-SA");
+            var utcDay = new DateTimeOffset(2026, 8, 19, 0, 0, 0, TimeSpan.Zero)
+                .ToUnixTimeSeconds() / 86400;
             var key = DailyLimitGuard.BuildUsageKey(
-                null, "device", Prefix, new DateTime(2026, 8, 19, 0, 0, 0, DateTimeKind.Utc));
-            key.Should().Be("usage:test:device:2026-08-19");
+                QuotaPseudonym, Prefix, utcDay);
+            key.Should().Be($"usage:test:{QuotaPseudonym}:2026-08-19");
         }
         finally
         {

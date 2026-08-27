@@ -198,12 +198,12 @@ internal static class ReceiptSignerFactory
 {
     public static IReceiptSigner Create(
         ReceiptSignerConfiguration configuration,
-        RepairTarget target,
+        VerifiedPhysicalRepairTarget target,
         string expectedKeyId,
         Func<string, string?> environment,
         Func<OciKmsReceiptSignerConfiguration, IKmsSigningClient>? kmsFactory = null)
     {
-        if (target.Environment == "production")
+        if (target.IsProduction)
         {
             RejectProductionKeyEnvironment(environment);
             if (configuration is not OciKmsReceiptSignerConfiguration)

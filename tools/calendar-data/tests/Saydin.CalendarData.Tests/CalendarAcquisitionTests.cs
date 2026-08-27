@@ -277,7 +277,9 @@ public sealed class CalendarAcquisitionTests
     [Fact]
     public void SnapshotSymlink_IsRejectedBeforeRead()
     {
-        if (OperatingSystem.IsWindows()) return;
+        if (OperatingSystem.IsWindows())
+            throw Xunit.Sdk.SkipException.ForSkip(
+                "Symbolic-link permission behavior is executed in the required Linux Docker gate.");
         using var temp = new TempRoot();
         var raw = "<html/>"u8.ToArray();
         var hash = Convert.ToHexStringLower(SHA256.HashData(raw));

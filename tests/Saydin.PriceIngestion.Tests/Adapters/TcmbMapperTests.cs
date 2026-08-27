@@ -193,6 +193,21 @@ public class TcmbMapperTests
             .Which.Code.Should().Be("contract_price_invalid");
     }
 
+    [Theory]
+    [InlineData("2115,19")]
+    [InlineData("2.115,19")]
+    [InlineData("(30.5)")]
+    public void Map_LocaleOrThousandsFormattedPrice_FailsClosed(string rawPrice)
+    {
+        var xml = $"""
+            <Tarih_Date Tarih="01.01.2020" Date="01/01/2020">
+              <Currency CurrencyCode="USD"><Unit>1</Unit><ForexBuying>{rawPrice}</ForexBuying></Currency>
+            </Tarih_Date>
+            """;
+
+        TcmbMapper.Map(xml, AssetId, "USD", SampleDate).Should().BeNull();
+    }
+
     // ── F1.1-2: MapMany — gün-bazlı dedup için tüm semboller tek XML'den ─────
 
     [Fact]

@@ -17,14 +17,15 @@ public sealed class ProviderPayloadTests
     }
 
     [Fact]
-    public async Task Chunked64KiBPlusOne_IsRejectedWithoutContentLength()
+    public async Task ChunkedTransportLimitPlusOne_IsRejectedWithoutContentLength()
     {
-        using var content = new UnknownLengthContent(new byte[65_537]);
+        using var content = new UnknownLengthContent(
+            new byte[ProviderTransportLimits.MaxResponseBytes + 1]);
         content.Headers.ContentLength.Should().BeNull();
 
         var act = () => BoundedHttpContent.ReadAsync(content, default);
 
-        await act.Should().ThrowAsync<ProviderPayloadTooLargeException>();
+        await act.Should().ThrowAsync<ProviderTransportPayloadTooLargeException>();
     }
 
     private sealed class UnknownLengthContent(byte[] bytes) : HttpContent

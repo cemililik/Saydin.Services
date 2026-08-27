@@ -11,6 +11,7 @@ belgeleri içerir. Yerel geliştirme iş akışı için [`../development-guide.m
 | [`hosting-comparison.md`](hosting-comparison.md) | **Karar süreci.** Tüm hosting seçeneklerinin (Oracle/AWS/Azure/GCP/Firebase/managed-DB/serverless/ücretli-VPS) karşılaştırması, TimescaleDB lisans kısıtı analizi, karar matrisi ve kaynaklar. |
 | [`oci-migration-plan.md`](oci-migration-plan.md) | **Arşivlenmiş karar/tarihçe.** İlk Oracle A1 lift-and-shift tasarımı; inline komut ve config'ler güncel production kaynağı değildir. |
 | [`../runbooks/`](../runbooks/README.md) | **Kanonik operasyon yolu.** İmzalı release promotion/rollback, alert response, backup/PITR ve restore drill. |
+| [`../runbooks/data-repair.md`](../runbooks/data-repair.md) | İmzalı planla operator-only DataRepair dry-run/apply/rollback ve kalıcı receipt saklama prosedürü. |
 | [`../../infrastructure/deployment/compose.production.yml`](../../infrastructure/deployment/compose.production.yml) | **Kanonik production manifest'i.** Digest-only image, private network, external secret/volume ve runtime hardening sözleşmesi. |
 | [ADR-007](../decisions/ADR-007-hosting-deployment.md) | **Karar kaydı.** Hosting/deployment kararının resmî ADR'ı (bağlam, seçenekler, karar, sonuçlar/risk). |
 

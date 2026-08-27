@@ -4,8 +4,9 @@ using Microsoft.Extensions.Configuration;
 namespace Saydin.PriceIngestion.Workers;
 
 /// <summary>
-/// Enabled ingestion workers share one fatal-failure domain. The first fatal,
-/// permanent, self-cancellation or unexpected normal return cancels every sibling,
+/// Enabled ingestion workers share one infrastructure-fatal failure domain. Provider-
+/// permanent windows are isolated inside each worker; the first infrastructure fault,
+/// self-cancellation or unexpected normal return cancels every sibling,
 /// performs a bounded drain, marks the process unsuccessful and is rethrown to the
 /// generic host. Normal host cancellation remains a quiet, zero-exit path.
 /// </summary>
@@ -108,7 +109,8 @@ public sealed class IngestionOrchestrator : BackgroundService
         {
             linkedCts.Cancel();
             await DrainAsync(running, fatalWorker: null);
-            _exitCode.ExitCode = 0;
+            // Başka bir hosted service daha önce fatal/non-zero işaretlediyse normal
+            // host cancellation bu kanıtı sessizce başarıya çevirmemelidir.
             return;
         }
 

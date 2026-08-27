@@ -102,6 +102,19 @@ public sealed class RuntimeDatabaseOptionsTests
         Assert.Equal(contract.Login(LoginPurpose.Api, 2).Name, options.Login.Name);
     }
 
+    [Fact]
+    public void Omitted_pgsslmode_defaults_to_require()
+    {
+        var environment = ValidEnvironment(LoginPurpose.Api);
+        environment.Remove("PGSSLMODE");
+
+        var options = RuntimeDatabaseOptions.FromEnvironment(
+            LoginPurpose.Api, RuntimeDatabasePooling.Service,
+            key => environment.GetValueOrDefault(key));
+
+        Assert.Equal(Npgsql.SslMode.Require, options.SslMode);
+    }
+
     [Theory]
     [InlineData("allow")]
     [InlineData("prefer")]

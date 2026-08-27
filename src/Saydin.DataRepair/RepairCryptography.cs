@@ -93,8 +93,9 @@ internal static class RepairCryptography
         }
     }
 
-    public static bool FixedEquals(string left, string right)
+    public static bool FixedEquals(string? left, string? right)
     {
+        if (left is null || right is null) return false;
         var leftBytes = Encoding.ASCII.GetBytes(left);
         var rightBytes = Encoding.ASCII.GetBytes(right);
         return leftBytes.Length == rightBytes.Length &&
@@ -113,8 +114,8 @@ internal static class RepairCryptography
             {
                 var rawWriter = new AsnWriter(AsnEncodingRules.DER);
                 rawWriter.PushSequence();
-                rawWriter.WriteIntegerUnsigned(signature[..32]);
-                rawWriter.WriteIntegerUnsigned(signature[32..]);
+                rawWriter.WriteIntegerUnsigned(TrimP1363Component(signature[..32]));
+                rawWriter.WriteIntegerUnsigned(TrimP1363Component(signature[32..]));
                 rawWriter.PopSequence();
                 return rawWriter.Encode();
             }
@@ -126,6 +127,14 @@ internal static class RepairCryptography
         {
             throw Rejected("kms_signature_encoding_invalid", RepairExitCodes.ReceiptFailure);
         }
+    }
+
+    private static ReadOnlySpan<byte> TrimP1363Component(ReadOnlySpan<byte> component)
+    {
+        var offset = 0;
+        while (offset < component.Length - 1 && component[offset] == 0)
+            offset++;
+        return component[offset..];
     }
 
     private static bool IsCanonicalDerSignature(ReadOnlySpan<byte> signature)

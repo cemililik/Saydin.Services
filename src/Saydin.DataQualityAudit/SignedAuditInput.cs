@@ -69,7 +69,12 @@ internal static class SignedAuditInput
         if (manifest.Target is null || manifest.Budget is null || manifest.Scope is null)
             throw Invalid("input_manifest_contract_invalid");
 
-        if (manifest.SchemaVersion != 1 || !IsKeyId(manifest.KeyId) ||
+        // Input, evidence-content and ruleset versions move together whenever
+        // accepted scope or finding/recommendation semantics change.
+        if (manifest.SchemaVersion != 2)
+            throw Invalid("input_manifest_schema_unsupported");
+
+        if (!IsKeyId(manifest.KeyId) ||
             !IsKeyId(manifest.EvidenceKeyId) ||
             manifest.IssuedAtUtc > now.AddMinutes(5) || manifest.ExpiresAtUtc <= now ||
             manifest.ExpiresAtUtc <= manifest.IssuedAtUtc)
@@ -90,7 +95,9 @@ internal static class SignedAuditInput
             budget.MaxEvidenceBytes is < 1_024 or > AuditFileLimits.EvidenceBundleBytes ||
             budget.StatementTimeoutMilliseconds is < 10 or > 300_000 ||
             budget.LockTimeoutMilliseconds is < 1 or > 30_000 ||
-            budget.TotalTimeoutSeconds is < 1 or > 3_600)
+            budget.TotalTimeoutSeconds is < 1 or > 3_600 ||
+            budget.MaxGlobalRows is < 1 or > 1_000_000 ||
+            budget.MaxCalendarReleases is < 1 or > 10_000)
             throw Invalid("input_budget_invalid");
 
         if (manifest.Scope.Lanes is null ||

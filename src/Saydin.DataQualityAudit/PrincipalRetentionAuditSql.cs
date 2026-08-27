@@ -43,10 +43,11 @@ internal static class PrincipalRetentionAuditSql
             FROM pg_catalog.pg_proc function
             CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(
               function.proacl,pg_catalog.acldefault('f',function.proowner))) acl
-            LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
-            LEFT JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
-           WHERE function.oid=
-             'public.redact_activity_logs_before_principal_delete()'::regprocedure),
+           LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+           LEFT JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
+           WHERE function.pronamespace='public'::pg_catalog.regnamespace
+             AND function.proname='redact_activity_logs_before_principal_delete'
+             AND pg_catalog.pg_get_function_identity_arguments(function.oid)=''),
         function_acl_drift AS (
           (SELECT * FROM expected_function_acl EXCEPT ALL SELECT * FROM actual_function_acl)
           UNION ALL
@@ -136,7 +137,11 @@ internal static class PrincipalRetentionAuditSql
           SELECT relation_set.oid,role_contract.timescale_scheduler_role,
                  role_contract.timescale_scheduler_role,privilege_type,false
             FROM relation_set CROSS JOIN role_contract
-            CROSS JOIN (VALUES ('SELECT'),('UPDATE')) privilege(privilege_type)),
+            CROSS JOIN (VALUES ('SELECT'),('UPDATE')) privilege(privilege_type)
+          UNION ALL
+          SELECT relation_set.oid,role_contract.timescale_scheduler_role,
+                 role_contract.timescale_scheduler_role,'TRIGGER',false
+            FROM relation_set CROSS JOIN role_contract),
         actual_table_acl AS (
           SELECT relation.oid,coalesce(grantee.rolname,'PUBLIC'),grantor.rolname,
                  acl.privilege_type,acl.is_grantable

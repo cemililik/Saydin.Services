@@ -10,6 +10,39 @@ from pathlib import Path
 
 
 PREFIX = "https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/"
+SENSITIVE_LABEL = re.compile(
+    r"(?:device|user|installation|ip|symbol|scenario|trace|exception)(?:_|$)", re.I)
+WATCHDOG_ALERT = "SaydinWatchdog"
+
+
+def rule_label_keys(text: str) -> set[str]:
+    """Read inline and block-style alert labels without a YAML dependency."""
+    result: set[str] = set()
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^(\s*)labels:\s*(.*)$", lines[index])
+        if match is None:
+            index += 1
+            continue
+        indent = len(match.group(1))
+        inline = match.group(2).strip()
+        if inline.startswith("{") and inline.endswith("}"):
+            result.update(
+                item.group(1) for item in re.finditer(r"(?:^|[,{}])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", inline))
+        index += 1
+        while index < len(lines):
+            nested = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*):", lines[index])
+            if nested is None:
+                if lines[index].strip() and len(lines[index]) - len(lines[index].lstrip()) <= indent:
+                    break
+                index += 1
+                continue
+            if len(nested.group(1)) <= indent:
+                break
+            result.add(nested.group(2))
+            index += 1
+    return result
 
 
 def validate(root: Path) -> list[str]:
@@ -17,6 +50,7 @@ def validate(root: Path) -> list[str]:
     rule_root = root / "infrastructure" / "prometheus" / "rules"
     runbook_root = root / "docs" / "runbooks"
     alerts = 0
+    alert_names: set[str] = set()
     rule_files = sorted(rule_root.glob("*.yml"))
     if not rule_files:
         errors.append("rules_missing")
@@ -26,9 +60,14 @@ def validate(root: Path) -> list[str]:
         except OSError:
             errors.append("rule_unreadable")
             continue
-        alert_count = len(re.findall(r"^\s*- alert:\s+\S+", text, re.M))
+        names = re.findall(r"^\s*- alert:\s+(\S+)", text, re.M)
+        alert_count = len(names)
+        duplicate_names = alert_names.intersection(names)
+        if duplicate_names:
+            errors.append("alert_name_duplicate")
+        alert_names.update(names)
         alerts += alert_count
-        if re.search(r"^\s*labels:\s*\{[^}]*(?:device|user|installation|ip|symbol|scenario|trace|exception)", text, re.M | re.I):
+        if any(SENSITIVE_LABEL.search(key) for key in rule_label_keys(text)):
             errors.append("unbounded_alert_label")
         if len(re.findall(r"^\s*runbook_url:\s+", text, re.M)) != alert_count:
             errors.append("runbook_count")
@@ -42,6 +81,50 @@ def validate(root: Path) -> list[str]:
                 errors.append("runbook_missing")
     if alerts == 0:
         errors.append("no_alerts")
+    test_root = root / "infrastructure" / "prometheus" / "tests"
+    test_files = sorted(test_root.glob("*.test.yml"))
+    positive: set[str] = set()
+    negative: set[str] = set()
+    for path in test_files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            errors.append("rule_test_unreadable")
+            continue
+        for match in re.finditer(
+                r"^\s*alertname:\s*(\S+)\s*\n\s*exp_alerts:\s*(\[\])?", text, re.M):
+            (negative if match.group(2) else positive).add(match.group(1))
+        for match in re.finditer(
+                r"\{[^}\n]*alertname:\s*([A-Za-z][A-Za-z0-9]+)[^}\n]*exp_alerts:\s*\[\][^}\n]*\}",
+                text):
+            negative.add(match.group(1))
+    if alert_names - positive:
+        errors.append("alert_positive_test_inventory_mismatch")
+    # A continuously firing dead-man switch has no healthy non-firing state.
+    if (alert_names - {WATCHDOG_ALERT}) - negative:
+        errors.append("alert_negative_test_inventory_mismatch")
+    if (positive | negative) - alert_names:
+        errors.append("test_unknown_alert")
+
+    for path in sorted(runbook_root.glob("*.md")):
+        try:
+            references = set(re.findall(r"\b(?:Saydin|Telemetry)[A-Z][A-Za-z0-9]+", path.read_text(encoding="utf-8")))
+        except OSError:
+            errors.append("runbook_unreadable")
+            continue
+        if references - alert_names:
+            errors.append("runbook_alert_reference_unknown")
+    host_backup = rule_root / "host-backup.yml"
+    host_backup_text = host_backup.read_text(encoding="utf-8") if host_backup.is_file() else ""
+    for token in (
+        "SaydinBackupLoginValidityMetricMissing",
+        "SaydinBackupLoginExpiring",
+        "SaydinBackupLoginExpired",
+        "saydin_backup_login_valid_until_timestamp_seconds",
+        "backup-login-renewal.md",
+    ):
+        if token not in host_backup_text:
+            errors.append(f"backup_validity_alert_missing:{token}")
 
     otel_root = root / "infrastructure" / "otel"
     required = {
@@ -77,6 +160,15 @@ def validate(root: Path) -> list[str]:
         errors.append("trace_pipeline_missing")
     if not re.search(r"logs:\s.*?exporters:\s*\[otlphttp/loki\]", otel, re.S):
         errors.append("log_pipeline_missing")
+    if not re.search(r"key:\s*service\.instance\.id\s+value:\s*\$\{env:SAYDIN_DEPLOYMENT_ID\}\s+.*?action:\s*insert", otel, re.S):
+        errors.append("service_instance_fallback_invalid")
+    if not re.search(r"resource_to_telemetry_conversion:\s*\n\s*#?.*?enabled:\s*false", otel, re.S):
+        errors.append("resource_label_conversion_enabled")
+    if not re.search(
+            r"health_check:\s*\n(?:\s*#.*\n)*\s*endpoint:\s*0\.0\.0\.0:13133\s*$",
+            otel,
+            re.M):
+        errors.append("otel_network_health_endpoint_invalid")
 
     tempo = texts.get("tempo", "")
     for token in ("backend: local", "path: /var/tempo/wal", "block_retention: ${SAYDIN_TEMPO_RETENTION}", "reporting_enabled: false"):
@@ -104,6 +196,44 @@ def validate(root: Path) -> list[str]:
             errors.append("api_management_scrape_missing")
         if api_job is not None and "saydin-api:8080" in api_job.group(0):
             errors.append("api_public_scrape_forbidden")
+        blackbox_job = re.search(
+            r"^\s*- job_name:\s*blackbox-https\s*$.*?(?=^\s*- job_name:|\Z)",
+            prometheus,
+            re.M | re.S,
+        )
+        if (blackbox_job is None or "file_sd_configs:" not in blackbox_job.group(0)
+                or "replacement: blackbox-exporter:9115" not in blackbox_job.group(0)):
+            errors.append("blackbox_static_target_contract_missing")
+
+    tls_rules = (rule_root / "tls-runtime.yml").read_text(encoding="utf-8")
+    for token in (
+            "SaydinWatchdog", "expr: vector(1)", "severity: watchdog",
+            "resets(otelcol_process_uptime", "saydin_process_start_time_seconds"):
+        if token not in tls_rules:
+            errors.append(f"runtime_alert_contract_missing:{token}")
+
+    alertmanager = root / "infrastructure" / "alertmanager" / "alertmanager.template.yml"
+    try:
+        alertmanager_text = alertmanager.read_text(encoding="utf-8")
+    except OSError:
+        errors.append("alertmanager_template_unreadable")
+    else:
+        for token in ('severity="watchdog"', "receiver: external-watchdog",
+                      "name: external-watchdog", "repeat_interval: 1m"):
+            if token not in alertmanager_text:
+                errors.append(f"watchdog_route_missing:{token}")
+
+    deploy_path = root / "infrastructure" / "release" / "deploy-release.sh"
+    try:
+        deploy_text = deploy_path.read_text(encoding="utf-8")
+    except OSError:
+        errors.append("deployment_monitoring_admission_unreadable")
+    else:
+        for token in (
+                "fetch_monitoring_runtime()", "series_start=$((series_end - 300))",
+                "&start=$series_start&end=$series_end"):
+            if token not in deploy_text:
+                errors.append(f"deployment_metric_freshness_window_missing:{token}")
 
     return sorted(set(errors))
 

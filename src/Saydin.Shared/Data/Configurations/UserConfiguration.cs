@@ -15,9 +15,6 @@ public sealed class UserConfiguration : IEntityTypeConfiguration<User>
         // `UserTiers.Free` / `UserTiers.Premium` literal sabitleri kullanılır
         // (Repository.CreateAsync ve user create path'leri). HasDefaultValue da
         // lowercase sabittir; mixed-case sızıntısı engellenir.
-        builder.ToTable("users", t => t.HasCheckConstraint(
-            "chk_users_tier",
-            $"tier IN ({string.Join(", ", UserTiers.All.Select(v => $"'{v}'"))})"));
         builder.HasKey(u => u.Id);
 
         builder.Property(u => u.DeviceId).HasMaxLength(200);
@@ -33,6 +30,9 @@ public sealed class UserConfiguration : IEntityTypeConfiguration<User>
 
         builder.ToTable("users", table =>
         {
+            table.HasCheckConstraint(
+                "chk_users_tier",
+                $"tier IN ({string.Join(", ", UserTiers.All.Select(v => $"'{v}'"))})");
             table.HasCheckConstraint(
                 "chk_users_principal_status",
                 "principal_status IN ('legacy_quarantined', 'active', 'revoked')");

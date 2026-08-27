@@ -26,14 +26,18 @@ public sealed class DcaCalculator(
     ILogger<DcaCalculator> logger) : IDcaCalculator
 {
     private const string DcaUsageKeyPrefix   = "usage:dca:";
-    private const string RealReturnMethodCashflowCpiTerminal = "cashflow_cpi_terminal_v1";
+    private const string RealReturnMethodCashflowCpiTerminal = "cashflow_cpi_lkv_terminal_v1";
     private const int    MaxChartPoints      = 60;
     // DoS koruması: 10 yıl haftalık ≈ 520 alma noktası. Bunun üzeri ya yanlış
     // tarih aralığı ya da malicious — anonim free kullanıcının tek istekle
     // 6500 nokta üretmesini engelle (review M-16).
     private const int    MaxPurchasePoints   = 600;
 
-    public async Task<DcaResponse> CalculateAsync(DcaRequest request, CancellationToken ct)
+    public Task<DcaResponse> CalculateAsync(DcaRequest request, CancellationToken ct) =>
+        CalculationTelemetry.ObserveDcaAsync(
+            "dca", () => CalculateObservedAsync(request, ct));
+
+    private async Task<DcaResponse> CalculateObservedAsync(DcaRequest request, CancellationToken ct)
     {
         // P1R-003: domain ValidationException ile guard — handler'ın ArgumentException
         // catch'i altyapı/framework hatalarını yutmasın diye request null check'i explicit.
@@ -64,13 +68,22 @@ public sealed class DcaCalculator(
         // dışına çıkamaz. 0 = sınırsız (premium).
         if (features.PriceHistoryMonths > 0)
         {
-            var earliestAllowed = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime).AddMonths(-features.PriceHistoryMonths);
+            var earliestAllowed = BusinessClock.TodayInIstanbul(timeProvider)
+                .AddMonths(-features.PriceHistoryMonths);
             if (request.StartDate < earliestAllowed)
                 throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "extended_history");
         }
 
         if (request.IncludeInflation && !features.InflationAdjustment)
             throw new FeatureDisabledException(localizer["FeatureDisabled"], featureKey: "inflation");
+
+        if (request.EndDate is { } requestedEndDate
+            && requestedEndDate > BusinessClock.TodayInIstanbul(timeProvider))
+        {
+            throw new ValidationException(
+                localizer["CalculationEndDateCannotBeInFuture"],
+                field: nameof(request.EndDate));
+        }
 
         var lease = await dailyLimitGuard.TryAcquireAsync(
             user, usageIdentity, DcaUsageKeyPrefix, ct: ct);
@@ -104,6 +117,10 @@ public sealed class DcaCalculator(
         var symbol     = request.AssetSymbol.ToUpperInvariant();
         var endDate    = request.EndDate
             ?? await assetService.GetLatestPriceDateAsync(symbol, ct);
+        if (endDate > BusinessClock.TodayInIstanbul(timeProvider))
+            throw new ValidationException(
+                localizer["CalculationEndDateCannotBeInFuture"],
+                field: nameof(request.EndDate));
         // SVCR-018: amountType/period için trim öncelikli — "WEEKLY " geçerli sayılır.
         var amountType = request.AmountType.Trim().ToLowerInvariant();
         var period     = request.Period.Trim().ToLowerInvariant();
@@ -128,7 +145,7 @@ public sealed class DcaCalculator(
         var amountStr = request.PeriodicAmount.ToString("G", CultureInfo.InvariantCulture);
         var catalog = await assetService.GetCatalogVersionAsync(ct);
         var cacheKey = AuthorityCacheNamespace.Key(
-            $"catalog:{catalog.Token}:dca:v2:{symbol}:{request.StartDate:yyyy-MM-dd}:{endDate:yyyy-MM-dd}:{amountStr}:{period}:{amountType}{inflationSuffix}:{lang}");
+            $"catalog:{catalog.Token}:dca:v3:{symbol}:{request.StartDate:yyyy-MM-dd}:{endDate:yyyy-MM-dd}:{amountStr}:{period}:{amountType}{inflationSuffix}:{lang}");
 
         var cached = await cache.TryGetAsync<DcaCacheEntry>(cacheKey, ct);
         if (cached is not null && cached.IsValid(
@@ -154,7 +171,8 @@ public sealed class DcaCalculator(
         // CPI dönemi, kullanıcının planladığı takvim gününden değil gerçekten fiyat
         // bulunan/alımın gerçekleştiği piyasa gününden türetilir. Aynı piyasa gününe
         // clip edilen katkılar display satırında birleşse bile burada ayrı nakit akışıdır.
-        var effectiveContributionMonths = new List<DateOnly>(purchaseDates.Count);
+        var effectiveContributions = new List<EffectiveContribution>(purchaseDates.Count);
+        var skippedPurchaseDates = new List<DateOnly>();
         var priceAuthorities = new List<ObservationAuthorityValue>(purchaseDates.Count + 1);
         var inflationAuthorities = new List<ObservationAuthorityValue>();
         var dataWarnings = new List<string>();
@@ -166,11 +184,20 @@ public sealed class DcaCalculator(
         // repository ordinality keeps both logical positions stable.
         var requestedPriceDates = purchaseDates.Append(endDate).ToArray();
         var pricePoints = await assetService.GetNearestPricesAsync(symbol, requestedPriceDates, ct);
+        var latestPricePoint = pricePoints[^1]
+            ?? throw new PriceNotFoundException(symbol, endDate);
         var purchaseIndex = 0;
 
         foreach (var purchaseDate in purchaseDates)
         {
-            var pricePoint    = pricePoints[purchaseIndex++];
+            var pricePoint = pricePoints[purchaseIndex++];
+            if (pricePoint is null
+                || pricePoint.PriceDate > latestPricePoint.PriceDate)
+            {
+                skippedPurchaseDates.Add(purchaseDate);
+                continue;
+            }
+
             priceAuthorities.Add(FinalObservationAuthority.ToValue(pricePoint));
             var price         = pricePoint.Close;
             // F2.2-23 ([G-B-04]) / SVCR-016: non-positive fiyat → PriceNotFound + data bug log.
@@ -182,12 +209,17 @@ public sealed class DcaCalculator(
                 throw new PriceNotFoundException(symbol, purchaseDate);
             }
 
-            var unitsAcquired = Math.Round(request.PeriodicAmount / price, 6, MidpointRounding.AwayFromZero);
+            var calculationUnits = request.PeriodicAmount / price;
+            var unitsAcquired = Math.Round(
+                calculationUnits, 6, MidpointRounding.AwayFromZero);
+            var investedTry = Math.Round(
+                request.PeriodicAmount, 2, MidpointRounding.AwayFromZero);
 
-            effectiveContributionMonths.Add(ToMonth(pricePoint.PriceDate));
+            effectiveContributions.Add(new EffectiveContribution(
+                ToMonth(pricePoint.PriceDate), investedTry));
 
-            cumulativeUnits += unitsAcquired;
-            cumulativeCost  += request.PeriodicAmount;
+            cumulativeUnits += calculationUnits;
+            cumulativeCost  += investedTry;
 
             var cumulativeValue = Math.Round(cumulativeUnits * price, 2, MidpointRounding.AwayFromZero);
 
@@ -217,8 +249,13 @@ public sealed class DcaCalculator(
                 CumulativeValueTry: cumulativeValue));
         }
 
+        if (skippedPurchaseDates.Count > 0)
+            dataWarnings.Add(AuthorityDataWarnings.PurchasePriceUnavailable);
+
+        if (effectiveContributions.Count == 0)
+            throw new PriceNotFoundException(symbol, request.StartDate);
+
         // ── Güncel değer ve kâr/zarar ───────────────────────────────────────
-        var latestPricePoint = pricePoints[^1];
         priceAuthorities.Add(FinalObservationAuthority.ToValue(latestPricePoint));
         var currentUnitPrice = latestPricePoint.Close;
         // SVCR-004 follow-up: purchase-side ≤0 guard ile asimetri kalktı. Negatif
@@ -235,7 +272,7 @@ public sealed class DcaCalculator(
 
         var totalUnitsAcquired = Math.Round(cumulativeUnits, 6, MidpointRounding.AwayFromZero);
         var totalInvestedTry   = Math.Round(cumulativeCost, 2, MidpointRounding.AwayFromZero);
-        var terminalPortfolioValue = totalUnitsAcquired * currentUnitPrice;
+        var terminalPortfolioValue = cumulativeUnits * currentUnitPrice;
         var currentValueTry    = Math.Round(terminalPortfolioValue, 2, MidpointRounding.AwayFromZero);
         var profitLossTry      = currentValueTry - totalInvestedTry;
         var profitLossPercent  = totalInvestedTry == 0
@@ -244,7 +281,7 @@ public sealed class DcaCalculator(
 
         var averageCostPerUnit = totalUnitsAcquired == 0
             ? 0m
-            : Math.Round(totalInvestedTry / totalUnitsAcquired, 2, MidpointRounding.AwayFromZero);
+            : Math.Round(totalInvestedTry / cumulativeUnits, 2, MidpointRounding.AwayFromZero);
 
         // ── Enflasyon düzeltmesi ────────────────────────────────────────────
         decimal?  cumulativeInflationPercent = null;
@@ -259,38 +296,60 @@ public sealed class DcaCalculator(
         if (request.IncludeInflation)
         {
             realReturnMethod = RealReturnMethodCashflowCpiTerminal;
-            inflationTerminalMonth = ToMonth(latestPricePoint.PriceDate);
+            var requestedTerminalMonth = ToMonth(latestPricePoint.PriceDate);
 
             try
             {
-                var requiredMonths = effectiveContributionMonths
-                    .Append(inflationTerminalMonth.Value)
-                    .Distinct()
-                    .ToArray();
-                var indexes = await inflationRepository.GetExactIndexValuesAsync(requiredMonths, ct);
-                var missingMonths = requiredMonths
+                var terminalObservation = await inflationRepository.GetLatestFinalIndexValueAsync(
+                    requestedTerminalMonth, ct);
+                // Exact CPI is required only before the actual final LKV month.
+                // Contributions from that month through the requested terminal
+                // month all use the same terminal deflator.
+                var requiredExactMonths = terminalObservation is null
+                    ? Array.Empty<DateOnly>()
+                    : effectiveContributions
+                        .Select(contribution => contribution.Month)
+                        .Where(month => month < terminalObservation.PeriodDate)
+                        .Distinct()
+                        .ToArray();
+                var indexes = await inflationRepository.GetExactIndexValuesAsync(requiredExactMonths, ct);
+                var missingMonths = requiredExactMonths
                     .Where(month => !indexes.TryGetValue(month, out var index)
                                     || index.IndexValue <= 0m)
                     .OrderBy(month => month)
                     .ToArray();
 
-                if (missingMonths.Length == 0)
+                if (missingMonths.Length == 0
+                    && terminalObservation is { IndexValue: > 0m })
                 {
                     inflationAuthorities.AddRange(indexes.Values.Select(index => index.Authority));
-                    var terminalIndex = indexes[inflationTerminalMonth.Value].IndexValue;
-                    var firstContributionIndex = indexes[effectiveContributionMonths[0]].IndexValue;
+                    inflationAuthorities.Add(terminalObservation.Authority);
+                    var terminalIndex = terminalObservation.IndexValue;
+                    inflationTerminalMonth = terminalObservation.PeriodDate;
+                    var firstContribution = effectiveContributions[0];
+                    var firstContributionIndex =
+                        firstContribution.Month >= terminalObservation.PeriodDate
+                        ? terminalIndex
+                        : indexes[firstContribution.Month].IndexValue;
 
                     cumulativeInflationPercent = Math.Round(
                         (terminalIndex / firstContributionIndex - 1m) * 100m,
                         2,
                         MidpointRounding.AwayFromZero);
 
-                    // API-04: Her katkıyı kendi exact CPI ayından terminal CPI ayının
-                    // satın alma gücüne taşı. Ara katkılar yuvarlanmaz; TL ve yüzde yalnız
-                    // response sınırında yuvarlanır. Reel P/L ve ROI, iki haneye yuvarlanmış
-                    // CurrentValueTry'dan değil raw terminal portföy değerinden hesaplanır.
-                    var terminalAdjustedCost = effectiveContributionMonths.Sum(
-                        month => request.PeriodicAmount * terminalIndex / indexes[month].IndexValue);
+                    // Her gerçekleşebilir katkı maliyetini kendi exact CPI ayından terminal
+                    // deflatör ayının satın alma gücüne taşı. Deflatör oranı ve toplam ara
+                    // adımda yuvarlanmaz; TL/yüzde response sınırında yuvarlanır. Reel P/L
+                    // ve ROI, iki haneye yuvarlanmış CurrentValueTry'dan değil raw terminal
+                    // portföy değerinden hesaplanır.
+                    var terminalAdjustedCost = effectiveContributions.Sum(contribution =>
+                    {
+                        var contributionIndex =
+                            contribution.Month >= terminalObservation.PeriodDate
+                            ? terminalIndex
+                            : indexes[contribution.Month].IndexValue;
+                        return contribution.InvestedTry * terminalIndex / contributionIndex;
+                    });
 
                     inflationAdjustedInvestedTry = Math.Round(
                         terminalAdjustedCost, 2, MidpointRounding.AwayFromZero);
@@ -302,13 +361,17 @@ public sealed class DcaCalculator(
                         (terminalPortfolioValue / terminalAdjustedCost - 1m) * 100m,
                         2,
                         MidpointRounding.AwayFromZero);
-                    inflationDataAsOf = inflationTerminalMonth;
+                    // Legacy WhatIf semantics: null means exact target-month CPI;
+                    // a value is emitted only when terminal LKV lagged the target.
+                    inflationDataAsOf = terminalObservation.PeriodDate < requestedTerminalMonth
+                        ? terminalObservation.PeriodDate
+                        : null;
                     inflationCalculationComplete = true;
                 }
                 else
                 {
                     logger.LogWarning(
-                        "DCA reel getiri hesaplanamadı; exact TÜFE ayları eksik/geçersiz: {MissingMonths}",
+                        "DCA reel getiri hesaplanamadı; ara exact TÜFE ayları veya terminal LKV eksik/geçersiz: {MissingMonths}",
                         string.Join(",", missingMonths.Select(month => month.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))));
                     dataWarnings.Add(AuthorityDataWarnings.InflationIncomplete);
                 }
@@ -352,11 +415,12 @@ public sealed class DcaCalculator(
             RealReturnMethod:             realReturnMethod,
             InflationTerminalMonth:       inflationTerminalMonth,
             Data: AuthorityDataResponseFactory.Calculation(
-                priceAuthorities, inflationAuthorities, request.IncludeInflation, dataWarnings));
+                priceAuthorities, inflationAuthorities, request.IncludeInflation, dataWarnings),
+            SkippedPurchaseDates:         skippedPurchaseDates);
 
         // Exact CPI seti eksikse nullable reel sözleşme korunur; incomplete sonucu bir
         // saat cache'leyip yeni yayınlanan TÜFE verisini görünmez kılmayız.
-        if (inflationCalculationComplete)
+        if (inflationCalculationComplete && dataWarnings.Count == 0)
             await cache.TrySetAsync(
                 cacheKey,
                 DcaCacheEntry.Create(
@@ -411,4 +475,6 @@ public sealed class DcaCalculator(
     }
 
     private static DateOnly ToMonth(DateOnly date) => new(date.Year, date.Month, 1);
+
+    private sealed record EffectiveContribution(DateOnly Month, decimal InvestedTry);
 }

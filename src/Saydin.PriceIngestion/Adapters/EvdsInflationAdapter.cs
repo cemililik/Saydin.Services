@@ -78,6 +78,9 @@ public sealed class EvdsInflationAdapter(
 
             var payload = await BoundedHttpContent.ReadAsync(response.Content, ct);
             using var document = JsonDocument.Parse(payload.Bytes);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return AdapterOutcome<InflationRate>.PermanentFailure(
+                    "contract_value_kind_invalid");
             if (!document.RootElement.TryGetProperty("items", out var items)
                 || items.ValueKind != JsonValueKind.Array)
                 return AdapterOutcome<InflationRate>.PermanentFailure("schema_missing_items");
@@ -131,6 +134,33 @@ public sealed class EvdsInflationAdapter(
                 new KeyValuePair<string, object?>("source", Source),
                 new KeyValuePair<string, object?>("outcome", "transient"));
             return AdapterOutcome<InflationRate>.RetryableFailure("network_error");
+        }
+        catch (ProviderContractException ex)
+        {
+            logger.LogError("EVDS provider contract rejected: {Code} ({From}–{To})",
+                ex.Code, from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "contract"));
+            return AdapterOutcome<InflationRate>.PermanentFailure(ex.Code);
+        }
+        catch (ProviderTransportPayloadTooLargeException)
+        {
+            logger.LogWarning("EVDS provider transport payload limitini aştı ({From}–{To})",
+                from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "transport_payload_too_large"));
+            return AdapterOutcome<InflationRate>.RetryableFailure("transport_payload_too_large");
+        }
+        catch (ProviderPayloadTooLargeException)
+        {
+            logger.LogError("EVDS provider payload exceeded authority limit ({From}–{To})",
+                from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "payload_too_large"));
+            return AdapterOutcome<InflationRate>.PermanentFailure("payload_too_large");
         }
         catch (JsonException)
         {

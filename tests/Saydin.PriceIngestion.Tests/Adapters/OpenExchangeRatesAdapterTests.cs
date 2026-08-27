@@ -131,6 +131,27 @@ public class OpenExchangeRatesAdapterTests
     }
 
     [Fact]
+    public async Task OversizedTransportIsRetryable_AndWrongValueKindIsPermanent()
+    {
+        var (oversized, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new string('x', ProviderTransportLimits.MaxResponseBytes + 1)),
+        });
+        var size = await oversized.FetchRangeAsync(Request(), default);
+        size.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        size.Code.Should().Be("transport_payload_too_large");
+
+        var (wrongKind, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"base":"USD","timestamp":1704240000,"rates":{"XAU":{"bad":true},"TRY":30}}"""),
+        });
+        var kind = await wrongKind.FetchRangeAsync(Request(), default);
+        kind.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        kind.Code.Should().Be("contract_value_kind_invalid");
+    }
+
+    [Fact]
     public async Task NetworkException_DoesNotLeakMessageIntoOutcomeOrLog()
     {
         const string canary = "network-secret-canary";

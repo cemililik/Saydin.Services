@@ -27,6 +27,12 @@ public sealed class IngestionDatabaseFixture : IAsyncLifetime
             Environment.GetEnvironmentVariable("SAYDIN_INGESTION_TEST_EXPECTED_HOST"));
         var runtime = RuntimeDatabaseOptions.FromEnvironment(
             LoginPurpose.Ingestion, RuntimeDatabasePooling.Service);
+        IngestionTestTargetGuard.ValidateRuntime(
+            runtime.Host,
+            runtime.Database,
+            Environment.GetEnvironmentVariable("SAYDIN_INGESTION_TEST_REQUIRED"),
+            Environment.GetEnvironmentVariable("SAYDIN_INGESTION_TEST_RUN_ID"),
+            Environment.GetEnvironmentVariable("SAYDIN_INGESTION_TEST_EXPECTED_HOST"));
         _managedDataSource = RuntimeDatabase.OpenVerifiedDataSourceAsync(
                 runtime, builder => builder.MapEnum<AssetCategory>("asset_category"))
             .GetAwaiter().GetResult();
@@ -56,9 +62,11 @@ public sealed class IngestionDatabaseFixture : IAsyncLifetime
                AND to_regclass('public.inflation_observation_attributions') IS NOT NULL
                AND to_regprocedure('public.enforce_observation_attribution()') IS NOT NULL
                AND (SELECT count(*) FROM public.schema_migrations
-                     WHERE state IN ('succeeded','skipped_optional'))=24
+                     WHERE state IN ('succeeded','skipped_optional'))=27
                AND EXISTS (SELECT 1 FROM public.schema_migrations
-                            WHERE version='022_principal_retention' AND state='succeeded')
+                            WHERE version='023_installation_lifecycle_admission' AND state='succeeded')
+               AND EXISTS (SELECT 1 FROM public.schema_migrations
+                            WHERE version='024_installation_credential_rehash' AND state='succeeded')
                AND EXISTS (SELECT 1 FROM pg_trigger
                             WHERE tgname='trg_price_points_ingestion_fence' AND tgenabled='O')
                AND EXISTS (SELECT 1 FROM pg_trigger
@@ -66,7 +74,7 @@ public sealed class IngestionDatabaseFixture : IAsyncLifetime
             """, connection);
         if (await command.ExecuteScalarAsync() is not true)
             throw new InvalidOperationException(
-                "Migration 016/017/020/022 writer fence, calendar, authority veya retention şeması hazır değil; integration suite fail-closed.");
+                "Migration 016/017/020/022/023/024 writer fence, calendar, authority, retention veya security şeması hazır değil; integration suite fail-closed.");
     }
 
     public async Task DisposeAsync() => await _managedDataSource.DisposeAsync();
@@ -126,8 +134,8 @@ public sealed class IngestionDatabaseFixture : IAsyncLifetime
             SET session_replication_role='origin';
             SET session_replication_role='replica';
             DELETE FROM asset_market_calendars WHERE asset_id=@id;
-            DELETE FROM assets WHERE id=@id;
             SET session_replication_role='origin';
+            DELETE FROM assets WHERE id=@id;
             """, new NpgsqlParameter("id", assetId));
     }
 
@@ -214,6 +222,45 @@ public sealed class IngestionDatabaseFixture : IAsyncLifetime
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddRange(parameters);
         return await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<int> ExecuteAsIngestionAsync(
+        string sql, params NpgsqlParameter[] parameters)
+    {
+        await using var connection = await _managedDataSource.OpenConnectionAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters);
+        return await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<int> ExecuteAsIngestionWithWindowOnlyAsync(
+        Guid windowId,
+        string sql,
+        params NpgsqlParameter[] parameters)
+    {
+        await using var connection = await _managedDataSource.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            await using (var capability = new NpgsqlCommand(
+                "SELECT set_config('saydin.ingestion_window_id', @window_id::text, true)",
+                connection, transaction))
+            {
+                capability.Parameters.AddWithValue("window_id", windowId);
+                await capability.ExecuteNonQueryAsync();
+            }
+
+            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            command.Parameters.AddRange(parameters);
+            var affected = await command.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+            return affected;
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
     }
 
     public async Task<int> ExecuteWithFenceAsync(
@@ -303,6 +350,20 @@ public static class IngestionTestTargetGuard
     public static void Validate(
         string connectionString, string? required, string? runId, string? expectedHost)
     {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        ValidateRuntime(
+            builder.Host ?? throw new InvalidOperationException("Test DB host zorunludur."),
+            builder.Database ?? throw new InvalidOperationException("Test DB adı zorunludur."),
+            required, runId, expectedHost);
+    }
+
+    public static void ValidateRuntime(
+        string host,
+        string database,
+        string? required,
+        string? runId,
+        string? expectedHost)
+    {
         if (required != "true")
             throw new InvalidOperationException("SAYDIN_INGESTION_TEST_REQUIRED=true zorunludur.");
         if (runId is null || runId.Length != 32
@@ -312,14 +373,13 @@ public static class IngestionTestTargetGuard
         if (string.IsNullOrWhiteSpace(expectedHost))
             throw new InvalidOperationException("SAYDIN_INGESTION_TEST_EXPECTED_HOST zorunludur.");
 
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
         var expectedDatabase = $"saydin_ingestion_test_{runId}";
-        if (!string.Equals(builder.Database, expectedDatabase, StringComparison.Ordinal))
+        if (!string.Equals(database, expectedDatabase, StringComparison.Ordinal))
             throw new InvalidOperationException($"Test DB adı exact olmalıdır: {expectedDatabase}");
-        if (!string.Equals(builder.Host, expectedHost, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(host, expectedHost, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Test DB host allowlist dışında.");
 
-        var marker = $"{builder.Host}|{builder.Database}";
+        var marker = $"{host}|{database}";
         if (marker.Contains("prod", StringComparison.OrdinalIgnoreCase)
             || marker.Contains("staging", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Production/staging target reddedildi.");

@@ -20,7 +20,7 @@ public sealed class IngestionFreshnessHydrationService(
 
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
-        await RefreshAsync(cancellationToken);
+        await RefreshSafelyAsync(cancellationToken);
         await base.StartAsync(cancellationToken);
     }
 
@@ -30,7 +30,24 @@ public sealed class IngestionFreshnessHydrationService(
             "IngestionFreshness:RefreshSeconds") ?? 60, 15, 300);
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(seconds));
         while (await timer.WaitForNextTickAsync(stoppingToken))
-            await RefreshAsync(stoppingToken);
+            await RefreshSafelyAsync(stoppingToken);
+    }
+
+    internal async Task RefreshSafelyAsync(CancellationToken ct)
+    {
+        try
+        {
+            await RefreshAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Durable ingestion freshness hydration gecici olarak basarisiz; sonraki tick yeniden deneyecek");
+        }
     }
 
     internal async Task RefreshAsync(CancellationToken ct)

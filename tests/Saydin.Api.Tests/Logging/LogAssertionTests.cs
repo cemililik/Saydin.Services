@@ -38,9 +38,13 @@ public class LogAssertionTests
               ConnectionFailureType.UnableToConnect, "raw-secret-ip-sentinel"));
 
         var logger = new TestLogger<DailyLimitGuard>();
+        var pseudonymizer = Substitute.For<IQuotaSubjectPseudonymizer>();
+        pseudonymizer.PseudonymizeQuotaSubject(Arg.Any<string>())
+            .Returns("q1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         var sut = new DailyLimitGuard(
             redis,
             Microsoft.Extensions.Options.Options.Create(new PlanOptions()),
+            pseudonymizer,
             new FakeTimeProvider(),
             logger);
 

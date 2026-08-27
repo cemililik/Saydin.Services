@@ -81,7 +81,6 @@ try
         .AddHttpClient("tcmb", client =>
         {
             client.BaseAddress = new Uri("https://www.tcmb.gov.tr/kurlar/");
-            client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Saydin/1.0 (+https://saydin.app)");
         })
         .AddSaydinResilience();
@@ -90,7 +89,6 @@ try
         .AddHttpClient("coingecko", client =>
         {
             client.BaseAddress = new Uri("https://api.coingecko.com/api/v3/");
-            client.Timeout = TimeSpan.FromSeconds(30);
             var apiKey = builder.Configuration["ExternalApis:CoinGecko:ApiKey"];
             if (!string.IsNullOrWhiteSpace(apiKey))
                 client.DefaultRequestHeaders.Add("x-cg-demo-api-key", apiKey);
@@ -101,7 +99,6 @@ try
         .AddHttpClient("openexchangerates", client =>
         {
             client.BaseAddress = new Uri("https://openexchangerates.org/api/");
-            client.Timeout = TimeSpan.FromSeconds(30);
         })
         .AddSaydinResilience();
 
@@ -109,7 +106,6 @@ try
         .AddHttpClient("twelvedata", client =>
         {
             client.BaseAddress = new Uri("https://api.twelvedata.com/");
-            client.Timeout = TimeSpan.FromSeconds(30);
         })
         .AddSaydinResilience();
 
@@ -117,7 +113,6 @@ try
         .AddHttpClient("evds", client =>
         {
             client.BaseAddress = new Uri("https://evds3.tcmb.gov.tr/");
-            client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Saydin/1.0 (+https://saydin.app)");
         })
         .AddSaydinResilience();

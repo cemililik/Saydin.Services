@@ -10,7 +10,14 @@ Trigger: `SaydinApiUnavailable` or failed public HTTPS probe.
    alone is failing, inspect stable startup/security codes and migration/DQA gates.
 4. For DB or Redis faults, follow the corresponding runbook. Finite quota and security
    limiter intentionally return 503 when Redis is unavailable; do not fail-open.
-5. If the release is causal and schema-compatible, redeploy the previous signed digest.
+5. For 503 admission storms, group
+   `saydin_security_admission_decisions_total{outcome="unavailable"}` by `bucket,reason`.
+   `client_address_untrusted` means the request still carries an unconsumed
+   `X-Forwarded-For`, the observed client address is unusable, middleware ordering drifted,
+   or the deployed `ForwardedHeaders__KnownNetworks`/`KnownProxies` no longer matches the
+   Caddy network. Compare the exact deployed CIDR with the signed environment without
+   widening it and without logging a client address.
+6. If the release is causal and schema-compatible, redeploy the previous signed digest.
 
 Resolved when the internal API scrape and public HTTPS probe are continuously healthy
 for 15 minutes and a bounded authenticated smoke request succeeds.

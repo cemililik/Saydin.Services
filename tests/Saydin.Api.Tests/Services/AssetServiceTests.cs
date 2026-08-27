@@ -612,7 +612,8 @@ public class AssetServiceTests
             "USDTRY", dates, CancellationToken.None);
 
         result.Should().HaveCount(601);
-        result[^1].PriceDate.Should().Be(dates[^1]);
+        result[^1].Should().NotBeNull();
+        result[^1]!.PriceDate.Should().Be(dates[^1]);
         await _repository.Received(1).GetActiveAssetIdentityAsync(
             "USDTRY", Arg.Any<CancellationToken>());
         await _repository.Received(1).GetNearestPricesAsync(

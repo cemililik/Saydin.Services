@@ -3,7 +3,8 @@ set -euo pipefail
 
 readonly timescale_image='timescale/timescaledb@sha256:3adf01543c37b5b88d3c4998338e0f7f21cb3cdd02bbddea08b09bf60e2289b7'
 readonly sdk_image='mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c'
-readonly run_id="$(openssl rand -hex 16)"
+run_id="$(openssl rand -hex 16)"
+readonly run_id
 readonly base="saydin_repair_gate_${run_id}"
 readonly network="${base}_net"
 readonly pg_name="${base}_pg"
@@ -15,12 +16,47 @@ readonly migrator_image="${base}_migrator"
 readonly database="saydin_data_repair_test_${run_id}"
 readonly deployment="ci-${run_id:0:8}"
 readonly nuget_volume=saydin-nuget-cache
-readonly backup_valid_until="$(python3 -c \
+expected_migration_count="$(find infrastructure/postgres/migrations -maxdepth 1 -type f \
+  \( -name '*.sql' -o -name '*.sh' \) -print | wc -l | tr -d '[:space:]')"
+readonly expected_migration_count
+[[ "$expected_migration_count" =~ ^[1-9][0-9]*$ ]]
+[[ -z "${TEST_FILTER:-}" ]] || {
+  echo 'data_repair_acceptance_failed:test_filter_forbidden' >&2
+  exit 64
+}
+results_directory="$(mktemp -d /tmp/saydin-repair-results.XXXXXX)"
+readonly results_directory
+readonly result_file="${results_directory}/data-repair-isolated.trx"
+backup_valid_until="$(python3 -c \
   'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+readonly backup_valid_until
 
 [[ -f tests/Saydin.DataRepair.IntegrationTests/Saydin.DataRepair.IntegrationTests.csproj ]]
 [[ "$base" =~ ^saydin_repair_gate_[0-9a-f]{32}$ ]]
 [[ "$backup_valid_until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+[[ "$results_directory" =~ ^/tmp/saydin-repair-results\.[A-Za-z0-9]+$ ]]
+[[ -d "$results_directory" && ! -L "$results_directory" ]]
+
+cleanup() {
+  local exit_code=$?
+  set +e
+  printf 'CLEANUP targets=%s,%s,%s,%s,%s\n' \
+    "$pg_name" "$network" "$bootstrap_volume" "$test_volume" "$pg_volume"
+  docker rm -f "$pg_name" >/dev/null 2>&1
+  docker network rm "$network" >/dev/null 2>&1
+  docker volume rm "$bootstrap_volume" "$test_volume" "$pg_volume" >/dev/null 2>&1
+  docker image rm "$migrator_image" >/dev/null 2>&1
+  if [[ "$results_directory" =~ ^/tmp/saydin-repair-results\.[A-Za-z0-9]+$ \
+        && -d "$results_directory" && ! -L "$results_directory" ]]; then
+    if [[ ! -e "$result_file" || -f "$result_file" && ! -L "$result_file" ]]; then
+      rm -f -- "$result_file"
+      rmdir -- "$results_directory"
+    fi
+  fi
+  printf 'CLEANUP complete rc=%s\n' "$exit_code"
+  exit "$exit_code"
+}
+trap cleanup EXIT INT TERM
 
 printf 'STAGE test-build-start\n'
 docker run --rm -v "$PWD:/repo" -v "$nuget_volume:/root/.nuget/packages" -w /repo \
@@ -33,20 +69,6 @@ docker run --rm --network none -v "$PWD:/repo" \
   tests/Saydin.DataRepair.IntegrationTests/Saydin.DataRepair.IntegrationTests.csproj \
   --no-restore -c Release
 printf 'STAGE test-build-complete\n'
-
-cleanup() {
-  local exit_code=$?
-  set +e
-  printf 'CLEANUP targets=%s,%s,%s,%s,%s\n' \
-    "$pg_name" "$network" "$bootstrap_volume" "$test_volume" "$pg_volume"
-  docker rm -f "$pg_name" >/dev/null 2>&1
-  docker network rm "$network" >/dev/null 2>&1
-  docker volume rm "$bootstrap_volume" "$test_volume" "$pg_volume" >/dev/null 2>&1
-  docker image rm "$migrator_image" >/dev/null 2>&1
-  printf 'CLEANUP complete rc=%s\n' "$exit_code"
-  exit "$exit_code"
-}
-trap cleanup EXIT INT TERM
 
 printf 'STAGE identifiers run_id=%s database=%s\n' "$run_id" "$database"
 docker network create "$network" >/dev/null
@@ -153,7 +175,7 @@ run_migrator() {
     "$migrator_image" "$@"
 }
 migrate="$(run_migrator)"
-grep -q 'applied=24' <<<"$migrate"
+grep -q "applied=${expected_migration_count}" <<<"$migrate"
 tail -1 <<<"$migrate"
 
 network_cidr="$(docker network inspect --format '{{(index .IPAM.Config 0).Subnet}}' "$network")"
@@ -172,16 +194,15 @@ post="$(docker run --rm --network "$network" \
   "$migrator_image" Saydin.DatabaseRoleBootstrap.dll "${bootstrap[@]}")"
 grep -q 'backup_postbootstrap_required=false' <<<"$post"
 verify="$(run_migrator --verify-only)"
-grep -q 'already_applied=24' <<<"$verify"
+grep -q "already_applied=${expected_migration_count}" <<<"$verify"
 tail -1 <<<"$verify"
 
 test_command=(dotnet test tests/Saydin.DataRepair.IntegrationTests/Saydin.DataRepair.IntegrationTests.csproj
-  --no-build --no-restore -c Release --logger 'console;verbosity=normal')
-if [[ -n "${TEST_FILTER:-}" ]]; then
-  test_command+=(--filter "$TEST_FILTER")
-fi
+  --no-build --no-restore -c Release --logger 'console;verbosity=normal'
+  --logger 'trx;LogFileName=data-repair-isolated.trx' --results-directory /results)
 printf 'STAGE realpg-tests-start\n'
 docker run --rm --network "$network" -v "$PWD:/repo" \
+  -v "$results_directory:/results" \
   -v "$test_volume:/run/test-secrets:ro" \
   -v "$nuget_volume:/root/.nuget/packages" -w /repo \
   -e SAYDIN_REPAIR_TEST_REQUIRED=true -e SAYDIN_REPAIR_TEST_RUN_ID="$run_id" \
@@ -196,4 +217,5 @@ docker run --rm --network "$network" -v "$PWD:/repo" \
   -e SAYDIN_REPAIR_TEST_AUDIT_PASSWORD_FILE=/run/test-secrets/audit-v1 \
   -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 \
   "$sdk_image" "${test_command[@]}"
+python3 .github/scripts/verify-integration-trx.py "$result_file" --minimum-executed 32
 printf 'STAGE realpg-tests-complete\n'

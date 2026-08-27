@@ -3,6 +3,8 @@ set -eu
 umask 077
 
 die() { printf '%s\n' "$1" >&2; exit "${2:-70}"; }
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+repo_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P) || exit 70
 [ "$#" -eq 14 ] || die "rollback_usage" 64
 project=$1
 compose_file=$2
@@ -44,18 +46,18 @@ print(r"^https://github.com/" + re.escape(sys.argv[1])
       + r"/\.github/workflows/release-images\.yml@refs/heads/main$")
 PY
 ) || die "rollback_identity_contract_failed" 78
-infrastructure/release/verify-signed-release.sh "$current_release_dir" "$identity" \
+"$script_dir/verify-signed-release.sh" "$current_release_dir" "$identity" \
   https://token.actions.githubusercontent.com "$repository" "$current_release_tag" "$current_commit" \
   || die "rollback_current_signature_invalid" 78
-infrastructure/release/verify-signed-release.sh "$target_release_dir" "$identity" \
+"$script_dir/verify-signed-release.sh" "$target_release_dir" "$identity" \
   https://token.actions.githubusercontent.com "$repository" "$target_release_tag" "$target_commit" \
   || die "rollback_target_signature_invalid" 78
 
-current_sha=$(python3 infrastructure/release/release_manifest.py verify \
+current_sha=$(python3 "$script_dir/release_manifest.py" verify \
   --manifest "$current_release_dir/release-manifest.json")
-target_sha=$(python3 infrastructure/release/release_manifest.py verify \
+target_sha=$(python3 "$script_dir/release_manifest.py" verify \
   --manifest "$target_release_dir/release-manifest.json")
-python3 infrastructure/release/release_manifest.py verify-rollback \
+python3 "$script_dir/release_manifest.py" verify-rollback \
   --current "$current_release_dir/release-manifest.json" \
   --target "$target_release_dir/release-manifest.json" >/dev/null
 
@@ -104,7 +106,7 @@ for flavor in current target; do
   rendered=$(mktemp "/tmp/saydin-rollback-$flavor.XXXXXX.json")
   if [ "$flavor" = current ]; then current_compose config --format json > "$rendered"
   else target_compose config --format json > "$rendered"; fi
-  python3 infrastructure/deployment/validate-production.py "$rendered" >/dev/null
+  python3 "$repo_root/infrastructure/deployment/validate-production.py" "$rendered" >/dev/null
   if ! python3 - "$rendered" <<'PY'
 import json, sys
 command=json.load(open(sys.argv[1], encoding="utf-8"))["services"]["data-quality-audit"].get("command", [])

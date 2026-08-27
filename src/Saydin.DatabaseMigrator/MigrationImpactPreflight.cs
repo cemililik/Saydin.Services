@@ -29,9 +29,10 @@ internal static class MigrationImpactPreflight
         MigrationImpactDefinition impact,
         CancellationToken cancellationToken)
     {
-        await SetSessionTimeoutsAsync(connection, impact, cancellationToken);
+        var previousTimeouts = await ReadSessionTimeoutsAsync(connection, cancellationToken);
         try
         {
+            await SetSessionTimeoutsAsync(connection, impact, cancellationToken);
             return await VerifyCoreAsync(
                 connection, options, migration, impact, cancellationToken);
         }
@@ -43,8 +44,24 @@ internal static class MigrationImpactPreflight
         }
         finally
         {
-            await TryResetSessionTimeoutsAsync(connection, cancellationToken);
+            await TryRestoreSessionTimeoutsAsync(
+                connection, previousTimeouts.Lock, previousTimeouts.Statement, cancellationToken);
         }
+    }
+
+    private static async Task<(string Lock, string Statement)> ReadSessionTimeoutsAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT current_setting('lock_timeout'),current_setting('statement_timeout')", connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            throw new MigratorRejectedException("migration_impact_timeout_state_unavailable");
+        var value = (reader.GetString(0), reader.GetString(1));
+        if (await reader.ReadAsync(cancellationToken))
+            throw new MigratorRejectedException("migration_impact_timeout_state_ambiguous");
+        return value;
     }
 
     private static async Task<MigrationImpactPreflightSnapshot> VerifyCoreAsync(
@@ -147,17 +164,21 @@ internal static class MigrationImpactPreflight
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task TryResetSessionTimeoutsAsync(
+    private static async Task TryRestoreSessionTimeoutsAsync(
         NpgsqlConnection connection,
+        string lockTimeout,
+        string statementTimeout,
         CancellationToken cancellationToken)
     {
         if (connection.State != System.Data.ConnectionState.Open) return;
         try
         {
             await using var command = new NpgsqlCommand("""
-                SELECT pg_catalog.set_config('lock_timeout','0',false),
-                       pg_catalog.set_config('statement_timeout','0',false)
+                SELECT pg_catalog.set_config('lock_timeout',$1,false),
+                       pg_catalog.set_config('statement_timeout',$2,false)
                 """, connection);
+            command.Parameters.AddWithValue(lockTimeout);
+            command.Parameters.AddWithValue(statementTimeout);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)

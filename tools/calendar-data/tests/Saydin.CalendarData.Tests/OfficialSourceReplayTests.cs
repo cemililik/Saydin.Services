@@ -1,5 +1,7 @@
 namespace Saydin.CalendarData.Tests;
 
+using System.Globalization;
+
 public sealed class OfficialSourceReplayTests
 {
     [Fact]
@@ -44,7 +46,8 @@ public sealed class OfficialSourceReplayTests
     {
         var publications = TcmbArchiveParser.ParsePublicationDates(CalendarDataTestRoot.Raw(sourceId), year, month);
 
-        Assert.Equal(expected, publications.Contains(DateOnly.Parse(date)));
+        Assert.Equal(expected, publications.Contains(DateOnly.ParseExact(
+            date, "yyyy-MM-dd", CultureInfo.InvariantCulture)));
     }
 
     [Theory]
@@ -59,6 +62,7 @@ public sealed class OfficialSourceReplayTests
     {
         var sessions = BistPayCalendarParser.Parse(CalendarDataTestRoot.Raw(sourceId), year);
 
-        Assert.Equal(expected, sessions[DateOnly.Parse(date)]);
+        Assert.Equal(expected, sessions[DateOnly.ParseExact(
+            date, "yyyy-MM-dd", CultureInfo.InvariantCulture)]);
     }
 }

@@ -11,6 +11,7 @@ using Saydin.Shared.Entities;
 
 namespace Saydin.Api.Tests.Services;
 
+[Collection(MetricsTestCollection.Name)]
 public class ChannelActivityLoggerTests
 {
     [Fact]
