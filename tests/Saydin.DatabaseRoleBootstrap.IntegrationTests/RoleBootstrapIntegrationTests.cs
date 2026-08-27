@@ -281,7 +281,16 @@ public sealed class RoleBootstrapIntegrationTests
         await using (await harness.OpenLoginAsync(LoginPurpose.Api, 2, v2)) { }
         await AssertAuthenticationRejectedAsync(harness, LoginPurpose.Api, 2, rejectedReplacement);
 
-        (await harness.RunEnsureAsync()).AssertSuccess();
+        // `ensure` never rewrites a live login's password (EnsureRoleAsync only sets one at
+        // creation); it authenticates the *current* — highest — version with the supplied
+        // secret. Api is on v2 by now, so the run must present v2's password exactly as
+        // production presents the `<purpose>-current` secret alias after a rotation. Feeding
+        // the stale v1 password here would be the same fail-closed rejection asserted above.
+        var currentPasswords = Enum.GetValues<LoginPurpose>().ToDictionary(
+            purpose => purpose,
+            purpose => purpose == LoginPurpose.Api ? v2 : harness.V1Password(purpose));
+
+        (await harness.RunEnsureAsync(currentPasswords)).AssertSuccess();
         (await harness.RunVerifyAsync()).AssertSuccess();
         await using var admin = await harness.OpenAdminAsync();
         var v1State = await ReadRoleStateAsync(admin, harness.Contract.Login(LoginPurpose.Api, 1).Name);

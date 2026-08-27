@@ -58,7 +58,7 @@ public static class PostgresScramSha256Verifier
             // it here would diverge from the verifier PostgreSQL produces for the same
             // role via PASSWORD/\password, so the count is an interop constant.
             saltedPassword = Rfc2898DeriveBytes.Pbkdf2(
-                password, salt, Iterations, HashAlgorithmName.SHA256, DerivedKeyBytes);
+                password, salt, Iterations, HashAlgorithmName.SHA256, DerivedKeyBytes); // NOSONAR
             clientKey = HMACSHA256.HashData(saltedPassword, "Client Key"u8);
             storedKey = SHA256.HashData(clientKey);
             serverKey = HMACSHA256.HashData(saltedPassword, "Server Key"u8);

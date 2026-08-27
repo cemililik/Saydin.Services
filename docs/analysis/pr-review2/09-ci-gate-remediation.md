@@ -11,7 +11,8 @@
 
 | Kapı | Belirti | Kök neden | Aksiyon |
 |------|---------|-----------|---------|
-| Integration tests (TimescaleDB + Redis) | 67 testin 12'si `Npgsql.PostgresException 42501: permission denied for table activity_logs` | `EfActivityLogBatchStore` idempotent yazımı `ON CONFLICT (id,created_at)` **hedefli** arbiter kullanıyordu; TimescaleDB hypertable'ında index inference `SELECT` yetkisi ister, migration 019 ise API capability rolüne yalnız `INSERT` verir | Arbiter kaldırıldı → `ON CONFLICT DO NOTHING` |
+| Integration tests (TimescaleDB + Redis) | 67 testin 12'si `Npgsql.PostgresException 42501: permission denied for table activity_logs` | `EfActivityLogBatchStore` idempotent yazımı `ON CONFLICT (id,created_at)` **hedefli** arbiter kullanıyordu; TimescaleDB hypertable'ında index inference `SELECT` yetkisi ister, migration 019 ise API capability rolüne yalnız `INSERT` verir | Arbiter kaldırıldı → `ON CONFLICT DO NOTHING` (§2) |
+| Integration tests — role-bootstrap adımı | İlk düzeltmeden sonra ulaşılabilen adımda 13 testin 1'i `login_authentication_failed` | Test, Api'yi v2'ye rotate ettikten sonra `ensure`'ü bayat v1 parolasıyla çağırıyordu; `ensure` current (en yüksek) sürümü verilen sırla doğrular | Test girdisi kardeş lifecycle testleriyle hizalandı (§2b) |
 | Dependency, license, vulnerability, secret and IaC gates | `Dependency review is not supported on this repository` (5 sn'de fail) | Repo'da Dependency Graph kapalıydı | `PUT /repos/…/vulnerability-alerts` ile Dependabot alerts + Dependency Graph açıldı |
 | SonarCloud Code Analysis | Quality Gate: `new_reliability_rating=4`, `new_security_rating=5`, `new_duplicated_lines_density=4.9%` | 2.663 bulgunun 1.919'u analiz kapsamı dışında kalması gereken artefaktlarda | Kapsam daraltıldı + gerçek bug/vulnerability'ler düzeltildi |
 | Codacy Static Code Analysis | 169 yeni bulgu (eşik 0) | Ağırlıklı olarak kontrol-düzlemi ve self-test script'lerinde yapısal yanlış-pozitif | Gerçek olanlar düzeltildi; artefakt yolu hariç tutuldu; kalanlar için Codacy tarafında pattern kararı gerekiyor (§4) |
@@ -60,6 +61,38 @@ korunur — `ManagedApi_ToxicConstraintRowIsBisected…` testinin ölçtüğü d
 > bozulur ve hedefsiz form istenmeyen susturma yapar. O noktada ya kolon-düzeyinde
 > `GRANT SELECT (id,created_at)` ile hedefli arbiter'a dönülmeli ya da idempotency
 > başka bir mekanizmaya taşınmalıdır. Detay: [`activity-logging.md` §4.3](../../architecture/activity-logging.md).
+
+---
+
+## 2b. `role-bootstrap ensure` — bayat sır girdisi (test defect'i)
+
+Birinci düzeltmeden sonra integration job ilk adımı geçti ve daha önce hiç
+çalışamamış olan `Required database role-bootstrap suite` adımına ulaştı. Orada tek
+bir test kaldı: `RoleBootstrapIntegrationTests.Ensure_preserves_v1_password_and_rotate_adds_v2_without_retiring_v1`
+→ `exit=69; role-bootstrap failed: code=login_authentication_failed`. Her iki CI
+koşumunda birebir aynı; flaky değil.
+
+**Bu bir production hatası değildir.** `ensure` sözleşmesi:
+
+- `EnsureRoleAsync` (RoleBootstrapDatabaseOperations.cs:125-145) parolayı **yalnız rol
+  oluşturulurken** yazar; var olan bir login'in parolasını asla değiştirmez. Parola
+  değişimi yalnız `AlterRolePasswordAsync` (rotate / reset-password) üzerindendir.
+- `EnsureAsync` her purpose için **en yüksek** login sürümünü "current" kabul eder
+  (RoleBootstrapRunner.cs:387-392) ve `AuthenticateAsync` verilen sırla o sürümü
+  doğrular. Yani `ensure`, sırrın canlı rolle eşleştiğini **kanıtlar**.
+- Production'da `--<purpose>-password-file` her zaman `<purpose>-current` secret
+  alias'ını gösterir; rotation'dan sonra operatör bu dosyayı günceller. Dosya geride
+  kalırsa `ensure` deploy'da fail-closed olur — istenen davranış budur.
+
+Aynı suite'te geçen iki test bu sözleşmeyi zaten kodluyor: `RoleCredentialLifecycle
+IntegrationTests` satır 117-120 ve 140-143, rotate sonrası `currentPasswords` sözlüğünü
+kurup `RunEnsureAsync(currentPasswords)` çağırıyor. Başarısız test ise Api'yi v2'ye
+rotate ettikten sonra parametresiz `RunEnsureAsync()` (yani v1 parolası) çağırıyordu.
+Testin kendi 253-254. satırı da aynı mekanizmanın fail-closed olduğunu doğruluyor.
+
+**Düzeltme:** test girdisi kardeş testlerle hizalandı (Api → `v2`). Testin adı ve son
+iddiaları (v1 parolası korunur, rotate v1'i emekliye ayırmadan v2 ekler, ikisi de
+login olabilir) aynen korunuyor; yalnız bayat sır girdisi düzeltildi.
 
 ---
 

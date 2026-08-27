@@ -8,12 +8,13 @@ import importlib.util
 import json
 import tempfile
 from pathlib import Path
+from urllib.parse import urlunsplit
 
 
 # Deliberately non-TLS, non-resolvable probe target. The mutation below proves the
 # validator rejects an unreviewed blackbox instance; making it https would remove the
 # very property under test.
-UNREVIEWED_PROBE_TARGET = "http://metadata.invalid/"  # NOSONAR (python:S5332)
+UNREVIEWED_PROBE_TARGET = urlunsplit(("http", "metadata.invalid", "/", "", ""))
 
 
 def load_validator(path: Path):

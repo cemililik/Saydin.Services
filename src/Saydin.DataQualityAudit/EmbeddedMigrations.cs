@@ -23,10 +23,10 @@ internal static partial class EmbeddedMigrations
         "1b76002b7c2e3b9156e433e1268a085027e383fa0025e82f398f2bb27aa1663e";
     internal const string InstallationCredentialRehashVersion =
         "024_installation_credential_rehash";
+    // S6418: SHA-256 digest of 024_installation_credential_rehash.sql, not a credential.
+    // The pinned digest is what makes migration drift detectable.
     internal const string InstallationCredentialRehashChecksum =
-        // NOSONAR (csharpsquid:S6418) — SHA-256 digest of 024_installation_credential_rehash.sql,
-        // not a credential. The pinned digest is what makes migration drift detectable.
-        "afda0e5a86b8d4b2c6b0f809372db72933f5c7e5b4b1dd18eaa8dd50dbc773d9";
+        "afda0e5a86b8d4b2c6b0f809372db72933f5c7e5b4b1dd18eaa8dd50dbc773d9"; // NOSONAR
 
     internal static IReadOnlyDictionary<string, string> PinnedChecksums =>
         MigrationTrustRoot.Checksums;
