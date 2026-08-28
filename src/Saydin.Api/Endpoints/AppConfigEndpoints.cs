@@ -15,7 +15,8 @@ public static class AppConfigEndpoints
             .WithSummary("Kullanıcının plan konfigürasyonunu döner")
             .Produces<Models.Responses.AppConfigResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status400BadRequest)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential();
 
         return app;
     }

@@ -1,3 +1,4 @@
+using Saydin.Api.Helpers;
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
@@ -21,7 +22,8 @@ public static class DcaEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential(requireCalculationNetworkAdmission: true);
 
         return app;
     }
@@ -36,25 +38,29 @@ public static class DcaEndpoints
 
         var result = await calculator.CalculateAsync(request, ct);
 
-        // F4-6 (KVKK): ham periyodik tutar yerine kaba aralık; sonuç TL tutarları
-        // (TotalInvestedTry, CurrentValueTry, ProfitLossTry, AverageCostPerUnit) loglanmaz.
-        log.WithData(new
-        {
-            request.AssetSymbol,
-            startDate = request.StartDate.ToString("yyyy-MM-dd"),
-            endDate = request.EndDate?.ToString("yyyy-MM-dd"),
-            amountBucket = AmountBucket.Coarse(request.PeriodicAmount),
-            request.Period,
-            request.AmountType,
-            request.IncludeInflation,
-            result = new
-            {
-                result.ProfitLossPercent,
-                result.TotalPurchases,
-                result.RealProfitLossPercent,
-            }
-        });
+        // API-06: ham periyodik tutar bucket'lanır; exact TL/yüzde sonuçlar
+        // yalnız düşük kardinaliteli outcome'a indirgenir.
+        log.WithData(CreateCalculationActivityData(request, result));
 
         return Results.Ok(result);
     }
+
+    internal static object CreateCalculationActivityData(
+        DcaRequest request,
+        Models.Responses.DcaResponse result) => new
+    {
+        request.AssetSymbol,
+        startDate = request.StartDate.ToString("yyyy-MM-dd"),
+        endDate = request.EndDate?.ToString("yyyy-MM-dd"),
+        amountBucket = AmountBucket.Coarse(request.PeriodicAmount),
+        request.Period,
+        request.AmountType,
+        request.IncludeInflation,
+        result = new
+        {
+            result.TotalPurchases,
+            outcome = TelemetryOutcome.From(result.ProfitLossTry),
+            realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
+        }
+    };
 }
