@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "snapshotSetId": "cal-candidate-2026-08-18",
+  "calendars": [
+    {
+      "code": "tcmb_indicative_fx",
+      "coverageFrom": "2006-01-01",
+      "coverageThrough": "2026-08-18",
+      "outputPath": "normalized/tcmb_indicative_fx.csv"
+    },
+    {
+      "code": "bist_pay_xist",
+      "coverageFrom": "2024-01-01",
+      "coverageThrough": "2026-12-31",
+      "outputPath": "normalized/bist_pay_xist.csv"
+    }
+  ],
+  "sources": [
+    {
+      "id": "tcmb-annual-2026",
+      "calendarCode": "tcmb_indicative_fx",
+      "kind": "tcmbAnnualIndex",
+      "role": "discovery",
+      "uri": "https://www.tcmb.gov.tr/kurlar/kur2026_tr.html",
+      "mediaType": "text/html",
+      "year": 2026
+    },
+    {
+      "id": "tcmb-month-202608",
+      "calendarCode": "tcmb_indicative_fx",
+      "kind": "tcmbMonthlyArchive",
+      "role": "authority",
+      "uri": "https://www.tcmb.gov.tr/kurlar/202608/Aug_tr.html",
+      "mediaType": "text/html",
+      "year": 2026,
+      "month": 8
+    }
+  ]
+}
