@@ -1,0 +1,105 @@
+groups:
+  - name: saydin-host-backup
+    rules:
+      - alert: SaydinNodeExporterUnavailable
+        expr: up{job="node"} != 1
+        for: 5m
+        labels: {severity: critical, service: host}
+        annotations:
+          summary: Host metrics scrape is unavailable
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/disk-pressure.md
+
+      - alert: SaydinHostDiskPressure
+        expr: |
+          (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"}
+          / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay"}) < 0.15
+        for: 15m
+        labels: {severity: critical, service: host}
+        annotations:
+          summary: Host filesystem has less than 15 percent free space
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/disk-pressure.md
+
+      - alert: SaydinWalBackupFreshnessMetricMissing
+        expr: absent(saydin_backup_last_success_timestamp_seconds{kind="wal"})
+        for: 30m
+        labels: {severity: critical, service: backup, kind: wal}
+        annotations:
+          summary: WAL backup freshness signal is absent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+      - alert: SaydinWalSpoolCapacityMetricMissing
+        expr: |
+          absent(saydin_backup_wal_spool_free_bytes)
+          or absent(saydin_backup_wal_spool_capacity_floor_bytes)
+        for: 30m
+        labels: {severity: critical, service: backup, kind: wal}
+        annotations:
+          summary: WAL spool capacity signal is absent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+      - alert: SaydinWalSpoolCapacityLow
+        expr: |
+          saydin_backup_wal_spool_free_bytes
+          < saydin_backup_wal_spool_capacity_floor_bytes
+        for: 5m
+        labels: {severity: critical, service: backup, kind: wal}
+        annotations:
+          summary: WAL spool free space is below its recovery-chain floor
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+      - alert: SaydinBaseBackupFreshnessMetricMissing
+        expr: absent(saydin_backup_last_success_timestamp_seconds{kind="base"})
+        for: 30m
+        labels: {severity: critical, service: backup, kind: base}
+        annotations:
+          summary: Base backup freshness signal is absent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+      - alert: SaydinWalBackupStale
+        expr: time() - saydin_backup_last_success_timestamp_seconds{kind="wal"} > 1800
+        for: 15m
+        labels: {severity: critical, service: backup}
+        annotations:
+          summary: No recoverable backup checkpoint within the 15 minute RPO plus 15 minute grace
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+      - alert: SaydinBaseBackupStale
+        expr: time() - saydin_backup_last_success_timestamp_seconds{kind="base"} > 93600
+        for: 30m
+        labels: {severity: critical, service: backup}
+        annotations:
+          summary: No verified base backup within the daily schedule plus 2 hour grace
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+      - alert: SaydinBackupFailure
+        expr: time() - saydin_backup_last_failure_timestamp_seconds{kind=~"base|wal"} < 1800
+        labels: {severity: critical, service: backup}
+        annotations:
+          summary: The encrypted off-host backup job failed
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-failure.md
+
+      - alert: SaydinBackupLoginValidityMetricMissing
+        expr: absent(saydin_backup_login_valid_until_timestamp_seconds)
+        for: 30m
+        labels: {severity: critical, service: backup}
+        annotations:
+          summary: Backup login validity signal is absent
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-login-renewal.md
+
+      - alert: SaydinBackupLoginExpiring
+        expr: |
+          (saydin_backup_login_valid_until_timestamp_seconds - time() < 2592000)
+          and (saydin_backup_login_valid_until_timestamp_seconds - time() > 0)
+        for: 15m
+        labels: {severity: warning, service: backup}
+        annotations:
+          summary: Backup login expires within 30 days
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-login-renewal.md
+
+      - alert: SaydinBackupLoginExpired
+        expr: saydin_backup_login_valid_until_timestamp_seconds - time() <= 0
+        for: 5m
+        labels: {severity: critical, service: backup}
+        annotations:
+          summary: Backup login validity has expired
+          runbook_url: https://github.com/cemililik/Saydin.Services/blob/main/docs/runbooks/backup-login-renewal.md

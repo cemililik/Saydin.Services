@@ -1,0 +1,23 @@
+{
+	admin off
+	http_port 8080
+	https_port 8443
+	email {$SAYDIN_ACME_EMAIL}
+}
+
+{$SAYDIN_PUBLIC_HOST} {
+	encode zstd gzip
+
+	@internal path_regexp internal `(?i)^/+(?:(?:metrics|health/+ready)(?:/)*|(?:openapi|scalar)(?:/.*)?)$`
+	respond @internal 404
+
+	reverse_proxy saydin-api:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), geolocation=(), microphone=()"
+		-Server
+	}
+}

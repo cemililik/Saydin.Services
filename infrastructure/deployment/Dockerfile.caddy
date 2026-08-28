@@ -1,0 +1,14 @@
+# Caddy's upstream binary carries cap_net_bind_service. A cap-drop=ALL plus
+# no-new-privileges runtime correctly refuses to exec a file requesting a dropped
+# capability, even though this deployment listens on unprivileged 8080/8443.
+# Re-copying the binary strips the file capability; the resulting release image is
+# built once, signed and referenced by manifest-list digest like other deploy images.
+ARG CADDY_BASE_IMAGE=caddy@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0
+FROM ${CADDY_BASE_IMAGE}
+
+USER root
+RUN cp /usr/bin/caddy /tmp/caddy-no-file-capability \
+    && chmod 0755 /tmp/caddy-no-file-capability \
+    && mv /tmp/caddy-no-file-capability /usr/bin/caddy
+
+USER 1000:1000

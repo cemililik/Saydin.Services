@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily TCMB official calendar acquisition
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 Europe/Istanbul
+Persistent=true
+RandomizedDelaySec=2min
+Unit=calendar-acquisition@tcmb.service
+
+[Install]
+WantedBy=timers.target
