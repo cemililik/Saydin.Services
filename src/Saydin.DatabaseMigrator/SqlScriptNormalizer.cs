@@ -257,8 +257,8 @@ internal static class SqlScriptNormalizer
         canonical.StartsWith("createindexconcurrently", StringComparison.Ordinal) ||
         canonical.StartsWith("createuniqueindexconcurrently", StringComparison.Ordinal) ||
         canonical.StartsWith("dropindexconcurrently", StringComparison.Ordinal) ||
-        canonical.StartsWith("reindex", StringComparison.Ordinal) &&
-        canonical.Contains("concurrently", StringComparison.Ordinal);
+        (canonical.StartsWith("reindex", StringComparison.Ordinal) &&
+         canonical.Contains("concurrently", StringComparison.Ordinal));
 
     private static void BlankNonNewlines(char[] chars, int start, int endExclusive)
     {

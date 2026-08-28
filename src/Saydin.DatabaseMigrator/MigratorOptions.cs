@@ -197,7 +197,8 @@ internal sealed record MigratorOptions(
 
         var sslModeText = values.GetValueOrDefault("--ssl-mode") ?? Get(environment, "PGSSLMODE") ?? "require";
         if (!Enum.TryParse<SslMode>(sslModeText.Replace("-", string.Empty, StringComparison.Ordinal),
-                true, out var sslMode))
+                true, out var sslMode)
+            || !Enum.IsDefined(sslMode))
             throw new MigratorRejectedException("ssl_mode_invalid");
 
         var timeouts = new MigratorTimeouts(

@@ -21,6 +21,15 @@ internal sealed class ImpactTestPackage : IDisposable
         Configuration = configuration;
     }
 
+
+    private static int IndexOfVersion(MigrationManifest manifest, string version)
+    {
+        for (var index = 0; index < manifest.Migrations.Count; index++)
+            if (manifest.Migrations[index].Version == version)
+                return index;
+        throw new InvalidOperationException($"migration not found in manifest: {version}");
+    }
+
     public string MigrationsDirectory => migrations.Path;
     public MigrationManifest Manifest { get; }
     public MigrationImpactConfiguration Configuration { get; }
@@ -53,7 +62,11 @@ internal sealed class ImpactTestPackage : IDisposable
                 new UTF8Encoding(false));
             var manifest = MigrationManifest.Load(migrations.Path);
             var migration = manifest.Migrations.Single(item => item.Version == migrationVersion);
-            var predecessor = manifest.Migrations[26];
+            // Bound to the selected migration's own position, not the manifest length:
+            // `migrationVersion` is a parameter and a later canonical migration may sort
+            // after it, either of which would silently retarget predecessor/prefix.
+            var trustedPrefixCount = IndexOfVersion(manifest, migrationVersion);
+            var predecessor = manifest.Migrations[trustedPrefixCount - 1];
             var budgets = new Dictionary<string, object?>
             {
                 ["declaredTablespaceCapacityBytes"] = 10_000_000_000_000L,
@@ -79,7 +92,7 @@ internal sealed class ImpactTestPackage : IDisposable
                 ["database"] = database.Name,
                 ["requiredPredecessorSha256"] = predecessor.Checksum,
                 ["requiredPredecessorVersion"] = predecessor.Version,
-                ["requiredSchemaManifestSha256"] = manifest.ChecksumThrough(27),
+                ["requiredSchemaManifestSha256"] = manifest.ChecksumThrough(trustedPrefixCount),
                 ["systemIdentifierSha256"] = database.Contract.SystemIdentifierSha256,
             };
             mutateTarget?.Invoke(target);

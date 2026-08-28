@@ -113,7 +113,8 @@ internal sealed partial class RoleBootstrapRunner
                               pg_catalog.acldefault('f',function.proowner))) acl
                       LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
                       LEFT JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
-                     WHERE function.oid=($1||'.consume_principal_retention_transition()')::pg_catalog.regprocedure),
+                     WHERE function.oid=pg_catalog.to_regprocedure(
+                                $1||'.consume_principal_retention_transition()')),
                 expected_function(grantee,grantor,privilege_type,is_grantable) AS (VALUES
                     ($2,$2,'EXECUTE',false),($3,$2,'EXECUTE',false))
                 SELECT (SELECT pg_catalog.count(*)=1 AND pg_catalog.bool_and(
@@ -130,7 +131,8 @@ internal sealed partial class RoleBootstrapRunner
                                        ARRAY['search_path=pg_catalog, pg_temp']::text[]
                                    AND function.prosrc=$5)
                           FROM pg_catalog.pg_proc function
-                         WHERE function.oid=($1||'.consume_principal_retention_transition()')::pg_catalog.regprocedure)
+                         WHERE function.oid=pg_catalog.to_regprocedure(
+                                $1||'.consume_principal_retention_transition()'))
                    AND NOT EXISTS ((SELECT * FROM schema_acl EXCEPT ALL SELECT * FROM expected_schema)
                                    UNION ALL
                                    (SELECT * FROM expected_schema EXCEPT ALL SELECT * FROM schema_acl))
