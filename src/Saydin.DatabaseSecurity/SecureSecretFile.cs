@@ -9,10 +9,10 @@ public static class SecureSecretFile
     private const int MinPasswordBytes = 24;
 
     public static string ReadConnectionString(string path) =>
-        Read(path, MaxConnectionBytes, minimumBytes: 1, "admin_connection_secret_invalid");
+        Read(path, minimumBytes: 1, MaxConnectionBytes, "admin_connection_secret_invalid");
 
     public static string ReadPassword(string path) =>
-        Read(path, MaxPasswordBytes, MinPasswordBytes, "login_password_secret_invalid");
+        Read(path, MinPasswordBytes, MaxPasswordBytes, "login_password_secret_invalid");
 
     /// <summary>
     /// Reads and validates a database password without creating an immutable managed string.
@@ -73,7 +73,7 @@ public static class SecureSecretFile
         }
     }
 
-    private static string Read(string path, int maximumBytes, int minimumBytes, string code)
+    private static string Read(string path, int minimumBytes, int maximumBytes, string code)
     {
         byte[]? bytes = null;
         try

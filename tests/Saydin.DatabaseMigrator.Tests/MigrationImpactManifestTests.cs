@@ -66,7 +66,7 @@ public sealed class MigrationImpactManifestTests
             onlinePlan: null);
 
         var impacts = MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         var impact = impacts.For("026_impact_test");
         impact.Mode.Should().Be(MigrationExecutionMode.Transactional);
@@ -84,7 +84,7 @@ public sealed class MigrationImpactManifestTests
         File.WriteAllText(fixture.SignatureFile, Convert.ToBase64String(new byte[64]));
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_signature_invalid");
@@ -98,7 +98,7 @@ public sealed class MigrationImpactManifestTests
             "transactional", ["table-rewrite"], null);
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, configuration: null);
+            fixture.Manifest, fixture.TrustedPrefixCount, configuration: null);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_configuration_required");
@@ -113,7 +113,7 @@ public sealed class MigrationImpactManifestTests
         var configuration = fixture.Configuration with { PublicKeySha256 = "not-a-sha256" };
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_configuration_invalid");
@@ -132,7 +132,7 @@ public sealed class MigrationImpactManifestTests
         };
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_public_key_mismatch");
@@ -147,7 +147,7 @@ public sealed class MigrationImpactManifestTests
         File.WriteAllText(fixture.Configuration.PublicKeyFile, "not a public key");
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_public_key_invalid");
@@ -166,7 +166,7 @@ public sealed class MigrationImpactManifestTests
             mutateDocument: document => document[property] = value);
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_identity_mismatch");
@@ -187,7 +187,7 @@ public sealed class MigrationImpactManifestTests
                 ((Dictionary<string, object?>)document["target"]!)[property] = value);
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_predecessor_invalid");
@@ -202,7 +202,7 @@ public sealed class MigrationImpactManifestTests
         File.WriteAllText(Path.Combine(fixture.Impacts.Path, "999_unexpected.impact.json"), "{}");
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_file_set_mismatch");
@@ -228,7 +228,7 @@ public sealed class MigrationImpactManifestTests
                     "private.users");
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_relation_invalid");
@@ -245,7 +245,7 @@ public sealed class MigrationImpactManifestTests
                     "unsupported");
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_postcondition_invalid");
@@ -261,7 +261,7 @@ public sealed class MigrationImpactManifestTests
             "resumable-online", ["resumable-online"], onlinePlan);
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_online_plan_contract_invalid");
@@ -275,7 +275,7 @@ public sealed class MigrationImpactManifestTests
             "transactional", ["large-dml"], null);
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_sql_lexically_invalid");
@@ -288,7 +288,7 @@ public sealed class MigrationImpactManifestTests
             "VACUUM public.users;", "transactional", ["opaque-or-unknown"], null);
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_static_classification_mismatch");
@@ -302,7 +302,7 @@ public sealed class MigrationImpactManifestTests
             "resumable-online", ["resumable-online"], OnlinePlan());
 
         var impacts = MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         impacts.For("026_impact_test").Mode.Should().Be(MigrationExecutionMode.ResumableOnline);
     }
@@ -316,7 +316,7 @@ public sealed class MigrationImpactManifestTests
             budgets => budgets["estimatedAdditionalBytes"] = 2_000_001L);
 
         var action = () => MigrationImpactSet.LoadAndVerify(
-            fixture.Manifest, 27, fixture.Configuration);
+            fixture.Manifest, fixture.TrustedPrefixCount, fixture.Configuration);
 
         action.Should().Throw<MigratorRejectedException>()
             .Which.Code.Should().Be("migration_impact_budget_invalid");
@@ -342,13 +342,15 @@ public sealed class MigrationImpactManifestTests
             TemporaryDirectory impacts,
             MigrationManifest manifest,
             MigrationImpactConfiguration configuration,
-            string signatureFile)
+            string signatureFile,
+            int trustedPrefixCount)
         {
             Migrations = migrations;
             Impacts = impacts;
             Manifest = manifest;
             Configuration = configuration;
             SignatureFile = signatureFile;
+            TrustedPrefixCount = trustedPrefixCount;
         }
 
         public TemporaryDirectory Migrations { get; }
@@ -356,6 +358,9 @@ public sealed class MigrationImpactManifestTests
         public MigrationManifest Manifest { get; }
         public MigrationImpactConfiguration Configuration { get; }
         public string SignatureFile { get; }
+
+        /// <summary>Canonical migrations preceding the appended 026 tail.</summary>
+        public int TrustedPrefixCount { get; }
 
         public static SignedImpactFixture Create(
             string sql,
@@ -376,7 +381,10 @@ public sealed class MigrationImpactManifestTests
                     new UTF8Encoding(false));
                 var manifest = MigrationManifest.Load(migrations.Path);
                 var migration = manifest.Migrations.Single(item => item.Version == "026_impact_test");
-                var predecessor = manifest.Migrations[26];
+                // The appended 026 tail sorts last, so its predecessor is the final
+                // canonical migration and the trusted prefix is everything before the tail.
+                var trustedPrefixCount = manifest.Migrations.Count - 1;
+                var predecessor = manifest.Migrations[trustedPrefixCount - 1];
 
                 var budgets = new Dictionary<string, object?>
                 {
@@ -432,7 +440,7 @@ public sealed class MigrationImpactManifestTests
                         ["database"] = "saydin",
                         ["requiredPredecessorSha256"] = predecessor.Checksum,
                         ["requiredPredecessorVersion"] = predecessor.Version,
-                        ["requiredSchemaManifestSha256"] = manifest.ChecksumThrough(27),
+                        ["requiredSchemaManifestSha256"] = manifest.ChecksumThrough(trustedPrefixCount),
                         ["systemIdentifierSha256"] = SystemHash,
                     },
                 };
@@ -454,7 +462,7 @@ public sealed class MigrationImpactManifestTests
                 return new SignedImpactFixture(
                     migrations, impacts, manifest,
                     new MigrationImpactConfiguration(impacts.Path, publicFile, publicSha),
-                    signatureFile);
+                    signatureFile, trustedPrefixCount);
             }
             catch
             {

@@ -59,7 +59,9 @@ internal sealed class MigrationManifest
             throw new MigratorRejectedException("migration_directory_missing");
 
         var files = Directory.EnumerateFiles(directory)
-            .Where(path => Path.GetExtension(path) is ".sql" or ".sh")
+            .Where(path => Path.GetExtension(path)
+                .Equals(".sql", StringComparison.OrdinalIgnoreCase)
+                || Path.GetExtension(path).Equals(".sh", StringComparison.OrdinalIgnoreCase))
             .OrderBy(Path.GetFileName, StringComparer.Ordinal)
             .ToArray();
 

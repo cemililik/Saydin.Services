@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Saydin.DatabaseSecurity;
@@ -72,7 +73,7 @@ public sealed class RoleContractTests
     {
         var prefix = RoleContract.DerivePrefix("prod-a", "saydin", SystemHash);
         var contract = RoleContract.Create("prod-a", "saydin", SystemHash, prefix);
-        var validUntil = DateTimeOffset.Parse("2026-10-19T00:00:00Z");
+        var validUntil = DateTimeOffset.Parse("2026-10-19T00:00:00Z", CultureInfo.InvariantCulture);
         var v1 = contract.BackupLogin(1, validUntil);
         var v2 = contract.BackupLogin(2, validUntil.AddDays(1));
 
@@ -121,7 +122,7 @@ public sealed class RoleContractTests
         Assert.Equal(firstClaim.TargetLockSha256, conflictingClaim.TargetLockSha256);
         Assert.NotEqual(
             firstClaim.ContractSha256("2.23.1", "1.1"),
-            conflictingClaim.ContractSha256("0.0.0", "1.1"));
+            conflictingClaim.ContractSha256("2.23.1", "1.1"));
         Assert.NotEqual(firstClaim.Prefix, conflictingClaim.Prefix);
         Assert.Matches("^[0-9a-f]{64}$", firstClaim.TargetLockSha256);
     }

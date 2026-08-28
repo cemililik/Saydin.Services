@@ -196,11 +196,20 @@ internal sealed class TestDatabase : IAsyncDisposable
         }
         catch
         {
-            if (database is not null) await database.DisposeAsync();
-            else
+            // Cleanup is best effort: a failure here must never replace the setup
+            // exception that is the actual diagnostic.
+            try
             {
-                await DropDatabaseBestEffortAsync(clusterAdmin.ConnectionString, name);
-                DeleteSecretDirectoryBestEffort(secretDirectory);
+                if (database is not null) await database.DisposeAsync();
+                else
+                {
+                    await DropDatabaseBestEffortAsync(clusterAdmin.ConnectionString, name);
+                    DeleteSecretDirectoryBestEffort(secretDirectory);
+                }
+            }
+            catch (Exception cleanupFailure)
+            {
+                Console.Error.WriteLine($"test database cleanup failed: {cleanupFailure}");
             }
             throw;
         }

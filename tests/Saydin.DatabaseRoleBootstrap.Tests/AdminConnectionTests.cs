@@ -1,3 +1,4 @@
+using System.Globalization;
 using Saydin.DatabaseSecurity;
 
 namespace Saydin.DatabaseRoleBootstrap.Tests;
@@ -51,7 +52,7 @@ public sealed class AdminConnectionTests
                 TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30)),
             new Dictionary<LoginPurpose, string>(),
             null,
-            DateTimeOffset.Parse("2026-10-19T00:00:00Z"),
+            DateTimeOffset.Parse("2026-10-19T00:00:00Z", CultureInfo.InvariantCulture),
             null,
             false,
             null,

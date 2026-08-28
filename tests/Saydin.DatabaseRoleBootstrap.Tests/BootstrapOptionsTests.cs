@@ -1,3 +1,4 @@
+using System.Globalization;
 using Saydin.DatabaseSecurity;
 
 namespace Saydin.DatabaseRoleBootstrap.Tests;
@@ -41,7 +42,7 @@ public sealed class BootstrapOptionsTests
         var options = BootstrapOptions.Parse(args.ToArray());
 
         Assert.Equal("/run/secrets/backup-v1", options.BackupPasswordFile);
-        Assert.Equal(DateTimeOffset.Parse("2026-10-19T00:00:00Z"),
+        Assert.Equal(DateTimeOffset.Parse("2026-10-19T00:00:00Z", CultureInfo.InvariantCulture),
             options.BackupV1ValidUntilUtc);
         Assert.Equal(6, options.PasswordFiles.Count);
     }
@@ -61,7 +62,7 @@ public sealed class BootstrapOptionsTests
         Assert.Null(options.RotatePurpose);
         Assert.Equal(2, options.RotateVersion);
         Assert.Equal("/run/secrets/backup-v2", options.RotatePasswordFile);
-        Assert.Equal(DateTimeOffset.Parse("2026-11-19T00:00:00Z"),
+        Assert.Equal(DateTimeOffset.Parse("2026-11-19T00:00:00Z", CultureInfo.InvariantCulture),
             options.RotateBackupValidUntilUtc);
     }
 

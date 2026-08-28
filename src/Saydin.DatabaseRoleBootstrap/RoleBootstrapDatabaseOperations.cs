@@ -987,13 +987,23 @@ internal sealed partial class RoleBootstrapRunner
         command.Parameters.AddWithValue(name);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
+        // Column order and record order differ: rolpassword is column 10 but Password is
+        // the 12th field, and `rolconfig IS NULL` is column 11 but ConfigIsNull is 11th.
+        // Named arguments keep the mapping explicit.
         var result = new ExistingRole(
-            reader.GetString(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
-            reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7),
-            reader.GetInt32(8), reader.IsDBNull(9) ? null : reader.GetString(9),
-            reader.GetBoolean(11),
-            reader.IsDBNull(10) ? null : reader.GetString(10),
-            reader.IsDBNull(12) ? null : reader.GetString(12));
+            Name: reader.GetString(0),
+            CanLogin: reader.GetBoolean(1),
+            Superuser: reader.GetBoolean(2),
+            CreateRole: reader.GetBoolean(3),
+            CreateDatabase: reader.GetBoolean(4),
+            Inherit: reader.GetBoolean(5),
+            Replication: reader.GetBoolean(6),
+            BypassRls: reader.GetBoolean(7),
+            ConnectionLimit: reader.GetInt32(8),
+            ValidUntilUtc: reader.IsDBNull(9) ? null : reader.GetString(9),
+            Password: reader.IsDBNull(10) ? null : reader.GetString(10),
+            ConfigIsNull: reader.GetBoolean(11),
+            Marker: reader.IsDBNull(12) ? null : reader.GetString(12));
         if (await reader.ReadAsync(cancellationToken))
             throw TopologyRejected("managed_role_ambiguous");
         return result;
