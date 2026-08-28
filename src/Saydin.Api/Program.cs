@@ -1,14 +1,11 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Net;
-using System.Net.Mime;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
-using System.Threading.RateLimiting;
+using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Localization;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -27,7 +24,10 @@ using Saydin.Api.Exceptions;
 using Saydin.Api.Middleware;
 using Saydin.Api.Options;
 using Saydin.Api.Repositories;
+using Saydin.Api.Runtime;
+using Saydin.Api.Security;
 using Saydin.Api.Services;
+using Saydin.DatabaseSecurity;
 using Saydin.Shared.Data;
 using Saydin.Shared.Diagnostics;
 using Saydin.Shared.Entities;
@@ -44,6 +44,12 @@ Log.Logger = new LoggerConfiguration()
 try
 {
     var builder = WebApplication.CreateBuilder(args);
+    var apiRuntime = ApiRuntimeContract.Parse(builder.Configuration, builder.Environment);
+    var serviceVersion = ApiServiceVersionContract.Parse(builder.Configuration, builder.Environment);
+    builder.WebHost.ConfigureKestrel(apiRuntime.Configure);
+    builder.Services.AddSingleton(apiRuntime);
+    builder.Services.AddSingleton<Microsoft.AspNetCore.Routing.MatcherPolicy,
+        ApiPortEndpointSelectorPolicy>();
 
     // ─── Serilog ─────────────────────────────────────────────────────────────
     builder.Host.UseSerilog((ctx, services, cfg) =>
@@ -63,7 +69,7 @@ try
                 opts.ResourceAttributes = new Dictionary<string, object>
                 {
                     ["service.name"] = "saydin-api",
-                    ["service.version"] = "1.0.0"
+                    ["service.version"] = serviceVersion
                 };
             });
     });
@@ -74,7 +80,7 @@ try
 
     builder.Services.AddOpenTelemetry()
         .ConfigureResource(r => r
-            .AddService("saydin-api", serviceVersion: "1.0.0")
+            .AddService("saydin-api", serviceVersion: serviceVersion)
             .AddAttributes(new Dictionary<string, object>
             {
                 ["deployment.environment"] = builder.Environment.EnvironmentName.ToLowerInvariant()
@@ -116,6 +122,7 @@ try
     // ─── Exception Handling ──────────────────────────────────────────────────
     builder.Services.AddProblemDetails();
     // Sıralı zincir: spesifik handler'lar önce, GlobalExceptionHandler en sonda.
+    builder.Services.AddExceptionHandler<RequestBodyTooLargeExceptionHandler>();
     builder.Services.AddExceptionHandler<ValidationExceptionHandler>();
     builder.Services.AddExceptionHandler<FeatureDisabledExceptionHandler>();
     builder.Services.AddExceptionHandler<PriceNotFoundExceptionHandler>();
@@ -123,6 +130,7 @@ try
     builder.Services.AddExceptionHandler<ScenarioNotFoundExceptionHandler>();
     builder.Services.AddExceptionHandler<ScenarioLimitExceededExceptionHandler>();
     builder.Services.AddExceptionHandler<DailyLimitExceededExceptionHandler>();
+    builder.Services.AddExceptionHandler<QuotaUnavailableExceptionHandler>();
     builder.Services.AddExceptionHandler<ExternalApiExceptionHandler>();
     builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
@@ -137,12 +145,11 @@ try
     builder.Services.AddOpenApi();
 
     // ─── NpgsqlDataSource (singleton — tüm DbContext'ler aynı pool'u paylaşır) ───
-    var pgConnection = builder.Configuration.GetConnectionString("Postgres")
-        ?? throw new InvalidOperationException("ConnectionStrings:Postgres yapılandırılmamış.");
-
-    var npgsqlDataSource = new NpgsqlDataSourceBuilder(pgConnection)
-        .MapEnum<AssetCategory>("asset_category")
-        .Build();
+    var runtimeDatabase = RuntimeDatabaseOptions.FromEnvironment(
+        LoginPurpose.Api, RuntimeDatabasePooling.Service);
+    var npgsqlDataSource = await RuntimeDatabase.OpenVerifiedDataSourceAsync(
+        runtimeDatabase,
+        dataSource => dataSource.MapEnum<AssetCategory>("asset_category"));
     builder.Services.AddSingleton(npgsqlDataSource);
 
     // ─── EF Core ─────────────────────────────────────────────────────────────
@@ -168,7 +175,7 @@ try
             return HealthCheckResult.Healthy();
         }, tags: ["db"])
         .AddRedis(
-            builder.Configuration.GetConnectionString("Redis")!,
+            services => services.GetRequiredService<IConnectionMultiplexer>(),
             name: "redis",
             tags: ["cache"]);
 
@@ -194,6 +201,12 @@ try
         // cached Task instance'ı tamamlanmış olur → sync hot-path yok.
         return redisLazy.Value.GetAwaiter().GetResult();
     });
+    var securityLimiterEnabled = builder.Configuration
+        .GetSection(DistributedSecurityLimiterOptions.SectionName)
+        .GetValue<bool?>(nameof(DistributedSecurityLimiterOptions.Enabled)) ?? true;
+    if (builder.Environment.IsProduction() && !securityLimiterEnabled)
+        throw new InvalidOperationException("security_limiter_required_in_production");
+    builder.Services.AddDistributedSecurityLimiter(builder.Configuration);
 
     // ─── Response Compression ────────────────────────────────────────────────
     builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
@@ -212,14 +225,40 @@ try
         }, "PlanOptions geçersiz; bkz. application logs")
         .ValidateOnStart();
 
+    // Installation credentials are bearer secrets. Their HMAC keyring must come
+    // from a root-owned/owner-only file; environment variables and config values
+    // contain only the non-secret file path and active version.
+    var installationCredentialOptions = builder.Configuration
+        .GetSection(InstallationCredentialOptions.SectionName)
+        .Get<InstallationCredentialOptions>()
+        ?? throw new InvalidOperationException("Installation credential configuration is missing.");
+    Validator.ValidateObject(
+        installationCredentialOptions,
+        new ValidationContext(installationCredentialOptions),
+        validateAllProperties: true);
+    var installationCredentialKeyring = InstallationCredentialKeyring.Load(installationCredentialOptions);
+    builder.Services.AddSingleton<IInstallationCredentialKeyring>(installationCredentialKeyring);
+    var activityPrincipalPseudonymOptions = builder.Configuration
+        .GetSection(ActivityPrincipalPseudonymOptions.SectionName)
+        .Get<ActivityPrincipalPseudonymOptions>()
+        ?? throw new InvalidOperationException("Activity principal pseudonym configuration is missing.");
+    Validator.ValidateObject(
+        activityPrincipalPseudonymOptions,
+        new ValidationContext(activityPrincipalPseudonymOptions),
+        validateAllProperties: true);
+    var activityPrincipalPseudonymizer = ActivityPrincipalPseudonymizer.Load(
+        activityPrincipalPseudonymOptions);
+    builder.Services.AddSingleton<IActivityPrincipalPseudonymizer>(activityPrincipalPseudonymizer);
+    builder.Services.AddSingleton<IQuotaSubjectPseudonymizer>(activityPrincipalPseudonymizer);
+
     // ─── Repositories & Services ─────────────────────────────────────────────
     // F3.1-5 / SVCR-007/025: TimeProvider — servisler DateTime.UtcNow yerine bunu
     // enjekte eder; testlerde FakeTimeProvider ile saat dondurulur (gün dönümü flaky'liği biter).
     builder.Services.AddSingleton(TimeProvider.System);
-    // F2.2-3 ([C-B-CC-5]): scoped cihaz kimliği — RequireDeviceId filter doldurur,
-    // iş service'leri (WhatIf/Dca/SavedScenario/AppConfig) `deviceId` parametresi yerine okur.
-    builder.Services.AddScoped<DeviceContext>();
-    builder.Services.AddScoped<IDeviceContext>(sp => sp.GetRequiredService<DeviceContext>());
+    builder.Services.AddScoped<InstallationPrincipalContext>();
+    builder.Services.AddScoped<IInstallationPrincipalContext>(
+        sp => sp.GetRequiredService<InstallationPrincipalContext>());
+    builder.Services.AddScoped<IInstallationRepository, InstallationRepository>();
     builder.Services.AddScoped<IPriceRepository, PriceRepository>();
     builder.Services.AddScoped<IAssetService, AssetService>();
     builder.Services.AddScoped<IInflationRepository, InflationRepository>();
@@ -247,130 +286,41 @@ try
     builder.Services.AddSingleton<IGeoIpResolver, MaxMindGeoIpResolver>();
 
     // ─── Activity Logging (Channel pattern) ───────────────────────────────────
-    // DropWrite: kuyruk dolduğunda yeni kayıt düşer ve TryWrite false döner →
-    // ChannelActivityLogger bunu warn loglar (telemetri için kritik).
-    // DropOldest TryWrite'ın her zaman true dönmesine yol açarak drop sayısını
-    // ölçülemez kılıyordu (review C-3 bulgusu).
-    var activityChannel = Channel.CreateBounded<ActivityLog>(
+    // DropWrite doluyken item'ı düşürür fakat TryWrite=true döner. Gerçek kayıp yalnız
+    // itemDropped callback'inde gözlenir; TryWrite=false completed writer semantiğidir.
+    builder.Services.AddSingleton<ActivityLogChannelTelemetry>();
+    builder.Services.AddSingleton(sp => Channel.CreateBounded<ActivityLog>(
         new BoundedChannelOptions(10_000)
         {
             FullMode = BoundedChannelFullMode.DropWrite,
             SingleReader = true,
-        });
+        },
+        sp.GetRequiredService<ActivityLogChannelTelemetry>().RecordDropped));
 
-    builder.Services.AddSingleton(activityChannel);
     builder.Services.AddSingleton<IActivityLogger, ChannelActivityLogger>();
+    builder.Services.AddSingleton<IActivityLogBatchStore, EfActivityLogBatchStore>();
     builder.Services.AddHostedService<ActivityLogWriter>();
+    // Hosted services stop in reverse registration order. This completion phase
+    // therefore closes ingress before ActivityLogWriter is stopped, while the
+    // framework's later-registered Kestrel host has already drained requests.
+    builder.Services.AddHostedService<ActivityLogChannelLifetime>();
+    builder.Services.Configure<HostOptions>(options =>
+        options.ShutdownTimeout = TimeSpan.FromSeconds(45));
     // IMiddleware ile çalıştığı için transient kayıt zorunlu (UseMiddleware<T>() activate eder).
     builder.Services.AddTransient<ActivityLogMiddleware>();
+    builder.Services.AddTransient<ApiPortBoundaryMiddleware>();
 
     // ─── Forwarded Headers (reverse proxy arkasında gerçek IP için) ────────────
-    // KnownProxies / KnownNetworks varsayılan olarak yalnızca loopback (127.0.0.1 / ::1)
-    // güvenilirdir. Reverse-proxy arkasında çalışan ortamlarda ForwardedHeaders:KnownProxies
-    // (CSV IP listesi) veya KnownNetworks (CIDR) ile config'ten ek bilinen subnet'ler eklenir.
-    builder.Services.Configure<ForwardedHeadersOptions>(options =>
-    {
-        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-
-        var knownProxies = builder.Configuration["ForwardedHeaders:KnownProxies"];
-        if (!string.IsNullOrWhiteSpace(knownProxies))
-        {
-            foreach (var raw in knownProxies.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                if (IPAddress.TryParse(raw, out var ip))
-                    options.KnownProxies.Add(ip);
-            }
-        }
-
-        var knownNetworks = builder.Configuration["ForwardedHeaders:KnownNetworks"];
-        if (!string.IsNullOrWhiteSpace(knownNetworks))
-        {
-            foreach (var raw in knownNetworks.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                var parts = raw.Split('/', 2);
-                if (parts.Length == 2
-                    && IPAddress.TryParse(parts[0], out var prefix)
-                    && int.TryParse(parts[1], out var prefixLength))
-                {
-                    options.KnownIPNetworks.Add(new System.Net.IPNetwork(prefix, prefixLength));
-                }
-            }
-        }
-
-        var forwardLimit = builder.Configuration.GetValue<int?>("ForwardedHeaders:ForwardLimit");
-        if (forwardLimit.HasValue)
-            options.ForwardLimit = forwardLimit.Value;
-    });
-
-    // ─── Rate Limiting (IP-bazlı, config-gated — ADR-003) ──────────────────────
-    // İki katmanlı throttling modeli:
-    //   (1) Cihaz-bazlı GÜNLÜK iş kotası → IDailyLimitGuard (Redis, usage:* key'leri) —
-    //       ürün adilliği / kötüye-kullanım (mevcut).
-    //   (2) IP-bazlı altyapı throttle → aşağıdaki RateLimiter (in-memory, sabit pencere) —
-    //       burst / DoS koruması (yeni).
-    // İkisi diktir; ikisi de korunur. Varsayılan KAPALI (RateLimiting:Enabled=false) →
-    // mevcut davranışı, local dev'i ve testleri etkilemez; ortam bazında açılır.
-    // Dağıtık (çok-instance) Redis-destekli limit, yatay ölçeklenince eklenecek
-    // dokümante edilmiş takip işidir (bkz. ADR-003).
-    var rateLimitingEnabled = builder.Configuration.GetValue<bool>("RateLimiting:Enabled");
-    if (rateLimitingEnabled)
-    {
-        var permitLimit   = builder.Configuration.GetValue<int?>("RateLimiting:PermitLimit") ?? 100;
-        var windowSeconds = builder.Configuration.GetValue<int?>("RateLimiting:WindowSeconds") ?? 60;
-
-        builder.Services.AddRateLimiter(rl =>
-        {
-            rl.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-            rl.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
-            {
-                // /health ve /metrics throttle dışında (OTel trace filtresiyle tutarlı, gürültü yok).
-                var path = httpContext.Request.Path;
-                if (path.StartsWithSegments("/health") || path.StartsWithSegments("/metrics"))
-                    return RateLimitPartition.GetNoLimiter("infra");
-
-                // İstemci IP'si UseForwardedHeaders SONRASI gerçek IP'dir (KnownProxies yapılandırılmışsa).
-                var clientIp = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-                return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
-                {
-                    PermitLimit = permitLimit,
-                    Window      = TimeSpan.FromSeconds(windowSeconds),
-                    QueueLimit  = 0,
-                });
-            });
-
-            // Reddetme yanıtı DailyLimitExceededExceptionHandler ile aynı RFC 7807 + i18n + traceId
-            // şeklini taşır; Retry-After header eklenir.
-            rl.OnRejected = async (context, ct) =>
-            {
-                var http = context.HttpContext;
-                var localizer = http.RequestServices.GetRequiredService<IStringLocalizer<Saydin.Api.ErrorMessages>>();
-
-                if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
-                    http.Response.Headers.RetryAfter =
-                        ((int)retryAfter.TotalSeconds).ToString(CultureInfo.InvariantCulture);
-
-                http.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                await http.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
-                {
-                    Type   = "https://saydin.app/errors/rate-limited",
-                    Title  = localizer["RateLimited"],
-                    Status = StatusCodes.Status429TooManyRequests,
-                    Detail = string.Format(localizer["RateLimitedDetail"], windowSeconds, permitLimit),
-                    Extensions =
-                    {
-                        ["traceId"] = Activity.Current?.TraceId.ToString() ?? http.TraceIdentifier,
-                        ["code"]    = ApiErrorCodes.RateLimited,
-                    }
-                }, (JsonSerializerOptions?)null, MediaTypeNames.Application.ProblemJson, ct);
-            };
-        });
-    }
+    // Strict, fail-fast trust contract: malformed/duplicate entries and broad CIDRs
+    // are rejected before any listener starts. Framework loopback defaults are cleared.
+    builder.Services.Configure<ForwardedHeadersOptions>(apiRuntime.Configure);
 
     // ─── Build ───────────────────────────────────────────────────────────────
     var app = builder.Build();
 
-    app.UseResponseCompression();
     app.UseForwardedHeaders();
+    app.UseMiddleware<ApiPortBoundaryMiddleware>();
+    app.UseResponseCompression();
 
     // ─── Request Localization ──────────────────────────────────────────────────
     var supportedCultures = new[] { new CultureInfo("tr"), new CultureInfo("en") };
@@ -381,11 +331,6 @@ try
         SupportedUICultures = supportedCultures,
         ApplyCurrentCultureToResponseHeaders = true
     });
-
-    // UseForwardedHeaders SONRASI (gerçek IP) ve UseRequestLocalization SONRASI (429 mesajı
-    // Accept-Language'a göre lokalize) çalışır. Yalnız config açıkken pipeline'a girer.
-    if (rateLimitingEnabled)
-        app.UseRateLimiter();
 
     // Middleware sırası (EC-5 + EC-FU ActivityLog status düzeltmesi):
     //   Serilog → ActivityLog → ExceptionHandler → endpoint.
@@ -403,29 +348,52 @@ try
     //    log-gönderim hatasını sarmalar; istek exception'ını YUTMAZ.
     app.UseSerilogRequestLogging();
     app.UseMiddleware<ActivityLogMiddleware>();
+    app.UseWhen(context => !ApiPortBoundary.IsAdmissionExempt(context), branch =>
+        branch.UseMiddleware<DistributedSecurityLimiterMiddleware>());
     app.UseExceptionHandler();
 
     if (app.Environment.IsDevelopment())
     {
-        app.MapOpenApi();
-        app.MapScalarApiReference();
+        app.MapOpenApi().WithMetadata(
+            new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicProduct));
+        app.MapScalarApiReference().WithMetadata(
+            new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicProduct));
     }
 
-    app.MapPrometheusScrapingEndpoint();
-    app.MapHealthChecks("/health");
+    app.MapHealthChecks(ApiPortBoundary.LivePath, new()
+    {
+        Predicate = _ => false,
+    }).WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicLiveness));
+    app.MapHealthChecks(ApiPortBoundary.ReadyPath, new()
+    {
+        Predicate = registration => registration.Tags.Contains("db")
+                                    || registration.Tags.Contains("cache"),
+    }).WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.Management));
+    app.MapPrometheusScrapingEndpoint(ApiPortBoundary.MetricsPath)
+        .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.Management));
 
-    app.MapWhatIfEndpoints();
-    app.MapDcaEndpoints();
-    app.MapAssetsEndpoints();
-    app.MapScenariosEndpoints();
-    app.MapAppConfigEndpoints();
+    var productEndpoints = app.MapGroup("")
+        .WithMetadata(new ApiEndpointSurfaceMetadata(ApiEndpointSurface.PublicProduct));
+    productEndpoints.MapWhatIfEndpoints();
+    productEndpoints.MapDcaEndpoints();
+    productEndpoints.MapAssetsEndpoints();
+    productEndpoints.MapScenariosEndpoints();
+    productEndpoints.MapAppConfigEndpoints();
+    productEndpoints.MapInstallationEndpoints();
 
+    SaydinMetrics.InitializeActivityLogContractSeries();
     Log.Information("Saydin.Api başlatılıyor — ortam: {Environment}", app.Environment.EnvironmentName);
     await app.RunAsync();
+}
+catch (DatabaseSecurityRejectedException exception)
+{
+    Log.Fatal("Saydin.Api veritabanı güvenlik sınırında reddedildi: {Code}", exception.Code);
+    Environment.ExitCode = 78;
 }
 catch (Exception ex)
 {
     Log.Fatal(ex, "Saydin.Api beklenmedik şekilde sonlandı");
+    Environment.ExitCode = 1;
 }
 finally
 {

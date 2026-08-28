@@ -1,3 +1,4 @@
+using Saydin.Api.Helpers;
 using Saydin.Api.Middleware;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Services;
@@ -27,7 +28,8 @@ public static class WhatIfEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential(requireCalculationNetworkAdmission: true);
 
         group.MapPost("/compare", CompareAsync)
             .WithName("CompareWhatIf")
@@ -37,7 +39,8 @@ public static class WhatIfEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential(requireCalculationNetworkAdmission: true);
 
         group.MapPost("/reverse", ReverseCalculateAsync)
             .WithName("ReverseCalculateWhatIf")
@@ -47,7 +50,8 @@ public static class WhatIfEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
-            .RequireDeviceId();
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .RequireInstallationCredential(requireCalculationNetworkAdmission: true);
 
         return app;
     }
@@ -62,27 +66,30 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CalculateAsync(request, ct);
 
-        // F4-6 (KVKK): ham tutar yerine kaba aralık; sonuç TL tutarı (ProfitLossTry) loglanmaz.
-        log.WithData(new
-        {
-            request.AssetSymbol,
-            buyDate = request.BuyDate.ToString(IsoDate),
-            sellDate = request.SellDate?.ToString(IsoDate),
-            amountBucket = AmountBucket.Coarse(request.Amount),
-            request.AmountType,
-            request.IncludeInflation,
-            result = new
-            {
-                result.ProfitLossPercent,
-                result.IsProfit,
-                result.RealProfitLossPercent,
-                actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
-                actualSellDate = result.ActualSellDate?.ToString(IsoDate),
-            }
-        });
+        // API-06: ham tutar bucket'lanır; exact TL/yüzde sonuç yalnız coarse outcome'a iner.
+        log.WithData(CreateCalculateActivityData(request, result));
 
         return Results.Ok(result);
     }
+
+    internal static object CreateCalculateActivityData(
+        WhatIfRequest request,
+        Models.Responses.WhatIfResponse result) => new
+    {
+        request.AssetSymbol,
+        buyDate = request.BuyDate.ToString(IsoDate),
+        sellDate = request.SellDate?.ToString(IsoDate),
+        amountBucket = AmountBucket.Coarse(request.Amount),
+        request.AmountType,
+        request.IncludeInflation,
+        result = new
+        {
+            outcome = TelemetryOutcome.From(result.ProfitLossTry),
+            realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
+            actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
+            actualSellDate = result.ActualSellDate?.ToString(IsoDate),
+        }
+    };
 
     private static async Task<IResult> CompareAsync(
         HttpContext httpContext,
@@ -94,29 +101,33 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CompareAsync(request, ct);
 
-        // F4-6 (KVKK): ham tutar yerine kaba aralık. Sonuç zaten yalnız yüzde/rank içerir.
-        log.WithData(new
-        {
-            request.AssetSymbols,
-            buyDate = request.BuyDate.ToString(IsoDate),
-            sellDate = request.SellDate?.ToString(IsoDate),
-            amountBucket = AmountBucket.Coarse(request.Amount),
-            request.AmountType,
-            request.IncludeInflation,
-            result = new
-            {
-                winner = result.Results.FirstOrDefault()?.Calculation.AssetSymbol,
-                rankings = result.Results.Select(r => new
-                {
-                    r.Rank,
-                    symbol = r.Calculation.AssetSymbol,
-                    r.Calculation.ProfitLossPercent
-                })
-            }
-        });
+        // API-06: ham tutar bucket'lanır; ranking korunur, exact yüzde outcome'a iner.
+        log.WithData(CreateCompareActivityData(request, result));
 
         return Results.Ok(result);
     }
+
+    internal static object CreateCompareActivityData(
+        CompareRequest request,
+        Models.Responses.CompareResponse result) => new
+    {
+        request.AssetSymbols,
+        buyDate = request.BuyDate.ToString(IsoDate),
+        sellDate = request.SellDate?.ToString(IsoDate),
+        amountBucket = AmountBucket.Coarse(request.Amount),
+        request.AmountType,
+        request.IncludeInflation,
+        result = new
+        {
+            winner = result.Results.FirstOrDefault()?.Calculation.AssetSymbol,
+            rankings = result.Results.Select(r => new
+            {
+                r.Rank,
+                symbol = r.Calculation.AssetSymbol,
+                outcome = TelemetryOutcome.From(r.Calculation.ProfitLossTry),
+            })
+        }
+    };
 
     private static async Task<IResult> ReverseCalculateAsync(
         HttpContext httpContext,
@@ -128,25 +139,28 @@ public static class WhatIfEndpoints
 
         var result = await calculator.CalculateReverseAsync(request, ct);
 
-        // F4-6 (KVKK): ham hedef tutar yerine kaba aralık; gereken yatırım TL'si loglanmaz.
-        log.WithData(new
-        {
-            request.AssetSymbol,
-            buyDate = request.BuyDate.ToString(IsoDate),
-            sellDate = request.SellDate?.ToString(IsoDate),
-            targetAmountBucket = AmountBucket.Coarse(request.TargetAmount),
-            request.TargetAmountType,
-            request.IncludeInflation,
-            result = new
-            {
-                result.ProfitLossPercent,
-                result.IsProfit,
-                result.RealProfitLossPercent,
-                actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
-                actualSellDate = result.ActualSellDate?.ToString(IsoDate),
-            }
-        });
+        // API-06: ham hedef bucket'lanır; gereken yatırım ve exact yüzde loglanmaz.
+        log.WithData(CreateReverseActivityData(request, result));
 
         return Results.Ok(result);
     }
+
+    internal static object CreateReverseActivityData(
+        ReverseWhatIfRequest request,
+        Models.Responses.ReverseWhatIfResponse result) => new
+    {
+        request.AssetSymbol,
+        buyDate = request.BuyDate.ToString(IsoDate),
+        sellDate = request.SellDate?.ToString(IsoDate),
+        targetAmountBucket = AmountBucket.Coarse(request.TargetAmount),
+        request.TargetAmountType,
+        request.IncludeInflation,
+        result = new
+        {
+            outcome = TelemetryOutcome.From(result.ProfitLossTry),
+            realOutcome = TelemetryOutcome.From(result.RealProfitLossPercent),
+            actualBuyDate = result.ActualBuyDate?.ToString(IsoDate),
+            actualSellDate = result.ActualSellDate?.ToString(IsoDate),
+        }
+    };
 }

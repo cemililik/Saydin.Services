@@ -21,7 +21,7 @@ public sealed class ValidationExceptionHandler(
         // Önceki sürümde `ArgumentException` da yakalanıyordu, ancak base tip
         // framework ve altyapı katmanlarından (Redis/EF Core/Npgsql) da fırlatılır;
         // bu hatalar 400 olarak yansıtıldığında kök sebep 5xx alarm/dashboard'lardan
-        // gizlenir. Servis katmanı artık deviceId/null/whitespace guard'larını
+        // gizlenir. Servis katmanı artık request-shape/null/whitespace guard'larını
         // doğrudan `ValidationException` ile yapıyor — handler de yalnızca domain
         // exception'ı işliyor, jenerik `ArgumentException` GlobalExceptionHandler'a
         // bırakılıp 500 üretiyor.
