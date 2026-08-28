@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Mappers;
 
 namespace Saydin.PriceIngestion.Tests.Adapters;
@@ -81,7 +82,7 @@ public class TcmbMapperTests
     {
         const string xmlWithoutBuying = """
             <?xml version="1.0" encoding="UTF-8"?>
-            <Tarih_Date>
+            <Tarih_Date Tarih="01.01.2020" Date="01/01/2020">
               <Currency CurrencyCode="USD">
                 <ForexBuying></ForexBuying>
                 <ForexSelling>5.9518</ForexSelling>
@@ -97,15 +98,15 @@ public class TcmbMapperTests
     // ── Doğru AssetId ve PriceDate ataması ──────────────────────────────────
 
     [Fact]
-    public void Map_AssignsCorrectAssetIdAndDate()
+    public void Map_RequestDateDifferentFromPayloadDate_IsRejected()
     {
         var customId = Guid.NewGuid();
         var customDate = new DateOnly(2023, 6, 15);
 
-        var result = TcmbMapper.Map(ValidXml, customId, "USD", customDate);
+        var act = () => TcmbMapper.Map(ValidXml, customId, "USD", customDate);
 
-        result!.AssetId.Should().Be(customId);
-        result.PriceDate.Should().Be(customDate);
+        act.Should().Throw<ProviderContractException>()
+            .Which.Code.Should().Be("contract_observation_date_mismatch");
     }
 
     // ── Unit normalizasyonu ─────────────────────────────────────────────────
@@ -143,7 +144,7 @@ public class TcmbMapperTests
     {
         const string xmlWithoutUnit = """
             <?xml version="1.0" encoding="UTF-8"?>
-            <Tarih_Date>
+            <Tarih_Date Tarih="01.01.2020" Date="01/01/2020">
               <Currency CurrencyCode="USD">
                 <ForexBuying>5.9416</ForexBuying>
                 <ForexSelling>5.9518</ForexSelling>
@@ -161,11 +162,11 @@ public class TcmbMapperTests
     [InlineData("0")]
     [InlineData("-1")]
     [InlineData("-100")]
-    public void Map_ZeroOrNegativeUnit_FallsBackToOne(string unitValue)
+    public void Map_ZeroOrNegativeUnit_IsPermanentContractFailure(string unitValue)
     {
         var xml = $"""
             <?xml version="1.0" encoding="UTF-8"?>
-            <Tarih_Date>
+            <Tarih_Date Tarih="01.01.2020" Date="01/01/2020">
               <Currency CurrencyCode="USD">
                 <Unit>{unitValue}</Unit>
                 <ForexBuying>5.9416</ForexBuying>
@@ -174,11 +175,37 @@ public class TcmbMapperTests
             </Tarih_Date>
             """;
 
-        var result = TcmbMapper.Map(xml, AssetId, "USD", SampleDate);
+        var act = () => TcmbMapper.Map(xml, AssetId, "USD", SampleDate);
+        act.Should().Throw<ProviderContractException>()
+            .Which.Code.Should().Be("contract_unit_invalid");
+    }
 
-        result.Should().NotBeNull();
-        // Unit fallback 1m → Close ForexBuying değerinden normalize edilmeden gelir
-        result!.Close.Should().Be(5.9416m);
+    [Fact]
+    public void Map_NonPositiveForexBuying_IsPermanentContractFailure()
+    {
+        const string xml = """
+            <Tarih_Date Tarih="01.01.2020" Date="01/01/2020">
+              <Currency CurrencyCode="USD"><Unit>1</Unit><ForexBuying>-1</ForexBuying></Currency>
+            </Tarih_Date>
+            """;
+        var act = () => TcmbMapper.Map(xml, AssetId, "USD", SampleDate);
+        act.Should().Throw<ProviderContractException>()
+            .Which.Code.Should().Be("contract_price_invalid");
+    }
+
+    [Theory]
+    [InlineData("2115,19")]
+    [InlineData("2.115,19")]
+    [InlineData("(30.5)")]
+    public void Map_LocaleOrThousandsFormattedPrice_FailsClosed(string rawPrice)
+    {
+        var xml = $"""
+            <Tarih_Date Tarih="01.01.2020" Date="01/01/2020">
+              <Currency CurrencyCode="USD"><Unit>1</Unit><ForexBuying>{rawPrice}</ForexBuying></Currency>
+            </Tarih_Date>
+            """;
+
+        TcmbMapper.Map(xml, AssetId, "USD", SampleDate).Should().BeNull();
     }
 
     // ── F1.1-2: MapMany — gün-bazlı dedup için tüm semboller tek XML'den ─────

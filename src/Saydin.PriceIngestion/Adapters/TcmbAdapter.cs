@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Xml;
 using System.Xml.Linq;
+using System.Globalization;
 using Saydin.PriceIngestion.Mappers;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -18,8 +19,11 @@ namespace Saydin.PriceIngestion.Adapters;
 /// </summary>
 public sealed class TcmbAdapter(
     IHttpClientFactory httpClientFactory,
-    ILogger<TcmbAdapter> logger) : IExternalPriceAdapter
+    ILogger<TcmbAdapter> logger,
+    TimeProvider timeProvider) : IExternalPriceAdapter
 {
+    private readonly TimeProvider _timeProvider = timeProvider;
+
     public string Source => "tcmb";
 
     // F1.1-2: gün-bazlı XDocument cache. SemaphoreSlim/once-per-day fetch eşzamanlılık
@@ -35,96 +39,126 @@ public sealed class TcmbAdapter(
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(60);
     private const int MaxCacheEntries = 10_000;
 
-    public async Task<IReadOnlyList<PricePoint>> FetchRangeAsync(
-        Guid assetId,
-        string assetSymbol,
-        string sourceId,       // ISO 4217 kodu: "USD", "EUR"
-        DateOnly from,
-        DateOnly to,
+    public async Task<AdapterOutcome<PricePoint>> FetchRangeAsync(
+        PriceFetchRequest request,
         CancellationToken ct)
     {
         var client = httpClientFactory.CreateClient("tcmb");
         var results = new List<PricePoint>();
-        var xmlCurrencyCode = ExtractCurrencyCode(sourceId);
+        var noDataDates = request.CalendarClosedDates.ToHashSet();
+        var xmlCurrencyCode = ExtractCurrencyCode(request.SourceId);
+        var rawItemCount = 0;
 
-        for (var date = from; date <= to; date = date.AddDays(1))
+        try
         {
-            // TCMB hafta sonu yayın yapmaz
-            if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
-                continue;
+            for (var date = request.From; date <= request.To; date = date.AddDays(1))
+            {
+                if (request.CalendarClosedDates.Contains(date))
+                    continue;
 
-            var point = await FetchSingleDayAsync(client, assetId, xmlCurrencyCode, date, ct);
-            if (point is not null)
-                results.Add(point);
+                var day = await FetchSingleDayAsync(
+                    client, request.AssetId, xmlCurrencyCode, date, ct);
+                if (day.ExpectedNoData)
+                    return IsCurrentIstanbulDate(date) && date == request.To
+                        ? AdapterOutcome<PricePoint>.RetryableFailure(
+                            "provider_publication_pending", $"date={date:yyyy-MM-dd}")
+                        : AdapterOutcome<PricePoint>.PermanentFailure(
+                            "unexpected_404", $"date={date:yyyy-MM-dd}");
+
+                rawItemCount++;
+                if (day.Point is null)
+                    return AdapterOutcome<PricePoint>.PermanentFailure(
+                        day.ErrorCode ?? "schema_missing_currency", rawItemCount: rawItemCount,
+                        rejectedCount: 1);
+                results.Add(day.Point);
+            }
         }
-
-        PurgeExpiredCacheEntries();
+        catch (HttpRequestException)
+        {
+            logger.LogError("TCMB network/HTTP hatası: {CurrencyCode}", xmlCurrencyCode);
+            return AdapterOutcome<PricePoint>.RetryableFailure("network_or_http");
+        }
+        catch (ProviderContractException ex)
+        {
+            logger.LogError("TCMB provider contract rejected: {Code} {CurrencyCode}",
+                ex.Code, xmlCurrencyCode);
+            return AdapterOutcome<PricePoint>.PermanentFailure(ex.Code);
+        }
+        catch (ProviderTransportPayloadTooLargeException)
+        {
+            logger.LogWarning("TCMB provider transport payload limitini aştı: {CurrencyCode}",
+                xmlCurrencyCode);
+            return AdapterOutcome<PricePoint>.RetryableFailure("transport_payload_too_large");
+        }
+        catch (ProviderPayloadTooLargeException)
+        {
+            logger.LogError("TCMB provider payload exceeded authority limit: {CurrencyCode}",
+                xmlCurrencyCode);
+            return AdapterOutcome<PricePoint>.PermanentFailure("payload_too_large");
+        }
+        catch (XmlException)
+        {
+            logger.LogError("TCMB XML parse hatası: {CurrencyCode}", xmlCurrencyCode);
+            return AdapterOutcome<PricePoint>.PermanentFailure("parse_error");
+        }
+        finally
+        {
+            PurgeExpiredCacheEntries();
+        }
 
         logger.LogInformation(
             "TCMB {CurrencyCode}: {Count} fiyat noktası alındı ({From}–{To})",
-            sourceId, results.Count, from, to);
+            request.SourceId, results.Count, request.From, request.To);
 
-        return results.AsReadOnly();
+        return AdapterCompleteness.Price(
+            request, results.AsReadOnly(), rawItemCount, providerNoDataDates: noDataDates,
+            noDataCode: "market_closed");
     }
 
     private static string ExtractCurrencyCode(string sourceId)
     {
         // TCMB series kodu "TP.DK.USD.A" → XML'deki CurrencyCode "USD".
-        // Defansif: sourceId DB/config'den geldiği için "USD.", "TP.USD" gibi eksik
-        // segmentli değerler beklenmeyen IndexOutOfRangeException üretmemeli — bu
-        // durumda ham değeri olduğu gibi kullan (assets.source_id zaten Asset entity
-        // konfigürasyonunda valide ediliyor, bu sadece extra savunma katmanı).
-        var segments = sourceId.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        // PostgreSQL authority trigger'ı LIKE '%.%.%' + split_part(source_id,'.',3)
+        // kullanır. Boş segmentleri korumak kanıt JSON'undaki currency ile DB'nin
+        // yeniden türettiği değerin ayrışmasını engeller.
+        var segments = sourceId.Split('.');
         return segments.Length >= 3 ? segments[2] : sourceId;
     }
 
-    private async Task<PricePoint?> FetchSingleDayAsync(
+    private bool IsCurrentIstanbulDate(DateOnly date)
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Istanbul");
+        return date == DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(_timeProvider.GetUtcNow(), zone).DateTime);
+    }
+
+    private async Task<DayFetch> FetchSingleDayAsync(
         HttpClient client,
         Guid assetId,
         string xmlCurrencyCode,
         DateOnly date,
         CancellationToken ct)
     {
-        XDocument? doc;
-        try
-        {
-            doc = await GetOrFetchDayXmlAsync(client, date, ct);
-        }
-        catch (HttpRequestException ex)
-        {
-            // Polly retry zinciri tükendi; range fetch'i ingestion_jobs failed olarak
-            // işaretlensin diye yukarı fırlat (review F1.1-3). ExternalApiException
-            // sarmalaması inner stack'i operasyon ekibine göstermez, bu yüzden
-            // orijinal hata burada loglanır (CoinGecko/TwelveData ile paritede).
-            logger.LogError(ex,
-                "TCMB veri alınamadı: {Source} {Date} {CurrencyCode}",
-                Source, date, xmlCurrencyCode);
-            throw new ExternalApiException(Source,
-                $"TCMB XML alınamadı ({date:yyyy-MM-dd} {xmlCurrencyCode})", ex);
-        }
-        catch (XmlException ex)
-        {
-            // Cache fetch'inde bozuk XML — gün boyunca tüm semboller için "veri yok"
-            // sayılır (parse-once: aynı XDocument tüm sembollere fail eder).
-            logger.LogWarning(ex, "TCMB XML çözümlenemedi: {Date} {CurrencyCode}", date, xmlCurrencyCode);
-            return null;
-        }
-
-        if (doc is null) return null;  // 404 — TCMB resmi tatil
+        var payload = await GetOrFetchDayXmlAsync(client, date, ct);
+        if (payload is null) return new DayFetch(null, true, null); // provider-confirmed no publication
 
         try
         {
-            return TcmbMapper.Map(doc, assetId, xmlCurrencyCode, date);
+            var point = TcmbMapper.Map(
+                payload.Document, assetId, xmlCurrencyCode, date,
+                payload.PayloadSha256, payload.PayloadByteLength);
+            return point is null
+                ? new DayFetch(null, false, "schema_missing_currency")
+                : new DayFetch(point, false, null);
         }
-        catch (FormatException ex)
+        catch (FormatException)
         {
-            // Mapper'da kur ondalığı parse hatası — yine veri yok olarak işle.
-            logger.LogWarning(ex, "TCMB kur değeri parse edilemedi: {Date} {CurrencyCode}", date, xmlCurrencyCode);
-            return null;
+            logger.LogError("TCMB kur değeri parse edilemedi: {Date} {CurrencyCode}", date, xmlCurrencyCode);
+            return new DayFetch(null, false, "value_parse_error");
         }
     }
 
-    private async Task<XDocument?> GetOrFetchDayXmlAsync(
+    private async Task<DayPayload?> GetOrFetchDayXmlAsync(
         HttpClient client, DateOnly date, CancellationToken ct)
     {
         // Race-free single-flight: ConcurrentDictionary.GetOrAdd contention altında
@@ -132,9 +166,16 @@ public sealed class TcmbAdapter(
         // olarak FetchDayXmlAsync'i tetikliyor, kaybeden Task'lar leak oluyordu.
         // Lazy<Task<>> ile fetch yalnızca kazanan entry'nin .Value erişiminde başlar
         // (LazyThreadSafetyMode.ExecutionAndPublication default).
+        var now = _timeProvider.GetUtcNow();
+        if (_dayCache.TryGetValue(date, out var cached)
+            && now - cached.CreatedAtUtc >= CacheTtl)
+        {
+            _dayCache.TryRemove(date, out _);
+        }
+
         var entry = _dayCache.GetOrAdd(date, d => new CachedXmlEntry(
-            new Lazy<Task<XDocument?>>(() => FetchDayXmlAsync(client, d, ct)),
-            DateTime.UtcNow));
+            new Lazy<Task<DayPayload?>>(() => FetchDayXmlAsync(client, d, ct)),
+            now));
 
         try
         {
@@ -148,13 +189,14 @@ public sealed class TcmbAdapter(
         }
     }
 
-    private async Task<XDocument?> FetchDayXmlAsync(
+    private async Task<DayPayload?> FetchDayXmlAsync(
         HttpClient client, DateOnly date, CancellationToken ct)
     {
         // URL formatı: YYYYMM/DDMMYYYY.xml (base address ile birleşir)
-        var url = $"{date:yyyyMM}/{date:ddMMyyyy}.xml";
+        var url = $"{date.ToString("yyyyMM", CultureInfo.InvariantCulture)}/{date.ToString("ddMMyyyy", CultureInfo.InvariantCulture)}.xml";
 
-        using var response = await client.GetAsync(url, ct).ConfigureAwait(false);
+        using var response = await client.GetAsync(
+            url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -164,15 +206,16 @@ public sealed class TcmbAdapter(
         }
 
         response.EnsureSuccessStatusCode();
-        var xml = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var payload = await BoundedHttpContent.ReadAsync(response.Content, ct).ConfigureAwait(false);
         // P1R-002: parse'ı cache'in iç tarafında bir kez yap. Çağıran sembolün
         // sayısı kadar XDocument.Parse çağırmaktan kaçınılır.
-        return XDocument.Parse(xml);
+        using var stream = new MemoryStream(payload.Bytes, writable: false);
+        return new DayPayload(XDocument.Load(stream), payload.Sha256, payload.Bytes.Length);
     }
 
     private void PurgeExpiredCacheEntries()
     {
-        var threshold = DateTime.UtcNow - CacheTtl;
+        var threshold = _timeProvider.GetUtcNow() - CacheTtl;
         foreach (var kv in _dayCache)
         {
             if (kv.Value.CreatedAtUtc < threshold)
@@ -193,5 +236,9 @@ public sealed class TcmbAdapter(
         }
     }
 
-    private sealed record CachedXmlEntry(Lazy<Task<XDocument?>> XmlTaskLazy, DateTime CreatedAtUtc);
+    private sealed record CachedXmlEntry(
+        Lazy<Task<DayPayload?>> XmlTaskLazy, DateTimeOffset CreatedAtUtc);
+    private sealed record DayPayload(
+        XDocument Document, byte[] PayloadSha256, int PayloadByteLength);
+    private sealed record DayFetch(PricePoint? Point, bool ExpectedNoData, string? ErrorCode);
 }

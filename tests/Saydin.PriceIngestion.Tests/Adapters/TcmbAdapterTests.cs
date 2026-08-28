@@ -1,132 +1,151 @@
 using System.Net;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using Saydin.PriceIngestion.Adapters;
-using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Tests.Adapters;
 
-// Review P1R-004: Faz 1 TcmbAdapter davranış değişikliği (day-level cache hit/miss,
-// HttpRequestException → ExternalApiException, 404 → null, parse-once XDocument)
-// burada `HttpMessageHandler` stub'ı ile doğrulanır.
 public class TcmbAdapterTests
 {
-    private const string SampleXml = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <Tarih_Date Tarih="03.01.2024" Date="01/03/2024">
-          <Currency CrossOrder="0" Kod="USD" CurrencyCode="USD">
-            <Unit>1</Unit>
-            <Isim>ABD DOLARI</Isim>
-            <CurrencyName>US DOLLAR</CurrencyName>
-            <ForexBuying>30.0000</ForexBuying>
-            <ForexSelling>30.1000</ForexSelling>
-          </Currency>
-          <Currency CrossOrder="1" Kod="EUR" CurrencyCode="EUR">
-            <Unit>1</Unit>
-            <Isim>EURO</Isim>
-            <CurrencyName>EURO</CurrencyName>
-            <ForexBuying>32.5000</ForexBuying>
-            <ForexSelling>32.6000</ForexSelling>
-          </Currency>
-        </Tarih_Date>
+    private static readonly DateOnly Weekday = new(2024, 1, 3);
+    private const string Xml = """
+        <Tarih_Date Tarih="03.01.2024" Date="01/03/2024"><Currency CurrencyCode="USD"><Unit>1</Unit><ForexBuying>30.0</ForexBuying></Currency></Tarih_Date>
         """;
 
-    private static readonly DateOnly TestDate = new(2024, 1, 3);   // Çarşamba — TCMB yayını var.
-
-    private static (TcmbAdapter Adapter, StubHttpMessageHandler Handler) BuildAdapter(
-        Func<HttpRequestMessage, HttpResponseMessage> responder)
-    {
-        var handler = new StubHttpMessageHandler(responder);
-        var http    = new HttpClient(handler)
-        {
-            BaseAddress = new Uri("https://www.tcmb.gov.tr/kurlar/"),
-        };
-        var factory = Substitute.For<IHttpClientFactory>();
-        factory.CreateClient("tcmb").Returns(http);
-
-        var adapter = new TcmbAdapter(factory, NullLogger<TcmbAdapter>.Instance);
-        return (adapter, handler);
-    }
-
     [Fact]
-    public async Task FetchRange_SameDayTwoSymbols_ReusesXmlCache_OneHttpCall()
+    public async Task SameDayTwoAssets_SharesOneHttpBody()
     {
-        // F1.1-2 / P1R-002: aynı tarih için ikinci sembol fetch'i HTTP'ye gitmez,
-        // XDocument cache'inden okur.
-        var (adapter, handler) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        var (adapter, handler) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(SampleXml),
+            Content = new StringContent(Xml),
         });
 
-        var usdAssetId = Guid.NewGuid();
-        var eurAssetId = Guid.NewGuid();
+        var first = await adapter.FetchRangeAsync(Request(Guid.NewGuid()), default);
+        var second = await adapter.FetchRangeAsync(Request(Guid.NewGuid()), default);
 
-        var usdResult = await adapter.FetchRangeAsync(usdAssetId, "USDTRY", "USD", TestDate, TestDate, default);
-        var eurResult = await adapter.FetchRangeAsync(eurAssetId, "EURTRY", "EUR", TestDate, TestDate, default);
-
-        usdResult.Should().HaveCount(1);
-        usdResult[0].Close.Should().Be(30.0000m);
-        eurResult.Should().HaveCount(1);
-        eurResult[0].Close.Should().Be(32.5000m);
-
-        handler.CallCount.Should().Be(1, "aynı tarih için XML cache'lenmeli");
-    }
-
-    [Fact]
-    public async Task FetchRange_NotFound_ReturnsEmpty()
-    {
-        // TCMB resmi tatil → 404 → null PricePoint (boş liste).
-        var (adapter, handler) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
-
-        var result = await adapter.FetchRangeAsync(Guid.NewGuid(), "USDTRY", "USD", TestDate, TestDate, default);
-
-        result.Should().BeEmpty();
+        first.Kind.Should().Be(AdapterOutcomeKind.Data);
+        second.Kind.Should().Be(AdapterOutcomeKind.Data);
         handler.CallCount.Should().Be(1);
     }
 
     [Fact]
-    public async Task FetchRange_HttpRequestException_ThrowsExternalApiException()
+    public async Task Weekday404_IsHistoricalPermanentButCurrentPublicationIsRetryable()
     {
-        // Polly retry tükendiğinde adapter ExternalApiException ile sızdırır,
-        // worker ingestion_jobs failed kaydı atabilsin diye (F1.1-3).
-        var (adapter, _) = BuildAdapter(_ => throw new HttpRequestException("network down"));
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var result = await adapter.FetchRangeAsync(Request(Guid.NewGuid()), default);
+        result.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        result.Code.Should().Be("unexpected_404");
 
-        var act = () => adapter.FetchRangeAsync(Guid.NewGuid(), "USDTRY", "USD", TestDate, TestDate, default);
-
-        var ex = await act.Should().ThrowAsync<ExternalApiException>();
-        ex.Which.ApiSource.Should().Be("tcmb");
+        var currentTime = new FakeTimeProvider(
+            new DateTimeOffset(2024, 1, 3, 14, 0, 0, TimeSpan.Zero));
+        var (currentAdapter, _) = Build(
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound), currentTime);
+        var current = await currentAdapter.FetchRangeAsync(Request(Guid.NewGuid()), default);
+        current.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        current.Code.Should().Be("provider_publication_pending");
     }
 
     [Fact]
-    public async Task FetchRange_MalformedXml_ReturnsEmptyAndDoesNotThrow()
+    public async Task ConsecutiveWeekday404_CannotBecomeSuccessZero()
     {
-        // F1.1-3: bozuk XML tek-gün "veri yok" olarak yumuşatılır, range fail değil.
-        var (adapter, _) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("<not-valid-xml"),
-        });
-
-        var result = await adapter.FetchRangeAsync(Guid.NewGuid(), "USDTRY", "USD", TestDate, TestDate, default);
-
-        result.Should().BeEmpty();
+        var (adapter, handler) = Build(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var request = new PriceFetchRequest(Guid.NewGuid(), "USDTRY", "USD",
+            new(2024, 1, 3), new(2024, 1, 5), new HashSet<DateOnly>());
+        var result = await adapter.FetchRangeAsync(request, default);
+        result.Kind.Should().Be(AdapterOutcomeKind.PermanentFailure);
+        handler.CallCount.Should().Be(1);
     }
 
     [Fact]
-    public async Task FetchRange_SkipsWeekendDays()
+    public async Task KnownWeekend_IsExplicitExpectedNoDataWithoutHttp()
     {
-        // TCMB hafta sonu yayın yapmaz; adapter Cumartesi/Pazar günleri HTTP isteği atmaz.
-        var saturday = new DateOnly(2024, 1, 6);
-        var sunday   = new DateOnly(2024, 1, 7);
-        var (adapter, handler) = BuildAdapter(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(SampleXml),
-        });
-
-        var result = await adapter.FetchRangeAsync(
-            Guid.NewGuid(), "USDTRY", "USD", saturday, sunday, default);
-
-        result.Should().BeEmpty();
+        var weekend = new DateOnly(2024, 1, 6);
+        var (adapter, handler) = Build(_ => throw new InvalidOperationException());
+        var result = await adapter.FetchRangeAsync(new PriceFetchRequest(
+            Guid.NewGuid(), "USDTRY", "USD", weekend, weekend,
+            new HashSet<DateOnly> { weekend }), default);
+        result.Kind.Should().Be(AdapterOutcomeKind.ExpectedNoData);
         handler.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task MalformedXml_IsPermanent()
+    {
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<broken"),
+        });
+        (await adapter.FetchRangeAsync(Request(Guid.NewGuid()), default)).Kind
+            .Should().Be(AdapterOutcomeKind.PermanentFailure);
+    }
+
+    [Fact]
+    public async Task OversizedTransportPayload_IsTypedRetryable()
+    {
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new string('x', ProviderTransportLimits.MaxResponseBytes + 1)),
+        });
+
+        var result = await adapter.FetchRangeAsync(Request(Guid.NewGuid()), default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.RetryableFailure);
+        result.Code.Should().Be("transport_payload_too_large");
+    }
+
+    [Theory]
+    [InlineData("TP..USD", "USD")]
+    [InlineData("TP.DK..A", "")]
+    public async Task CurrencyExtraction_MatchesDatabaseSplitPart(
+        string sourceId, string expectedCurrency)
+    {
+        var xml = $"""
+            <Tarih_Date Tarih="03.01.2024" Date="01/03/2024"><Currency CurrencyCode="{expectedCurrency}"><Unit>1</Unit><ForexBuying>30.0</ForexBuying></Currency></Tarih_Date>
+            """;
+        var (adapter, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(xml),
+        });
+        var request = new PriceFetchRequest(Guid.NewGuid(), "USDTRY", sourceId,
+            Weekday, Weekday, new HashSet<DateOnly>());
+
+        var result = await adapter.FetchRangeAsync(request, default);
+
+        result.Kind.Should().Be(AdapterOutcomeKind.Data);
+    }
+
+    [Fact]
+    public async Task CacheEntryExpiresAgainstInjectedClock()
+    {
+        var time = new FakeTimeProvider(
+            new DateTimeOffset(2026, 8, 19, 0, 0, 0, TimeSpan.Zero));
+        var (adapter, handler) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(Xml),
+        }, time);
+
+        await adapter.FetchRangeAsync(Request(Guid.NewGuid()), default);
+        time.Advance(TimeSpan.FromMinutes(61));
+        await adapter.FetchRangeAsync(Request(Guid.NewGuid()), default);
+
+        handler.CallCount.Should().Be(2);
+    }
+
+    private static PriceFetchRequest Request(Guid assetId) =>
+        new(assetId, "USDTRY", "USD", Weekday, Weekday, new HashSet<DateOnly>());
+
+    private static (TcmbAdapter, StubHttpMessageHandler) Build(
+        Func<HttpRequestMessage, HttpResponseMessage> responder,
+        TimeProvider? timeProvider = null)
+    {
+        var handler = new StubHttpMessageHandler(responder);
+        var client = new HttpClient(handler) { BaseAddress = new Uri("https://www.tcmb.gov.tr/kurlar/") };
+        var factory = Substitute.For<IHttpClientFactory>();
+        factory.CreateClient("tcmb").Returns(client);
+        return (new TcmbAdapter(
+            factory, NullLogger<TcmbAdapter>.Instance,
+            timeProvider ?? TimeProvider.System), handler);
     }
 }

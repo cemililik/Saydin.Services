@@ -1,5 +1,8 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using Saydin.PriceIngestion.Adapters;
 using Saydin.Shared.Constants;
 using Saydin.Shared.Entities;
 
@@ -16,36 +19,61 @@ public static class EvdsInflationMapper
     // TP.FG.J0 → EVDS JSON field: TP_FG_J0
     private const string FieldName = "TP_FG_J0";
 
-    public static IReadOnlyList<InflationRate> Map(string json, string source = InflationSources.Tuik)
+    public static IReadOnlyList<InflationRate> Map(
+        string json,
+        string source = InflationSources.Tuik,
+        byte[]? payloadSha256 = null,
+        int? payloadByteLength = null)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new ProviderContractException("contract_value_kind_invalid");
 
         if (!root.TryGetProperty("items", out var items))
             return [];
+        if (items.ValueKind != JsonValueKind.Array)
+            throw new ProviderContractException("contract_value_kind_invalid");
 
         var rates = new List<InflationRate>();
         var now   = DateTimeOffset.UtcNow;
+        var payloadHash = payloadSha256 ?? SHA256.HashData(Encoding.UTF8.GetBytes(json));
 
         foreach (var item in items.EnumerateArray())
         {
+            if (item.ValueKind != JsonValueKind.Object)
+                throw new ProviderContractException("contract_value_kind_invalid");
             if (!item.TryGetProperty("Tarih", out var dateEl))
                 continue;
 
-            if (!TryParseDate(dateEl.GetString(), out var periodDate))
+            if (!TryParseDate(ProviderValueParser.ReadString(dateEl), out var periodDate))
                 continue;
 
             if (!item.TryGetProperty(FieldName, out var valueEl))
                 continue;
 
-            var valueStr = valueEl.GetString();
-            if (string.IsNullOrWhiteSpace(valueStr) || valueStr == "ND")
-                continue;
+            if (valueEl.ValueKind == JsonValueKind.String)
+            {
+                var valueText = ProviderValueParser.ReadString(valueEl);
+                if (string.IsNullOrWhiteSpace(valueText) || valueText == "ND")
+                    continue;
+            }
 
-            if (!decimal.TryParse(valueStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var indexValue))
+            if (!ProviderValueParser.TryReadDecimal(valueEl, out var indexValue))
                 continue;
+            if (indexValue <= 0)
+                throw new ProviderContractException("contract_index_value_invalid");
 
-            rates.Add(new InflationRate
+            var observationId = $"evds:{FieldName}:{periodDate.ToString("yyyy-MM", CultureInfo.InvariantCulture)}";
+            var asOf = new DateTimeOffset(periodDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            var evidence = ObservationEvidence.Create(
+                ("as_of_at", asOf),
+                ("date", periodDate),
+                ("index_value", indexValue),
+                ("observation_id", observationId),
+                ("provider_source", ProviderSources.Evds),
+                ("series", "TP.FG.J0"));
+            rates.Add(ProviderAuthority.Inflation(new InflationRate
             {
                 PeriodDate = periodDate,
                 IndexValue = indexValue,
@@ -57,7 +85,8 @@ public static class EvdsInflationMapper
                 Source     = source,
                 CreatedAt  = now,
                 UpdatedAt  = now,
-            });
+            }, ProviderSources.Evds, observationId, asOf, payloadHash,
+                payloadByteLength ?? Encoding.UTF8.GetByteCount(json), evidence));
         }
 
         return rates.AsReadOnly();

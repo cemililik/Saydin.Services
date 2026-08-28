@@ -1,54 +1,116 @@
 using Microsoft.Extensions.Http.Resilience;
+using Polly;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 
 namespace Saydin.PriceIngestion.Extensions;
 
-/// <summary>
-/// Tüm dış API <see cref="HttpClient"/>'larına tutarlı resilience pipeline'ı uygular
-/// (review F1.1-1). CLAUDE.md "Dış API Adaptörleri" spesifikasyonu:
-/// 3 retry (exponential backoff + jitter), 5 ardışık hata → circuit breaker,
-/// her istekte 30s timeout.
-/// </summary>
 internal static class HttpResilienceExtensions
 {
-    public static IHttpClientBuilder AddSaydinResilience(this IHttpClientBuilder builder)
+    internal const int MaxRetryAttempts = 3;
+    internal static readonly TimeSpan AttemptTimeout = TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan TotalRequestTimeout = TimeSpan.FromMinutes(3);
+    internal static readonly TimeSpan BaseRetryDelay = TimeSpan.FromSeconds(2);
+    // Must exceed the worst-case exhausted retry chain so stalled/timeout
+    // requests remain in the breaker's sample window long enough to open it.
+    internal static readonly TimeSpan SamplingDuration = TimeSpan.FromMinutes(10);
+    internal static readonly TimeSpan BreakDuration = TimeSpan.FromSeconds(120);
+    internal static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(30);
+
+    public static IHttpClientBuilder AddSaydinResilience(
+        this IHttpClientBuilder builder,
+        TimeProvider? timeProvider = null,
+        TimeSpan? retryDelayOverride = null)
     {
-        // PR #11 follow-up: HttpClient.Timeout'u devre dışı bırak. Polly pipeline'ı
-        // AttemptTimeout (30s) + TotalRequestTimeout (3 dk) ile cancel kontrolünü
-        // tek noktadan yürütüyor. HttpClient'ın default 100s timeout'u veya per-client
-        // 30s ayarı pipeline'ı erken iptal edip retry zincirini bozabilir; özellikle
-        // backoff sırasında pencere açıldığında. ConfigureHttpClient delegate'i
-        // AddHttpClient lambda'sından SONRA çalıştığı için per-client Timeout
-        // ayarlarının üzerine yazılır.
+        var clock = timeProvider ?? TimeProvider.System;
+        var retryDelay = retryDelayOverride ?? BaseRetryDelay;
         builder.ConfigureHttpClient(client => client.Timeout = Timeout.InfiniteTimeSpan);
-
-        builder.AddStandardResilienceHandler(opts =>
+        builder.AddResilienceHandler("provider-authority-v1", pipeline =>
         {
-            // Retry: 3 deneme, exponential backoff (varsayılan delay backoff),
-            // jitter ile thundering-herd riski azalır.
-            opts.Retry.MaxRetryAttempts = 3;
-            opts.Retry.BackoffType = Polly.DelayBackoffType.Exponential;
-            opts.Retry.UseJitter = true;
+            pipeline.TimeProvider = clock;
 
-            // Per-attempt timeout: CLAUDE.md 30s.
-            opts.AttemptTimeout.Timeout = TimeSpan.FromSeconds(30);
+            // Strategies are outer-to-inner. One exhausted retry chain (including a
+            // total-timeout exhaustion) is one breaker sample. The sampling window
+            // is deliberately longer than two worst-case logical calls.
+            pipeline.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+            {
+                ShouldHandle = TransientHttpPredicate(),
+                FailureRatio = 1.0,
+                MinimumThroughput = 2,
+                SamplingDuration = SamplingDuration,
+                BreakDuration = BreakDuration,
+            });
+            // This is the single HTTP retry-chain budget and covers every attempt,
+            // retry delay and response-header acquisition. Workers reuse the same
+            // constant for body parsing/lease-renewal, which also bounds streams used
+            // with ResponseHeadersRead. HttpClient.Timeout is deliberately disabled;
+            // the two Polly timeouts below are the only HTTP time authorities.
+            pipeline.AddTimeout(new TimeoutStrategyOptions
+            {
+                Timeout = TotalRequestTimeout,
+            });
+            pipeline.AddRetry(new HttpRetryStrategyOptions
+            {
+                ShouldHandle = TransientHttpPredicate(),
+                MaxRetryAttempts = MaxRetryAttempts,
+                Delay = retryDelay,
+                BackoffType = DelayBackoffType.Exponential,
+                UseJitter = true,
+                ShouldRetryAfterHeader = false,
+                DelayGenerator = arguments =>
+                {
+                    var response = arguments.Outcome.Result;
+                    if (response?.StatusCode != System.Net.HttpStatusCode.TooManyRequests
+                        || response.Headers.RetryAfter is null)
+                    {
+                        // Let Polly apply its exponential backoff + jitter.
+                        return new ValueTask<TimeSpan?>((TimeSpan?)null);
+                    }
 
-            // INGR-006 follow-up: CLAUDE.md "5 ardışık hata → devre açılır" spec'i ile
-            // standart Polly throughput-based pattern arasında ödün:
-            //   - SamplingDuration: AttemptTimeout'un en az 2 katı (framework kuralı).
-            //   - MinimumThroughput: 2 — düşük-trafik worker'larda (örn. EVDS aylık)
-            //     pencere içinde 5 istek gerçekleşmiyor; eski 5 değeri devrenin
-            //     **asla** açılmamasına yol açıyordu.
-            //   - FailureRatio: 1.0 → pencere içinde tüm istekler başarısızsa açılır.
-            // Net davranış: 2 ardışık hata → devre 120s açık. "5 ardışık" semantiğine
-            // birebir uymayan ama tüm worker'larda devrenin gerçekten açılmasını
-            // garanti eden pratik trade-off. ADR-006 (Faz 4) ile gelecek revizyon kuyruğunda.
-            opts.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(120);
-            opts.CircuitBreaker.MinimumThroughput = 2;
-            opts.CircuitBreaker.FailureRatio = 1.0;
-
-            // Toplam istek timeout'u retry zincirini de kapsamalı: 4 attempt * 30s + backoff.
-            opts.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(3);
+                    // A custom delay replaces Polly's generated delay. Preserve the
+                    // exponential floor, add jitter, then honor the capped header only
+                    // when it asks us to wait longer.
+                    var backoff = JitteredExponentialDelay(retryDelay, arguments.AttemptNumber);
+                    return new ValueTask<TimeSpan?>(ResolveRetryDelay(
+                        response, backoff, clock.GetUtcNow()));
+                },
+            });
+            pipeline.AddTimeout(new TimeoutStrategyOptions
+            {
+                Timeout = AttemptTimeout,
+            });
         });
         return builder;
+    }
+
+    private static PredicateBuilder<HttpResponseMessage> TransientHttpPredicate() =>
+        new PredicateBuilder<HttpResponseMessage>()
+            .Handle<HttpRequestException>()
+            .Handle<TimeoutRejectedException>()
+            .HandleResult(response =>
+                response.StatusCode == System.Net.HttpStatusCode.RequestTimeout
+                || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests
+                || (int)response.StatusCode >= 500);
+
+    internal static TimeSpan ResolveRetryDelay(
+        HttpResponseMessage response,
+        TimeSpan backoff,
+        DateTimeOffset now)
+    {
+        var retryAfter = response.Headers.RetryAfter;
+        var requested = retryAfter?.Delta
+            ?? (retryAfter?.Date is { } date ? date - now : TimeSpan.Zero);
+        var boundedHeader = requested <= TimeSpan.Zero
+            ? TimeSpan.Zero
+            : requested > MaxRetryAfter ? MaxRetryAfter : requested;
+        return backoff >= boundedHeader ? backoff : boundedHeader;
+    }
+
+    private static TimeSpan JitteredExponentialDelay(TimeSpan baseDelay, int attemptNumber)
+    {
+        if (baseDelay <= TimeSpan.Zero) return TimeSpan.Zero;
+        var exponentialTicks = checked(baseDelay.Ticks * (1L << attemptNumber));
+        var jitterFactor = 0.5d + Random.Shared.NextDouble();
+        return TimeSpan.FromTicks((long)(exponentialTicks * jitterFactor));
     }
 }
