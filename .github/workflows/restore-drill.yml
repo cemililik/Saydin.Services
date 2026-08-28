@@ -1,0 +1,120 @@
+name: Isolated PITR restore drill
+
+on:
+  schedule:
+    - cron: '17 2 1,15 * *'
+  workflow_dispatch:
+    inputs:
+      release_tag: {description: Signed release used to verify restored data, required: true, type: string}
+      recovery_target_utc: {description: RFC3339 UTC second within the last 14 days, required: true, type: string}
+
+permissions: {}
+concurrency: {group: saydin-restore-drill, cancel-in-progress: false}
+
+jobs:
+  restore:
+    runs-on: [self-hosted, linux, x64, saydin-restore]
+    environment: restore-drill
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0, persist-credentials: false}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Normalize scheduled or manual inputs
+        id: normalized
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
+          DISPATCH_RECOVERY_TARGET: ${{ inputs.recovery_target_utc }}
+          SCHEDULE_RELEASE_TAG: ${{ vars.SAYDIN_RESTORE_SCHEDULE_RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == schedule ]]; then
+            release_tag="$SCHEDULE_RELEASE_TAG"
+            recovery_target=$(date -u -d '7 days ago' '+%Y-%m-%dT%H:%M:%SZ')
+          else
+            release_tag="$DISPATCH_RELEASE_TAG"
+            recovery_target="$DISPATCH_RECOVERY_TARGET"
+          fi
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          python3 - "$recovery_target" <<'PY'
+          import datetime, sys
+          datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
+          PY
+          printf 'release_tag=%s\nrecovery_target=%s\n' "$release_tag" "$recovery_target" >> "$GITHUB_OUTPUT"
+      - name: Validate recovery target and signed release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.normalized.outputs.release_tag }}
+          RECOVERY_TARGET: ${{ steps.normalized.outputs.recovery_target }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/restore-drill.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          release_commit=$(git rev-list -n1 "$RELEASE_TAG")
+          python3 - "$RECOVERY_TARGET" <<'PY'
+          import datetime, sys
+          try: target=datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+          except ValueError: raise SystemExit("restore_target_invalid")
+          age=datetime.datetime.now(datetime.timezone.utc)-target
+          if age < datetime.timedelta() or age > datetime.timedelta(days=14): raise SystemExit("restore_target_outside_wal_retention")
+          PY
+          release_dir="$RUNNER_TEMP/saydin-release"
+          test ! -e "$release_dir"
+          install -d -m 0700 "$release_dir"
+          gh release download "$RELEASE_TAG" --dir "$release_dir"
+          infrastructure/release/verify-signed-release.sh "$release_dir" \
+            '^https://github.com/${{ github.repository }}/.github/workflows/release-images\.yml@refs/heads/main$' \
+            'https://token.actions.githubusercontent.com' '${{ github.repository }}' \
+            "$RELEASE_TAG" "$release_commit"
+      - name: Render immutable drill environment
+        shell: bash
+        env:
+          OPERATOR_ENV_FILE: ${{ vars.SAYDIN_RESTORE_OPERATOR_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "$OPERATOR_ENV_FILE" in /*) ;; *) exit 78 ;; esac
+          python3 infrastructure/release/render-deployment-env.py \
+            --base "$OPERATOR_ENV_FILE" --manifest "$RUNNER_TEMP/saydin-release/release-manifest.json" \
+            --output "$RUNNER_TEMP/saydin-restore.env"
+      - name: Restore and run isolated trust gates
+        shell: bash
+        env:
+          RESTORE_CONTRACT_FILE: ${{ vars.SAYDIN_RESTORE_CONTRACT_FILE }}
+          RECOVERY_TARGET: ${{ steps.normalized.outputs.recovery_target }}
+        run: |
+          set -euo pipefail
+          case "$RESTORE_CONTRACT_FILE" in /*) ;; *) exit 78 ;; esac
+          infrastructure/backup/restore-drill.sh '${{ github.run_id }}' '${{ github.run_attempt }}' "$RECOVERY_TARGET" \
+            "$RUNNER_TEMP/saydin-release/release-manifest.json" "$RUNNER_TEMP/saydin-restore.env" \
+            "$RESTORE_CONTRACT_FILE" "$RUNNER_TEMP/restore-evidence"
+      - name: Sign drill evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.normalized.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mv "$RUNNER_TEMP/restore-evidence/restore-receipt.json" \
+            "$RUNNER_TEMP/restore-evidence/restore-receipt-${{ github.run_id }}-${{ github.run_attempt }}.json"
+          cosign sign-blob --yes \
+            --output-signature "$RUNNER_TEMP/restore-evidence/restore-receipt-${{ github.run_id }}-${{ github.run_attempt }}.sig" \
+            --output-certificate "$RUNNER_TEMP/restore-evidence/restore-receipt-${{ github.run_id }}-${{ github.run_attempt }}.pem" \
+            "$RUNNER_TEMP/restore-evidence/restore-receipt-${{ github.run_id }}-${{ github.run_attempt }}.json"
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/restore-evidence/restore-receipt-${{ github.run_id }}-${{ github.run_attempt }}.json" \
+            "$RUNNER_TEMP/restore-evidence/restore-receipt-${{ github.run_id }}-${{ github.run_attempt }}.sig" \
+            "$RUNNER_TEMP/restore-evidence/restore-receipt-${{ github.run_id }}-${{ github.run_attempt }}.pem"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: restore-drill-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/restore-evidence/
+          if-no-files-found: error
+          retention-days: 90

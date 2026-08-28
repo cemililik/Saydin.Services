@@ -1,0 +1,96 @@
+name: Roll back production application
+
+on:
+  workflow_dispatch:
+    inputs:
+      current_release_tag: {description: Currently deployed signed release, required: true, type: string}
+      target_release_tag: {description: Immediately previous signed compatible release, required: true, type: string}
+      incident_id: {description: Incident/change record identifier, required: true, type: string}
+
+permissions: {}
+concurrency: {group: saydin-production, cancel-in-progress: false}
+
+jobs:
+  rollback:
+    runs-on: [self-hosted, linux, x64, saydin-production]
+    environment: production-rollback
+    timeout-minutes: 60
+    permissions: {contents: write, packages: read, id-token: write}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0, persist-credentials: false}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Verify signed adjacent rollback and schema range
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INCIDENT_ID: ${{ inputs.incident_id }}
+          CURRENT_RELEASE_TAG: ${{ inputs.current_release_tag }}
+          TARGET_RELEASE_TAG: ${{ inputs.target_release_tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/rollback-production.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          [[ "$INCIDENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$ ]]
+          [[ "$CURRENT_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          [[ "$TARGET_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          current_commit=$(git rev-list -n1 "$CURRENT_RELEASE_TAG")
+          target_commit=$(git rev-list -n1 "$TARGET_RELEASE_TAG")
+          for item in current target; do install -d -m 0700 "$RUNNER_TEMP/$item"; done
+          gh release download "$CURRENT_RELEASE_TAG" --dir "$RUNNER_TEMP/current"
+          gh release download "$TARGET_RELEASE_TAG" --dir "$RUNNER_TEMP/target"
+          infrastructure/release/verify-signed-release.sh "$RUNNER_TEMP/current" \
+            '^https://github.com/${{ github.repository }}/.github/workflows/release-images\.yml@refs/heads/main$' \
+            'https://token.actions.githubusercontent.com' '${{ github.repository }}' \
+            "$CURRENT_RELEASE_TAG" "$current_commit"
+          infrastructure/release/verify-signed-release.sh "$RUNNER_TEMP/target" \
+            '^https://github.com/${{ github.repository }}/.github/workflows/release-images\.yml@refs/heads/main$' \
+            'https://token.actions.githubusercontent.com' '${{ github.repository }}' \
+            "$TARGET_RELEASE_TAG" "$target_commit"
+          python3 infrastructure/release/release_manifest.py verify-rollback \
+            --current "$RUNNER_TEMP/current/release-manifest.json" \
+            --target "$RUNNER_TEMP/target/release-manifest.json"
+      - name: Render current and signed previous release
+        shell: bash
+        env: {OPERATOR_ENV_FILE: "${{ vars.SAYDIN_PRODUCTION_ENV_FILE }}"}
+        run: |
+          set -euo pipefail
+          case "$OPERATOR_ENV_FILE" in /*) ;; *) exit 78 ;; esac
+          python3 infrastructure/release/render-deployment-env.py \
+            --base "$OPERATOR_ENV_FILE" --manifest "$RUNNER_TEMP/current/release-manifest.json" \
+            --output "$RUNNER_TEMP/saydin-current.env"
+          python3 infrastructure/release/render-deployment-env.py \
+            --base "$OPERATOR_ENV_FILE" --manifest "$RUNNER_TEMP/target/release-manifest.json" \
+            --output "$RUNNER_TEMP/saydin-rollback.env"
+      - name: Application-only rollback gate
+        shell: bash
+        env:
+          SAYDIN_ENABLE_BACKUP: ${{ vars.SAYDIN_ENABLE_BACKUP }}
+          SAYDIN_ENABLE_INGESTION: ${{ vars.SAYDIN_ENABLE_INGESTION }}
+          SAYDIN_PUBLIC_SMOKE_CONFIG_FILE: ${{ vars.SAYDIN_PRODUCTION_SMOKE_CONFIG_FILE }}
+          CURRENT_RELEASE_TAG: ${{ inputs.current_release_tag }}
+          TARGET_RELEASE_TAG: ${{ inputs.target_release_tag }}
+          INCIDENT_ID: ${{ inputs.incident_id }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          current_commit=$(git rev-list -n1 "$CURRENT_RELEASE_TAG")
+          target_commit=$(git rev-list -n1 "$TARGET_RELEASE_TAG")
+          infrastructure/release/rollback-release.sh saydin-production \
+            "$GITHUB_WORKSPACE/infrastructure/deployment/compose.production.yml" \
+            "$RUNNER_TEMP/saydin-current.env" "$RUNNER_TEMP/saydin-rollback.env" \
+            "$RUNNER_TEMP/current" "$RUNNER_TEMP/target" "$RUNNER_TEMP/rollback-receipt" \
+            "$GITHUB_RUN_ID" "$INCIDENT_ID" "$CURRENT_RELEASE_TAG" "$TARGET_RELEASE_TAG" \
+            "$RELEASE_REPOSITORY" "$current_commit" "$target_commit"
+      - name: Sign and retain rollback evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RELEASE_TAG: ${{ inputs.current_release_tag }}
+        run: |
+          set -euo pipefail
+          stem="$RUNNER_TEMP/rollback-receipt/rollback-receipt-${{ github.run_id }}"
+          mv "$RUNNER_TEMP/rollback-receipt/receipt.json" "$stem.json"
+          cosign sign-blob --yes --output-signature "$stem.sig" \
+            --output-certificate "$stem.pem" "$stem.json"
+          gh release upload "$CURRENT_RELEASE_TAG" "$stem.json" "$stem.sig" "$stem.pem"
