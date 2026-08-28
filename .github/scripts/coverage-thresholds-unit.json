@@ -1,0 +1,17 @@
+{
+  "overall": {
+    "line": 70.0,
+    "branch": 55.0
+  },
+  "changed_line": 80.0,
+  "critical_namespaces": {
+    "Saydin.Api.Security": {"line": 80.0, "branch": 75.0},
+    "Saydin.Api.Services": {"line": 70.0, "branch": 55.0},
+    "Saydin.DatabaseSecurity": {"line": 90.0, "branch": 75.0},
+    "Saydin.PriceIngestion.Adapters": {"line": 85.0, "branch": 70.0},
+    "Saydin.DatabaseMigrator": {"line": 30.0, "branch": 20.0},
+    "Saydin.DatabaseRoleBootstrap": {"line": 25.0, "branch": 35.0},
+    "Saydin.DataQualityAudit": {"line": 75.0, "branch": 60.0},
+    "Saydin.DataRepair": {"line": 60.0, "branch": 40.0}
+  }
+}

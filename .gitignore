@@ -27,7 +27,12 @@ project.lock.json
 
 # OS
 .DS_Store
+.AppleDouble/
+.LSOverride
+._*
+Icon?
 Thumbs.db
+Desktop.ini
 
 # Test results
 TestResults/

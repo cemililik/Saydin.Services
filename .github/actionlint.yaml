@@ -1,0 +1,17 @@
+self-hosted-runner:
+  labels:
+    - saydin-staging
+    - saydin-production
+    - saydin-release
+    - saydin-restore
+
+config-variables: null
+
+paths:
+  .github/workflows/**/*.yml:
+    # Actionlint's embedded snippets lose ShellCheck file-level directives. The
+    # required direct ShellCheck job still evaluates every tracked shell file;
+    # only these informational/style findings in YAML heredocs are suppressed.
+    ignore:
+      - 'shellcheck reported issue in this script: SC2016:info:'
+      - 'shellcheck reported issue in this script: SC2129:style:'

@@ -1,0 +1,13 @@
+{
+  "alertmanager": "quay.io/prometheus/alertmanager@sha256:CHANGE_ME",
+  "blackbox": "quay.io/prometheus/blackbox-exporter@sha256:CHANGE_ME",
+  "loki": "docker.io/grafana/loki@sha256:CHANGE_ME",
+  "nodeExporter": "quay.io/prometheus/node-exporter@sha256:CHANGE_ME",
+  "otel": "docker.io/otel/opentelemetry-collector-contrib@sha256:CHANGE_ME",
+  "postgresExporter": "quay.io/prometheuscommunity/postgres-exporter@sha256:CHANGE_ME",
+  "prometheus": "quay.io/prometheus/prometheus@sha256:CHANGE_ME",
+  "redis": "docker.io/library/redis@sha256:CHANGE_ME",
+  "redisExporter": "docker.io/oliver006/redis_exporter@sha256:CHANGE_ME",
+  "tempo": "docker.io/grafana/tempo@sha256:CHANGE_ME",
+  "timescale": "docker.io/timescale/timescaledb@sha256:CHANGE_ME"
+}

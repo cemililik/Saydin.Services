@@ -1,0 +1,152 @@
+name: Promote staged release to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag: {description: Exact staged release tag, required: true, type: string}
+      staging_run_id: {description: Successful staging workflow run id, required: true, type: string}
+      restore_drill_run_id: {description: Successful signed restore drill run id, required: true, type: string}
+      restore_drill_run_attempt: {description: Successful signed restore drill run attempt, required: true, type: string}
+
+permissions: {}
+concurrency: {group: saydin-production, cancel-in-progress: false}
+
+jobs:
+  promote:
+    runs-on: [self-hosted, linux, x64, saydin-production]
+    environment: production
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0, persist-credentials: false}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Verify release and staging receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+          RESTORE_RUN_ID: ${{ inputs.restore_drill_run_id }}
+          RESTORE_RUN_ATTEMPT: ${{ inputs.restore_drill_run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/promote-production.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          [[ "$STAGING_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RESTORE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RESTORE_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          release_commit=$(git rev-list -n1 "$RELEASE_TAG")
+          release_dir="$RUNNER_TEMP/saydin-release"
+          test ! -e "$release_dir"
+          install -d -m 0700 "$release_dir"
+          gh release download "$RELEASE_TAG" --dir "$release_dir"
+          infrastructure/release/verify-signed-release.sh "$release_dir" \
+            '^https://github.com/${{ github.repository }}/.github/workflows/release-images\.yml@refs/heads/main$' \
+            'https://token.actions.githubusercontent.com' '${{ github.repository }}' \
+            "$RELEASE_TAG" "$release_commit"
+          receipt="$release_dir/staging-receipt-$STAGING_RUN_ID.json"
+          test -f "$receipt"
+          cosign verify-blob --certificate "$release_dir/staging-receipt-$STAGING_RUN_ID.pem" \
+            --signature "$release_dir/staging-receipt-$STAGING_RUN_ID.sig" \
+            --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/deploy-staging\.yml@refs/heads/main$' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$receipt" >/dev/null
+          python3 - "$release_dir/release-manifest.json" "$receipt" "$STAGING_RUN_ID" <<'PY'
+          import datetime, hashlib, json, sys
+          manifest = open(sys.argv[1], "rb").read()
+          receipt = json.load(open(sys.argv[2], encoding="utf-8"))
+          assert set(receipt) == {"schemaVersion","environment","project","workflowRunId","manifestSha256","completedAt","status"}
+          assert receipt["schemaVersion"] == 1 and receipt["environment"] == "staging" and receipt["status"] == "passed"
+          assert receipt["project"] == "saydin-staging" and receipt["workflowRunId"] == sys.argv[3]
+          assert receipt["manifestSha256"] == hashlib.sha256(manifest).hexdigest()
+          completed=datetime.datetime.fromisoformat(receipt["completedAt"].replace("Z","+00:00"))
+          age=datetime.datetime.now(datetime.timezone.utc)-completed
+          assert datetime.timedelta() <= age <= datetime.timedelta(days=7)
+          PY
+          restore_receipt="$release_dir/restore-receipt-$RESTORE_RUN_ID-$RESTORE_RUN_ATTEMPT.json"
+          test -f "$restore_receipt"
+          cosign verify-blob \
+            --certificate "$release_dir/restore-receipt-$RESTORE_RUN_ID-$RESTORE_RUN_ATTEMPT.pem" \
+            --signature "$release_dir/restore-receipt-$RESTORE_RUN_ID-$RESTORE_RUN_ATTEMPT.sig" \
+            --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/restore-drill\.yml@refs/heads/main$' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$restore_receipt" >/dev/null
+          python3 - "$release_dir/release-manifest.json" "$restore_receipt" \
+            "$RESTORE_RUN_ID" "$RESTORE_RUN_ATTEMPT" <<'PY'
+          import datetime, hashlib, json, sys
+          manifest=open(sys.argv[1],"rb").read(); receipt=json.load(open(sys.argv[2],encoding="utf-8"))
+          expected={"schemaVersion","runId","runAttempt","targetTime","manifestSha256","walSegment",
+                    "walSegmentSourceAt","walCoverageObservedAt","walSnapshotReceivedAt",
+                    "walReceiverCaughtUpAt","walServerLsn","walServerHighwaterSegment",
+                    "walServerPreviousSegment",
+                    "guaranteedRecoveryPointAt","walEvidenceEvaluatedAt","currentRecoveryPointAgeSeconds",
+                    "recoveryTargetReached","lastReplayedTransactionAt",
+                    "lastReplayedTransactionLagSeconds","completedAt","roleBootstrap",
+                    "migrationTrust","dqa","apiSmoke"}
+          assert set(receipt)==expected and receipt["schemaVersion"]==2
+          assert receipt["runId"]==sys.argv[3]
+          assert receipt["runAttempt"]==sys.argv[4]
+          assert receipt["manifestSha256"]==hashlib.sha256(manifest).hexdigest()
+          parse=lambda value: datetime.datetime.strptime(value,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+          target=parse(receipt["targetTime"]); source=parse(receipt["walSegmentSourceAt"])
+          observed=parse(receipt["walCoverageObservedAt"]); received=parse(receipt["walSnapshotReceivedAt"])
+          caught_up=parse(receipt["walReceiverCaughtUpAt"])
+          guaranteed=parse(receipt["guaranteedRecoveryPointAt"])
+          evaluated=parse(receipt["walEvidenceEvaluatedAt"])
+          now=datetime.datetime.now(datetime.timezone.utc)
+          drill_completed=datetime.datetime.fromisoformat(receipt["completedAt"].replace("Z","+00:00"))
+          assert source <= observed <= received <= evaluated <= drill_completed <= now
+          assert caught_up==observed
+          assert receipt["walSegment"] in (receipt["walServerHighwaterSegment"],receipt["walServerPreviousSegment"])
+          assert received-observed <= datetime.timedelta(minutes=15)
+          assert guaranteed==max(source,observed-datetime.timedelta(seconds=300))
+          age=int((evaluated-guaranteed).total_seconds())
+          assert 0 <= receipt["currentRecoveryPointAgeSeconds"] <= 900
+          assert abs(age-receipt["currentRecoveryPointAgeSeconds"]) <= 1
+          assert receipt["recoveryTargetReached"] is True
+          transaction=receipt["lastReplayedTransactionAt"]
+          transaction_lag=receipt["lastReplayedTransactionLagSeconds"]
+          assert (transaction is None)==(transaction_lag is None)
+          if transaction is not None:
+            assert transaction_lag==max(0,int((target-parse(transaction)).total_seconds()))
+          assert all(receipt[key]=="passed" for key in ("roleBootstrap","migrationTrust","dqa","apiSmoke"))
+          completed=drill_completed
+          age=datetime.datetime.now(datetime.timezone.utc)-completed
+          assert datetime.timedelta() <= age <= datetime.timedelta(days=31)
+          PY
+      - name: Render exact production digest set
+        shell: bash
+        env: {OPERATOR_ENV_FILE: "${{ vars.SAYDIN_PRODUCTION_ENV_FILE }}"}
+        run: |
+          set -euo pipefail
+          case "$OPERATOR_ENV_FILE" in /*) ;; *) exit 78 ;; esac
+          python3 infrastructure/release/render-deployment-env.py \
+            --base "$OPERATOR_ENV_FILE" --manifest "$RUNNER_TEMP/saydin-release/release-manifest.json" \
+            --output "$RUNNER_TEMP/saydin-production.env"
+      - name: Production admission gate
+        shell: bash
+        env:
+          SAYDIN_ENABLE_BACKUP: ${{ vars.SAYDIN_ENABLE_BACKUP }}
+          SAYDIN_ENABLE_INGESTION: ${{ vars.SAYDIN_ENABLE_INGESTION }}
+          SAYDIN_PUBLIC_SMOKE_CONFIG_FILE: ${{ vars.SAYDIN_PRODUCTION_SMOKE_CONFIG_FILE }}
+        run: |
+          set -euo pipefail
+          infrastructure/release/deploy-release.sh production saydin-production \
+            "$GITHUB_WORKSPACE/infrastructure/deployment/compose.production.yml" \
+            "$RUNNER_TEMP/saydin-production.env" "$RUNNER_TEMP/saydin-release" \
+            "$RUNNER_TEMP/production-receipt" '${{ github.run_id }}'
+      - name: Sign and retain production receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          stem="$RUNNER_TEMP/production-receipt/production-receipt-${{ github.run_id }}"
+          mv "$RUNNER_TEMP/production-receipt/receipt.json" "$stem.json"
+          cosign sign-blob --yes --output-signature "$stem.sig" \
+            --output-certificate "$stem.pem" "$stem.json"
+          gh release upload "$RELEASE_TAG" "$stem.json" "$stem.sig" "$stem.pem"
