@@ -15,4 +15,15 @@ public sealed class InflationRate
     public string          Source     { get; set; } = InflationSources.Tuik;
     public DateTimeOffset  CreatedAt  { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset  UpdatedAt  { get; set; } = DateTimeOffset.UtcNow;
+    public string?         ProviderSource { get; set; }
+    public string?         SourceObservationId { get; set; }
+    public DateTimeOffset? AsOfAt { get; set; }
+    public string?         PriceKind { get; set; }
+    public bool?           IsFinal { get; set; }
+    public byte[]?         PayloadSha256 { get; set; }
+    public int?            PayloadByteLength { get; set; }
+    public byte[]?         ObservationSha256 { get; set; }
+    public Guid?           IngestionWindowId { get; set; }
+    public int?            AuthorityContractVersion { get; set; }
+    public string?         SourceRaw { get; set; }
 }
