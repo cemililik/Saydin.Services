@@ -5,6 +5,6 @@ namespace Saydin.Api.Services;
 
 public interface IDcaCalculator
 {
-    // F2.2-3: deviceId artık IDeviceContext üzerinden (scoped) okunur.
+    // Quota identity is derived from the authenticated installation principal.
     Task<DcaResponse> CalculateAsync(DcaRequest request, CancellationToken ct);
 }

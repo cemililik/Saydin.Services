@@ -5,8 +5,9 @@ namespace Saydin.Api.Services;
 
 public interface ISavedScenarioService
 {
-    // F2.2-3: deviceId artık IDeviceContext üzerinden (scoped) okunur.
+    // Ownership is derived only from the authenticated installation principal.
     Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(CancellationToken ct);
+    Task<ScenarioPageResponse> GetScenarioPageAsync(int? limit, string? cursor, CancellationToken ct);
     Task<ScenarioResponse> SaveScenarioAsync(SaveScenarioRequest request, CancellationToken ct);
     Task DeleteScenarioAsync(Guid scenarioId, CancellationToken ct);
 }

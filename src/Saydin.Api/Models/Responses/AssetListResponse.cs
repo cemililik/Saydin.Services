@@ -29,4 +29,5 @@ public record PricePointResponse(
     decimal? Open,
     decimal? High,
     decimal? Low,
-    decimal? Volume);
+    decimal? Volume,
+    ObservationBasisResponse? Basis = null);
