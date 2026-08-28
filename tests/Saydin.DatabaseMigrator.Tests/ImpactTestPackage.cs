@@ -21,6 +21,15 @@ internal sealed class ImpactTestPackage : IDisposable
         Configuration = configuration;
     }
 
+
+    private static int IndexOfVersion(MigrationManifest manifest, string version)
+    {
+        for (var index = 0; index < manifest.Migrations.Count; index++)
+            if (manifest.Migrations[index].Version == version)
+                return index;
+        throw new InvalidOperationException($"migration not found in manifest: {version}");
+    }
+
     public string MigrationsDirectory => migrations.Path;
     public MigrationManifest Manifest { get; }
     public MigrationImpactConfiguration Configuration { get; }
@@ -53,9 +62,10 @@ internal sealed class ImpactTestPackage : IDisposable
                 new UTF8Encoding(false));
             var manifest = MigrationManifest.Load(migrations.Path);
             var migration = manifest.Migrations.Single(item => item.Version == migrationVersion);
-            // Derived, not pinned: adding a migration must not silently retarget the
-            // fixture's predecessor or trusted prefix.
-            var trustedPrefixCount = manifest.Migrations.Count - 1;
+            // Bound to the selected migration's own position, not the manifest length:
+            // `migrationVersion` is a parameter and a later canonical migration may sort
+            // after it, either of which would silently retarget predecessor/prefix.
+            var trustedPrefixCount = IndexOfVersion(manifest, migrationVersion);
             var predecessor = manifest.Migrations[trustedPrefixCount - 1];
             var budgets = new Dictionary<string, object?>
             {

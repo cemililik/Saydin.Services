@@ -353,6 +353,14 @@ public sealed class MigrationImpactManifestTests
             TrustedPrefixCount = trustedPrefixCount;
         }
 
+    private static int IndexOfVersion(MigrationManifest manifest, string version)
+        {
+            for (var index = 0; index < manifest.Migrations.Count; index++)
+                if (manifest.Migrations[index].Version == version)
+                    return index;
+            throw new InvalidOperationException($"migration not found in manifest: {version}");
+        }
+
         public TemporaryDirectory Migrations { get; }
         public TemporaryDirectory Impacts { get; }
         public MigrationManifest Manifest { get; }
@@ -381,9 +389,9 @@ public sealed class MigrationImpactManifestTests
                     new UTF8Encoding(false));
                 var manifest = MigrationManifest.Load(migrations.Path);
                 var migration = manifest.Migrations.Single(item => item.Version == "026_impact_test");
-                // The appended 026 tail sorts last, so its predecessor is the final
-                // canonical migration and the trusted prefix is everything before the tail.
-                var trustedPrefixCount = manifest.Migrations.Count - 1;
+                // Bound to the appended migration's own position rather than the manifest
+                // length, so a later canonical migration cannot retarget the fixture.
+                var trustedPrefixCount = IndexOfVersion(manifest, "026_impact_test");
                 var predecessor = manifest.Migrations[trustedPrefixCount - 1];
 
                 var budgets = new Dictionary<string, object?>
