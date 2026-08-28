@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Globalization;
 using Saydin.PriceIngestion.Mappers;
 using Saydin.Shared.Entities;
 using Saydin.Shared.Exceptions;
@@ -8,19 +9,19 @@ namespace Saydin.PriceIngestion.Adapters;
 public sealed class TwelveDataAdapter(
     IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
+    TimeProvider timeProvider,
     ILogger<TwelveDataAdapter> logger) : IExternalPriceAdapter
 {
     public string Source => "twelvedata";
 
-    public async Task<IReadOnlyList<PricePoint>> FetchRangeAsync(
-        Guid assetId, string assetSymbol, string sourceId,
-        DateOnly from, DateOnly to, CancellationToken ct)
+    public async Task<AdapterOutcome<PricePoint>> FetchRangeAsync(
+        PriceFetchRequest request, CancellationToken ct)
     {
         var apiKey = configuration["ExternalApis:TwelveData:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            logger.LogWarning("TwelveData API key yapılandırılmamış, {Symbol} atlandı", assetSymbol);
-            return [];
+            logger.LogError("TwelveData API key yapılandırılmamış: {Symbol}", request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.PermanentFailure("auth_missing_api_key");
         }
 
         var client = httpClientFactory.CreateClient("twelvedata");
@@ -30,54 +31,132 @@ public sealed class TwelveDataAdapter(
         // TwelveData "Authorization: apikey <key>" header şemasını destekler.
         // F2.4-3: outputsize'ı config'e taşı (default 5000 üst limit).
         var outputSize = configuration.GetValue("ExternalApis:TwelveData:OutputSize", 5000);
-        var url = $"time_series?symbol={Uri.EscapeDataString(sourceId)}" +
-                  $"&interval=1day&start_date={from:yyyy-MM-dd}&end_date={to:yyyy-MM-dd}" +
+        var url = $"time_series?symbol={Uri.EscapeDataString(request.SourceId)}" +
+                  $"&interval=1day&start_date={request.From.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}" +
+                  $"&end_date={request.To.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}" +
                   $"&outputsize={outputSize}&format=JSON";
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Authorization", $"apikey {apiKey}");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Get, url);
+        httpRequest.Headers.TryAddWithoutValidation("Authorization", $"apikey {apiKey}");
 
         try
         {
-            using var response = await client.SendAsync(request, ct);
+            using var response = await client.SendAsync(
+                httpRequest, HttpCompletionOption.ResponseHeadersRead, ct);
 
             if (response.StatusCode is System.Net.HttpStatusCode.TooManyRequests)
             {
                 logger.LogWarning(
-                    "TwelveData 429 ({Symbol}) — Polly retry tükendi.", assetSymbol);
-                throw new ExternalApiException(Source,
-                    $"Rate limit (429) symbol={assetSymbol}");
+                    "TwelveData 429 ({Symbol}) — Polly retry tükendi.", request.AssetSymbol);
+                return AdapterOutcome<PricePoint>.RetryableFailure("http_429");
             }
 
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                var status = (int)response.StatusCode;
+                return status >= 500
+                    ? AdapterOutcome<PricePoint>.RetryableFailure("http_5xx", $"status={status}")
+                    : AdapterOutcome<PricePoint>.PermanentFailure(
+                        response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden
+                            ? "auth_rejected" : "http_4xx", $"status={status}");
+            }
 
-            var json = await response.Content.ReadAsStringAsync(ct);
-            var points = TwelveDataMapper.Map(json, assetId, assetSymbol, Source);
+            var payload = await BoundedHttpContent.ReadAsync(response.Content, ct);
+            using var document = JsonDocument.Parse(payload.Bytes);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return AdapterOutcome<PricePoint>.PermanentFailure(
+                    "contract_value_kind_invalid");
+            if (root.TryGetProperty("status", out var statusElement))
+            {
+                if (statusElement.ValueKind != JsonValueKind.String)
+                    return AdapterOutcome<PricePoint>.PermanentFailure(
+                        "contract_value_kind_invalid");
+                if (!string.Equals(statusElement.GetString(), "ok", StringComparison.OrdinalIgnoreCase))
+                {
+                    var providerCode = root.TryGetProperty("code", out var codeElement)
+                        && codeElement.ValueKind == JsonValueKind.Number
+                        && codeElement.TryGetInt32(out var numericCode)
+                        && numericCode is >= 100 and <= 599
+                        ? numericCode : 0;
+                    return providerCode == 429
+                        ? AdapterOutcome<PricePoint>.RetryableFailure("provider_rate_limit")
+                        : AdapterOutcome<PricePoint>.PermanentFailure(
+                            "provider_error", providerCode == 0 ? "code=unknown" : $"code={providerCode}");
+                }
+            }
+            if (!root.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
+                return AdapterOutcome<PricePoint>.PermanentFailure("schema_missing_values");
+
+            var rawItemCount = values.GetArrayLength();
+            var points = TwelveDataMapper.Map(
+                payload.Utf8Text, request.AssetId, request.SourceId, Source,
+                payload.Sha256, payload.Bytes.Length);
+            var rejectedCount = Math.Max(0, rawItemCount - points.Count);
 
             logger.LogInformation(
                 "TwelveData {Symbol}: {Count} fiyat noktası alındı ({From}–{To})",
-                assetSymbol, points.Count, from, to);
+                request.AssetSymbol, points.Count, request.From, request.To);
 
-            return points;
+            var completeness = AdapterCompleteness.Price(
+                request, points, rawItemCount, rejectedCount);
+            if (completeness.Kind == AdapterOutcomeKind.PartialRejected
+                && rejectedCount == 0
+                && IsOnlyCurrentTerminalObservationMissing(request, points))
+                return AdapterOutcome<PricePoint>.RetryableFailure(
+                    "not_published_yet", rawItemCount: rawItemCount,
+                    rejectedCount: completeness.RejectedCount);
+            return completeness;
         }
-        catch (JsonException ex)
+        catch (ProviderContractException ex)
+        {
+            logger.LogError("TwelveData provider contract rejected: {Code} {Symbol}",
+                ex.Code, request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.PermanentFailure(ex.Code);
+        }
+        catch (ProviderTransportPayloadTooLargeException)
+        {
+            logger.LogWarning("TwelveData provider transport payload limitini aştı: {Symbol}",
+                request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.RetryableFailure("transport_payload_too_large");
+        }
+        catch (ProviderPayloadTooLargeException)
+        {
+            logger.LogError("TwelveData provider payload exceeded authority limit: {Symbol}",
+                request.AssetSymbol);
+            return AdapterOutcome<PricePoint>.PermanentFailure("payload_too_large");
+        }
+        catch (JsonException)
         {
             // EVDS adaptörüyle paritede malformed JSON yumuşatılmaz; ingestion runner
             // fail olarak işaretlesin ve upstream contract değişiklikleri kaybolmasın.
-            logger.LogError(ex, "TwelveData JSON çözümlenemedi: {Symbol} ({From}–{To})",
-                assetSymbol, from, to);
-            throw new ExternalApiException(Source,
-                $"TwelveData payload malformed: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
+            logger.LogError("TwelveData JSON çözümlenemedi: {Symbol} ({From}–{To})",
+                request.AssetSymbol, request.From, request.To);
+            return AdapterOutcome<PricePoint>.PermanentFailure("parse_error");
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException)
         {
             // PR #11 follow-up: ExternalApiException sarmalaması inner stack'i
             // operasyon ekibine göstermez; orijinal hata burada loglanmalı.
-            logger.LogError(ex,
-                "TwelveData veri alınamadı: {Source} {Symbol} ({From}–{To})",
-                Source, assetSymbol, from, to);
-            throw new ExternalApiException(Source,
-                $"TwelveData veri alınamadı: {assetSymbol} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
+            logger.LogError("TwelveData veri alınamadı: {Source} {Symbol} ({From}–{To})",
+                Source, request.AssetSymbol, request.From, request.To);
+            return AdapterOutcome<PricePoint>.RetryableFailure("network_error");
         }
+    }
+
+    private bool IsOnlyCurrentTerminalObservationMissing(
+        PriceFetchRequest request,
+        IReadOnlyCollection<PricePoint> points)
+    {
+        var expected = AdapterCompleteness.Dates(request.From, request.To)
+            .Except(request.CalendarClosedDates)
+            .ToHashSet();
+        var missing = expected.Except(points.Select(point => point.PriceDate)).ToArray();
+        if (missing.Length != 1 || expected.Count == 0 || missing[0] != expected.Max())
+            return false;
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Istanbul");
+        var localToday = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(timeProvider.GetUtcNow(), zone).DateTime);
+        return missing[0] == localToday;
     }
 }

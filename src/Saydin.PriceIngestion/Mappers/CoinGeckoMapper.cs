@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using Saydin.PriceIngestion.Adapters;
 using Saydin.Shared.Entities;
 
 namespace Saydin.PriceIngestion.Mappers;
@@ -6,55 +9,70 @@ namespace Saydin.PriceIngestion.Mappers;
 public static class CoinGeckoMapper
 {
     /// <summary>
-    /// CoinGecko market_chart endpoint'i UTC midnight değerlerine ek olarak
-    /// gün-içi snapshot'lar döndürebilir (örn. en son fiyat 23:55). Önceki sürüm
-    /// "son değeri tut" mantığıyla 23:55'i kapanış olarak yazıyordu — bu intra-day
-    /// noise yaratıyordu. F2.4-6 ([C-D-25]): yalnızca <c>00:00 UTC</c>'ye en yakın
-    /// gözlem alınır; aynı tarih için birden fazla gözlem varsa midnight'a en
-    /// yakın olan kazanır (timestamp_ms tabanlı).
+    /// CoinGecko günlük authority yalnız exact 00:00:00.000 UTC observation'dır.
+    /// Hourly/intraday değerler hiçbir zaman "nearest" seçilmez.
     /// </summary>
-    public static IReadOnlyList<PricePoint> Map(string json, Guid assetId, DateOnly from, DateOnly to)
+    public static IReadOnlyList<PricePoint> Map(
+        string json,
+        Guid assetId,
+        DateOnly from,
+        DateOnly to,
+        string sourceId = "unknown",
+        byte[]? payloadSha256 = null,
+        int? payloadByteLength = null)
     {
         using var doc = JsonDocument.Parse(json);
-        var prices = doc.RootElement.GetProperty("prices");
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new ProviderContractException("contract_value_kind_invalid");
+        var prices = root.GetProperty("prices");
 
-        // Her gün için "midnight'a uzaklık (ms) + ham timestamp + fiyat" tutulur.
-        // INGR-003: tie-breaking deterministik — aynı uzaklıkta iki gözlem geldiğinde
-        // **küçük timestamp** (yani önce gelen, daha "midnight'a doğru" olan) kazanır.
-        // Önceki strict `<` aynı timestamp'in iki kez geldiği patolojik girişte array
-        // sırasına bağlıydı; deterministik tie-break sırayı dışarıdan tahmin edilebilir kılar.
-        var daily = new Dictionary<DateOnly, (long DistanceMs, long TimestampMs, decimal Price)>();
+        var payloadHash = payloadSha256 ?? SHA256.HashData(Encoding.UTF8.GetBytes(json));
+        var daily = new Dictionary<DateOnly, PricePoint>();
 
         foreach (var pair in prices.EnumerateArray())
         {
-            var timestampMs = pair[0].GetInt64();
-            var price       = pair[1].GetDecimal();
+            if (pair.ValueKind != JsonValueKind.Array || pair.GetArrayLength() != 2
+                || pair[0].ValueKind != JsonValueKind.Number)
+                throw new ProviderContractException("contract_invalid_price_pair");
+            if (!pair[0].TryGetInt64(out var timestampMs))
+                throw new ProviderContractException("contract_invalid_price_pair");
             var utcMoment   = DateTimeOffset.FromUnixTimeMilliseconds(timestampMs);
             var date        = DateOnly.FromDateTime(utcMoment.UtcDateTime);
             if (date < from || date > to) continue;
+            if (pair[1].ValueKind != JsonValueKind.Number)
+                throw new ProviderContractException("contract_value_kind_invalid");
+            if (!pair[1].TryGetDecimal(out var price) || price <= 0)
+                throw new ProviderContractException("contract_invalid_price_pair");
+            var midnight = new DateTimeOffset(date.Year, date.Month, date.Day, 0, 0, 0, TimeSpan.Zero);
+            if (utcMoment != midnight) continue;
+            if (daily.ContainsKey(date))
+                throw new ProviderContractException("contract_duplicate_daily_observation");
 
-            // Bu günün midnight UTC referans noktası.
-            var midnight    = new DateTimeOffset(date.Year, date.Month, date.Day, 0, 0, 0, TimeSpan.Zero);
-            var distanceMs  = Math.Abs((long)(utcMoment - midnight).TotalMilliseconds);
-
-            if (!daily.TryGetValue(date, out var existing)
-                || distanceMs < existing.DistanceMs
-                || (distanceMs == existing.DistanceMs && timestampMs < existing.TimestampMs))
+            var rounded = Math.Round(price, 6, MidpointRounding.AwayFromZero);
+            var observationId = $"coingecko:{sourceId}:try:{timestampMs}";
+            var evidence = ObservationEvidence.Create(
+                ("as_of_at", utcMoment),
+                ("close", rounded),
+                ("date", date),
+                ("observation_id", observationId),
+                ("provider_source", ProviderSources.CoinGecko),
+                ("quote_currency", "TRY"),
+                ("source_timestamp_ms", timestampMs),
+                ("symbol", sourceId));
+            daily[date] = ProviderAuthority.Price(new PricePoint
             {
-                daily[date] = (distanceMs, timestampMs, price);
-            }
+                AssetId = assetId,
+                PriceDate = date,
+                Close = rounded,
+            }, ProviderSources.CoinGecko, observationId, utcMoment,
+                ObservationPriceKinds.DailyUtcReference, payloadHash,
+                payloadByteLength ?? Encoding.UTF8.GetByteCount(json), evidence);
         }
 
         return daily
-            .Select(kv => new PricePoint
-            {
-                AssetId   = assetId,
-                PriceDate = kv.Key,
-                Close     = Math.Round(kv.Value.Price, 6, MidpointRounding.AwayFromZero)
-            })
-            .OrderBy(p => p.PriceDate)
+            .Values.OrderBy(p => p.PriceDate)
             .ToList()
             .AsReadOnly();
     }
 }
-

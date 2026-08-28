@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Globalization;
 using Microsoft.Extensions.Configuration;
 using Saydin.PriceIngestion.Mappers;
 using Saydin.Shared.Constants;
@@ -18,13 +19,14 @@ namespace Saydin.PriceIngestion.Adapters;
 public sealed class EvdsInflationAdapter(
     IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
+    TimeProvider timeProvider,
     ILogger<EvdsInflationAdapter> logger) : IInflationAdapter
 {
     private const string SeriesCode = "TP.FG.J0";
 
     public string Source => "evds";
 
-    public async Task<IReadOnlyList<InflationRate>> FetchRangeAsync(
+    public async Task<AdapterOutcome<InflationRate>> FetchRangeAsync(
         DateOnly from,
         DateOnly to,
         CancellationToken ct)
@@ -32,16 +34,16 @@ public sealed class EvdsInflationAdapter(
         var apiKey = configuration["ExternalApis:Evds:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            logger.LogWarning("EVDS API key yapılandırılmamış. Enflasyon verisi çekilemiyor.");
-            return [];
+            logger.LogError("EVDS API key yapılandırılmamış. Enflasyon verisi çekilemiyor.");
+            return AdapterOutcome<InflationRate>.PermanentFailure("auth_missing_api_key");
         }
 
         var client = httpClientFactory.CreateClient("evds");
 
         // EVDS tarih formatı: DD-MM-YYYY; key HTTP header olarak gönderilir (query param değil)
         // frequency=5: aylık; formulas=0: düzey (ham endeks değeri)
-        var startDate = from.ToString("dd-MM-yyyy");
-        var endDate   = to.ToString("dd-MM-yyyy");
+        var startDate = from.ToString("dd-MM-yyyy", CultureInfo.InvariantCulture);
+        var endDate   = to.ToString("dd-MM-yyyy", CultureInfo.InvariantCulture);
         var url = $"igmevdsms-dis/series={SeriesCode}&startDate={startDate}&endDate={endDate}&type=json&frequency=5&formulas=0";
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -50,12 +52,12 @@ public sealed class EvdsInflationAdapter(
         HttpResponseMessage? response = null;
         try
         {
-            response = await client.SendAsync(request, ct);
+            response = await client.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, ct);
 
             if (!response.IsSuccessStatusCode)
             {
                 var statusCode = (int)response.StatusCode;
-                var body = await response.Content.ReadAsStringAsync(ct);
                 var outcome = response.StatusCode switch
                 {
                     System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden => "auth",
@@ -64,56 +66,126 @@ public sealed class EvdsInflationAdapter(
                     _ => "http_4xx",
                 };
                 logger.LogError(
-                    "EVDS TÜFE API hatası {StatusCode} ({Outcome}): {Body} ({From}–{To})",
-                    statusCode, outcome, body, from, to);
+                    "EVDS TÜFE API hatası {StatusCode} ({Outcome}) ({From}–{To})",
+                    statusCode, outcome, from, to);
                 SaydinMetrics.InflationIngestionFailures.Add(1,
                     new KeyValuePair<string, object?>("source", Source),
                     new KeyValuePair<string, object?>("outcome", outcome));
-                // F1.1-7: 5xx + 4xx tek noktada — sessizce return [] YASAK; worker
-                // ingestion_jobs failed yazsın diye ExternalApiException ile fırlat.
-                throw new ExternalApiException(Source,
-                    $"EVDS HTTP hatası {statusCode} ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})");
+                return response.StatusCode == System.Net.HttpStatusCode.TooManyRequests || statusCode >= 500
+                    ? AdapterOutcome<InflationRate>.RetryableFailure(outcome, $"status={statusCode}")
+                    : AdapterOutcome<InflationRate>.PermanentFailure(outcome, $"status={statusCode}");
             }
 
-            var json = await response.Content.ReadAsStringAsync(ct);
+            var payload = await BoundedHttpContent.ReadAsync(response.Content, ct);
+            using var document = JsonDocument.Parse(payload.Bytes);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return AdapterOutcome<InflationRate>.PermanentFailure(
+                    "contract_value_kind_invalid");
+            if (!document.RootElement.TryGetProperty("items", out var items)
+                || items.ValueKind != JsonValueKind.Array)
+                return AdapterOutcome<InflationRate>.PermanentFailure("schema_missing_items");
+
+            var rawItemCount = items.GetArrayLength();
             // INGR-010: inflation_rates.source veri KÖKENİDİR (TÜİK) — chk_inflation_rates_source
             // yalnız 'tuik'/'seed-approximation' kabul eder. "evds" yalnız taşıma kanalıdır ve
             // ingestion_jobs.source='evds' (EvdsInflationWorker, adapter.Source) ile zaten
             // kaydedilir. TP.FG.J0 serisi TÜİK TÜFE'sidir → InflationSources.Tuik yazılır.
-            var rates = EvdsInflationMapper.Map(json, source: InflationSources.Tuik);
+            var rates = EvdsInflationMapper.Map(
+                payload.Utf8Text, source: InflationSources.Tuik,
+                payloadSha256: payload.Sha256,
+                payloadByteLength: payload.Bytes.Length);
 
             logger.LogInformation(
                 "EVDS TÜFE: {Count} aylık endeks alındı ({From}–{To})",
                 rates.Count, from, to);
 
-            return rates;
+            var expected = ExpectedMonths(from, to).ToHashSet();
+            var acceptedDates = rates.Select(rate => rate.PeriodDate).ToArray();
+            var accepted = acceptedDates.ToHashSet();
+            var duplicateCount = acceptedDates.Length - accepted.Count;
+            var outOfRangeCount = accepted.Count(date => !expected.Contains(date));
+            var missing = expected.Where(date => !accepted.Contains(date)).ToArray();
+            var rejectedCount = Math.Max(0, rawItemCount - rates.Count)
+                + duplicateCount + outOfRangeCount;
+
+            if (missing.Length == 0 && rejectedCount == 0)
+                return AdapterOutcome<InflationRate>.Data(rates, rawItemCount);
+
+            var utcNow = timeProvider.GetUtcNow().UtcDateTime;
+            var lastPublishedTarget = new DateOnly(utcNow.Year, utcNow.Month, 1)
+                .AddMonths(-1);
+            if (missing.Length == 1 && missing[0] == lastPublishedTarget
+                && accepted.All(date => date < lastPublishedTarget))
+                return AdapterOutcome<InflationRate>.RetryableFailure(
+                    "not_published_yet", rawItemCount: rawItemCount,
+                    rejectedCount: Math.Max(1, rejectedCount));
+
+            return AdapterOutcome<InflationRate>.PartialRejected(
+                rates, rawItemCount, Math.Max(1, rejectedCount + missing.Length),
+                "incomplete_month_set", $"missing={missing.Length}");
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException)
         {
             // Polly retry tükenmiş network hatası.
             // PR #11 follow-up: metric'in yanı sıra exception stack'i de logla;
             // ExternalApiException sarmalaması inner stack'i sızdırmaz.
-            logger.LogError(ex,
-                "EVDS network hatası: {Source} ({From}–{To})", Source, from, to);
+            logger.LogError("EVDS network hatası: {Source} ({From}–{To})", Source, from, to);
             SaydinMetrics.InflationIngestionFailures.Add(1,
                 new KeyValuePair<string, object?>("source", Source),
                 new KeyValuePair<string, object?>("outcome", "transient"));
-            throw new ExternalApiException(Source,
-                $"EVDS network hatası ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
+            return AdapterOutcome<InflationRate>.RetryableFailure("network_error");
         }
-        catch (JsonException ex)
+        catch (ProviderContractException ex)
         {
-            logger.LogError(ex,
-                "EVDS yanıtı çözümlenemedi: {Source} ({From}–{To})", Source, from, to);
+            logger.LogError("EVDS provider contract rejected: {Code} ({From}–{To})",
+                ex.Code, from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "contract"));
+            return AdapterOutcome<InflationRate>.PermanentFailure(ex.Code);
+        }
+        catch (ProviderTransportPayloadTooLargeException)
+        {
+            logger.LogWarning("EVDS provider transport payload limitini aştı ({From}–{To})",
+                from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "transport_payload_too_large"));
+            return AdapterOutcome<InflationRate>.RetryableFailure("transport_payload_too_large");
+        }
+        catch (ProviderPayloadTooLargeException)
+        {
+            logger.LogError("EVDS provider payload exceeded authority limit ({From}–{To})",
+                from, to);
+            SaydinMetrics.InflationIngestionFailures.Add(1,
+                new KeyValuePair<string, object?>("source", Source),
+                new KeyValuePair<string, object?>("outcome", "payload_too_large"));
+            return AdapterOutcome<InflationRate>.PermanentFailure("payload_too_large");
+        }
+        catch (JsonException)
+        {
+            logger.LogError("EVDS yanıtı çözümlenemedi: {Source} ({From}–{To})", Source, from, to);
             SaydinMetrics.InflationIngestionFailures.Add(1,
                 new KeyValuePair<string, object?>("source", Source),
                 new KeyValuePair<string, object?>("outcome", "parse"));
-            throw new ExternalApiException(Source,
-                $"EVDS yanıtı çözümlenemedi ({from:yyyy-MM-dd}–{to:yyyy-MM-dd})", ex);
+            return AdapterOutcome<InflationRate>.PermanentFailure("parse_error");
         }
         finally
         {
             response?.Dispose();
         }
+    }
+
+    private static IReadOnlyList<DateOnly> ExpectedMonths(DateOnly from, DateOnly to)
+    {
+        var months = new List<DateOnly>();
+        var current = new DateOnly(from.Year, from.Month, 1);
+        var end = new DateOnly(to.Year, to.Month, 1);
+        while (current <= end)
+        {
+            months.Add(current);
+            current = current.AddMonths(1);
+        }
+        return months;
     }
 }

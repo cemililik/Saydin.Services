@@ -23,10 +23,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Saydin.Shared\Saydin.Shared.csproj" />
+    <ProjectReference Include="..\Saydin.DatabaseSecurity\Saydin.DatabaseSecurity.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Saydin.PriceIngestion.Tests" />
+    <InternalsVisibleTo Include="Saydin.PriceIngestion.IntegrationTests" />
   </ItemGroup>
 
 </Project>

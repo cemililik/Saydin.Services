@@ -1,6 +1,6 @@
 using FluentAssertions;
+using Saydin.PriceIngestion.Adapters;
 using Saydin.PriceIngestion.Mappers;
-using Saydin.Shared.Exceptions;
 
 namespace Saydin.PriceIngestion.Tests.Adapters;
 
@@ -15,7 +15,10 @@ public class TwelveDataMapperTests
             "symbol": "AKBNK",
             "interval": "1day",
             "currency": "TRY",
-            "exchange": "BIST"
+            "exchange": "BIST",
+            "mic_code": "XIST",
+            "exchange_timezone": "Europe/Istanbul",
+            "type": "Common Stock"
           },
           "values": [
             {
@@ -44,7 +47,7 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_ValidJson_ReturnsPricePointsInDateOrder()
     {
-        var result = TwelveDataMapper.Map(ValidJson, AssetId);
+        var result = TwelveDataMapper.Map(ValidJson, AssetId, "AKBNK:BIST");
 
         result.Should().HaveCount(2);
         result[0].PriceDate.Should().Be(new DateOnly(2024, 3, 14)); // eski → yeni sıralama
@@ -54,7 +57,7 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_ValidJson_OhlcvParsedCorrectly()
     {
-        var result = TwelveDataMapper.Map(ValidJson, AssetId);
+        var result = TwelveDataMapper.Map(ValidJson, AssetId, "AKBNK:BIST");
         var latest = result[1]; // 2024-03-15
 
         latest.AssetId.Should().Be(AssetId);
@@ -65,10 +68,25 @@ public class TwelveDataMapperTests
         latest.Volume.Should().Be(15234567m);
     }
 
+    [Theory]
+    [InlineData("\"symbol\": \"AKBNK\"", "\"symbol\": \"THYAO\"")]
+    [InlineData("\"interval\": \"1day\"", "\"interval\": \"1h\"")]
+    [InlineData("\"mic_code\": \"XIST\"", "\"mic_code\": \"XNYS\"")]
+    [InlineData("\"exchange_timezone\": \"Europe/Istanbul\"", "\"exchange_timezone\": \"UTC\"")]
+    public void Map_ResponseIdentityMismatch_IsPermanentContractFailure(
+        string expected, string replacement)
+    {
+        var act = () => TwelveDataMapper.Map(
+            ValidJson.Replace(expected, replacement, StringComparison.Ordinal),
+            AssetId, "AKBNK:BIST");
+        act.Should().Throw<ProviderContractException>()
+            .Which.Code.Should().Be("contract_identity_mismatch");
+    }
+
     // ── status != "ok" ────────────────────────────────────────────────────────
 
     [Fact]
-    public void Map_StatusError_ThrowsExternalApiException()
+    public void Map_StatusError_ThrowsStableProviderContractException()
     {
         // F1.1-6 ([G-D-03]): status="error" sessizce empty list dönmek yerine
         // ExternalApiException fırlatır — caller ingestion_jobs failed kaydı oluşturur.
@@ -81,18 +99,17 @@ public class TwelveDataMapperTests
             """;
 
         var act = () => TwelveDataMapper.Map(json, AssetId, "YOKHISSE", "twelvedata");
-        act.Should().Throw<ExternalApiException>()
-           .Where(ex => ex.ApiSource == "twelvedata")
-           .WithMessage("*YOKHISSE*");
+        act.Should().Throw<ProviderContractException>()
+           .Which.Code.Should().Be("provider_error");
     }
 
     [Fact]
-    public void Map_UnknownStatus_ThrowsExternalApiException()
+    public void Map_UnknownStatus_ThrowsStableProviderContractException()
     {
         const string json = """{"status": "rate_limited"}""";
         var act = () => TwelveDataMapper.Map(json, AssetId, "AKBNK", "twelvedata");
-        act.Should().Throw<ExternalApiException>()
-           .Where(ex => ex.ApiSource == "twelvedata");
+        act.Should().Throw<ProviderContractException>()
+           .Which.Code.Should().Be("provider_status_invalid");
     }
 
     // ── Eksik values ──────────────────────────────────────────────────────────
@@ -100,16 +117,14 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_MissingValuesProperty_ReturnsEmptyList()
     {
-        const string json = """{"status": "ok"}""";
-        var result = TwelveDataMapper.Map(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(valuesJson: null), AssetId, "AKBNK:BIST");
         result.Should().BeEmpty();
     }
 
     [Fact]
     public void Map_EmptyValuesArray_ReturnsEmptyList()
     {
-        const string json = """{"status": "ok", "values": []}""";
-        var result = TwelveDataMapper.Map(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope("[]"), AssetId, "AKBNK:BIST");
         result.Should().BeEmpty();
     }
 
@@ -118,17 +133,14 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_InvalidDatetime_SkipsEntry()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
-                {"datetime": "BOZUK", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00"},
-                {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00"}
-              ]
-            }
+        const string values = """
+            [
+                {"datetime": "BOZUK", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"},
+                {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"}
+            ]
             """;
 
-        var result = TwelveDataMapper.Map(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
         result.Should().HaveCount(1);
         result[0].PriceDate.Should().Be(new DateOnly(2024, 3, 15));
     }
@@ -136,17 +148,14 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_InvalidClose_SkipsEntry()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
-                {"datetime": "2024-03-14", "close": "N/A", "open": "47.00", "high": "49.00", "low": "46.00"},
-                {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00"}
-              ]
-            }
+        const string values = """
+            [
+                {"datetime": "2024-03-14", "close": "N/A", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"},
+                {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"}
+            ]
             """;
 
-        var result = TwelveDataMapper.Map(json, AssetId);
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
         result.Should().HaveCount(1);
         result[0].PriceDate.Should().Be(new DateOnly(2024, 3, 15));
     }
@@ -154,38 +163,39 @@ public class TwelveDataMapperTests
     // ── Opsiyonel alanlar ────────────────────────────────────────────────────
 
     [Fact]
-    public void Map_MissingVolume_VolumeNull()
+    public void Map_MissingVolume_RejectsIncompleteDailyBar()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
+        const string values = """
+            [
                 {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00"}
-              ]
-            }
+            ]
             """;
 
-        var result = TwelveDataMapper.Map(json, AssetId);
-        result[0].Volume.Should().BeNull();
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
+        result.Should().BeEmpty();
     }
 
     [Fact]
-    public void Map_MissingOpenHighLow_ThoseFieldsNull()
+    public void Map_MissingOpenHighLow_RejectsNonOhlcDailyClose()
     {
-        const string json = """
-            {
-              "status": "ok",
-              "values": [
+        const string values = """
+            [
                 {"datetime": "2024-03-15", "close": "48.10"}
-              ]
-            }
+            ]
             """;
 
-        var result = TwelveDataMapper.Map(json, AssetId);
-        result[0].Open.Should().BeNull();
-        result[0].High.Should().BeNull();
-        result[0].Low.Should().BeNull();
-        result[0].Close.Should().Be(48.10m);
+        var result = TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST");
+        result.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Map_JsonNullVolume_SkipsUnpublishedBar()
+    {
+        const string values = """
+            [{"datetime":"2024-03-15","close":"48.10","open":"47.00","high":"49.00","low":"46.00","volume":null}]
+            """;
+
+        TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST").Should().BeEmpty();
     }
 
     // ── Status yok ama values var (toleranslı) ───────────────────────────────
@@ -193,15 +203,66 @@ public class TwelveDataMapperTests
     [Fact]
     public void Map_NoStatusField_ParsesSuccessfully()
     {
-        const string json = """
-            {
-              "values": [
-                {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00"}
-              ]
-            }
+        const string values = """
+            [
+                {"datetime": "2024-03-15", "close": "48.10", "open": "47.00", "high": "49.00", "low": "46.00", "volume": "1"}
+            ]
             """;
 
-        var result = TwelveDataMapper.Map(json, AssetId);
+        var result = TwelveDataMapper.Map(
+            Envelope(values, includeStatus: false), AssetId, "AKBNK:BIST");
         result.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public void Map_NumericJsonOhlcv_IsAcceptedDefensively()
+    {
+        const string values = """
+            [{"datetime":"2024-03-15","close":48.10,"open":47.00,"high":49.00,"low":46.00,"volume":1}]
+            """;
+
+        TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST")
+            .Should().ContainSingle().Which.Close.Should().Be(48.10m);
+    }
+
+    [Theory]
+    [InlineData("2115,19")]
+    [InlineData("2.115,19")]
+    [InlineData("(30.5)")]
+    public void Map_LocaleOrThousandsFormattedClose_FailsClosed(string rawClose)
+    {
+        var values = $$"""
+            [{"datetime":"2024-03-15","close":"{{rawClose}}","open":"47","high":"2200","low":"46","volume":"1"}]
+            """;
+
+        TwelveDataMapper.Map(Envelope(values), AssetId, "AKBNK:BIST")
+            .Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Map_WrongCloseValueKind_ThrowsStableContractCode()
+    {
+        const string values = """
+            [{"datetime":"2024-03-15","close":{"bad":true},"open":"47","high":"49","low":"46","volume":"1"}]
+            """;
+
+        var act = () => TwelveDataMapper.Map(
+            Envelope(values), AssetId, "AKBNK:BIST");
+
+        act.Should().Throw<ProviderContractException>()
+            .Which.Code.Should().Be("contract_value_kind_invalid");
+    }
+
+    private static string Envelope(string? valuesJson, bool includeStatus = true)
+    {
+        var status = includeStatus ? "\"status\":\"ok\"," : string.Empty;
+        var values = valuesJson is null ? string.Empty : $",\"values\":{valuesJson}";
+        return $$"""
+            {
+              {{status}}
+              "meta":{"symbol":"AKBNK","interval":"1day","currency":"TRY","exchange":"BIST","mic_code":"XIST","exchange_timezone":"Europe/Istanbul","type":"Common Stock"}
+              {{values}}
+            }
+            """;
     }
 }
