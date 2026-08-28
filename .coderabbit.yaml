@@ -12,12 +12,19 @@ reviews:
     base_branches:
       - main
       - development
+      # Retro-review of PR #16: the merged change was 913 files, far over CodeRabbit's
+      # 100-file limit, so it was never line-reviewed. Slice PRs target this frozen base.
+      - review/base-pr16
 
   path_filters:
     - "!**/obj/**"
     - "!**/bin/**"
     - "!**/publish/**"
     - "!**/*.Designer.cs"
+    # SHA-256 pinli, birebir yakalanmış üçüncü taraf takvim sayfaları ve JSON
+    # manifestleri: kanıt artefaktıdır, kaynak kod değildir. `.sonarcloud.properties`
+    # ve `.codacy.yaml` aynı yolu zaten hariç tutuyor.
+    - "!tools/calendar-data/data/**"
     # F1.8-2 / [C-I-16]: SQL migration'lar yüksek riskli — review kapsamından çıkarılmıyor.
     # F1.8-2 / [C-I-17]: `docs/**` filter'ı da kaldırıldı; doc-as-code review tetiklenir.
 
