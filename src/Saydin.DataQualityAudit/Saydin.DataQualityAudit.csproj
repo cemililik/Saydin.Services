@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="OCI.DotNetSDK.Keymanagement" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Saydin.DatabaseSecurity\Saydin.DatabaseSecurity.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Saydin.DatabaseMigrator\MigrationTrustRoot.cs"
+             Link="MigrationTrustRoot.cs" />
+  </ItemGroup>
+
+  <!-- Explicit immutable migration set: never absorb a concurrently-written next migration. -->
+  <ItemGroup>
+    <EmbeddedResource Include="
+      ..\..\infrastructure\postgres\migrations\001_initial.sql;
+      ..\..\infrastructure\postgres\migrations\002_add_assets.sql;
+      ..\..\infrastructure\postgres\migrations\003_switch_precious_metals_to_oxr.sql;
+      ..\..\infrastructure\postgres\migrations\004_add_inflation_rates.sql;
+      ..\..\infrastructure\postgres\migrations\005_add_tcmb_currencies.sql;
+      ..\..\infrastructure\postgres\migrations\006_scenario_type.sql;
+      ..\..\infrastructure\postgres\migrations\007_add_dca_scenario_type.sql;
+      ..\..\infrastructure\postgres\migrations\008_add_activity_logs.sql;
+      ..\..\infrastructure\postgres\migrations\008b_disable_activity_log_compression.sql;
+      ..\..\infrastructure\postgres\migrations\009_widen_activity_log_columns.sql;
+      ..\..\infrastructure\postgres\migrations\010_add_geo_columns.sql;
+      ..\..\infrastructure\postgres\migrations\011_phase2_schema_hardening.sql;
+      ..\..\infrastructure\postgres\migrations\012_faz3_schema.sql;
+      ..\..\infrastructure\postgres\migrations\012b_create_exporter_role.sh;
+      ..\..\infrastructure\postgres\migrations\013_enable_activity_log_compression.sql;
+      ..\..\infrastructure\postgres\migrations\014_schema_migrations.sql;
+      ..\..\infrastructure\postgres\migrations\015_ingestion_windows.sql;
+      ..\..\infrastructure\postgres\migrations\016_ingestion_write_fence.sql;
+      ..\..\infrastructure\postgres\migrations\017_authoritative_market_calendars.sql;
+      ..\..\infrastructure\postgres\migrations\018_scenario_integrity.sql;
+      ..\..\infrastructure\postgres\migrations\019_privilege_separation.sql;
+      ..\..\infrastructure\postgres\migrations\020_price_authority_expand.sql;
+      ..\..\infrastructure\postgres\migrations\021_api_trust_expand.sql;
+      ..\..\infrastructure\postgres\migrations\022_principal_retention.sql;
+      ..\..\infrastructure\postgres\migrations\023_installation_lifecycle_admission.sql;
+      ..\..\infrastructure\postgres\migrations\024_installation_credential_rehash.sql;
+      ..\..\infrastructure\postgres\migrations\025_ingestion_calendar_rebind.sql">
+      <LogicalName>Migrations/%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Saydin.DataQualityAudit.Tests" />
+    <InternalsVisibleTo Include="Saydin.DataQualityAudit.IntegrationTests" />
+  </ItemGroup>
+</Project>
