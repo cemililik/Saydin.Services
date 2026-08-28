@@ -12,7 +12,8 @@
     Testcontainers BU ortamda kullanilamaz (api container'inda docker.sock mount yok);
     bunun yerine docker-compose agindaki postgres/redis servislerine baglanir.
     Calistirma icin bkz. docs/development-guide.md (compose tests profili).
-    DB/Redis erisilemezse testler SkippableFact ile Skipped olur (kirmiziya donmez).
+    Yerel optional modda DB/Redis erisilemezse testler SkippableFact ile Skipped olur.
+    Required CI modu SAYDIN_INTEGRATION_REQUIRED=true + UUID run-id ile fail-closed calisir.
   -->
   <ItemGroup>
     <PackageReference Include="coverlet.collector" />

@@ -4,46 +4,132 @@ using Saydin.Api.IntegrationTests.Fixtures;
 using Saydin.Api.Options;
 using Saydin.Api.Services;
 using Saydin.Shared.Exceptions;
+using StackExchange.Redis;
 
 namespace Saydin.Api.IntegrationTests;
 
-/// <summary>
-/// F1.9-7: DailyLimitGuard'ın atomik check-then-INCR Lua script'i GERÇEK Redis'e karşı
-/// doğrulanır (önceden yalnız mock'lanmıştı). Limit aşımı server-side atomik reddedilmeli.
-/// </summary>
 [Collection(RedisCollection.Name)]
-public class DailyLimitGuardIntegrationTests(RedisFixture redis)
+public sealed class DailyLimitGuardIntegrationTests(RedisFixture redis)
 {
     [SkippableFact]
-    public async Task TryAcquireAsync_RealRedis_EnforcesLimitAtomically()
+    public async Task Lease_RealRedis_IsAtomicIdempotentAndRetainedFor48Hours()
     {
         Skip.IfNot(redis.Available, redis.SkipReason);
-
-        // Benzersiz prefix → diğer testler/üretim sayaçlarıyla çakışmaz.
-        var prefix   = $"usage:itest:{Guid.NewGuid():N}:";
-        var deviceId = "itest-device";
-        var options  = Microsoft.Extensions.Options.Options.Create(new PlanOptions
-        {
-            Free = new TierOptions { DailyCalculationLimit = 2 },
-        });
-        var guard = new DailyLimitGuard(
-            redis.Multiplexer!, options, TimeProvider.System, NullLogger<DailyLimitGuard>.Instance);
+        var prefix = $"usage:lease-itest:{Guid.NewGuid():N}:";
+        var guard = CreateGuard(limit: 2);
+        var leases = new List<QuotaLease>();
 
         try
         {
-            // Limit=2: ilk iki acquire geçer, üçüncü gerçek Lua script ile reddedilir.
-            await guard.TryAcquireAsync(null, deviceId, prefix);
-            await guard.TryAcquireAsync(null, deviceId, prefix);
+            var first = await guard.TryAcquireAsync(null, "device", prefix);
+            var second = await guard.TryAcquireAsync(null, "device", prefix);
+            leases.Add(first);
+            leases.Add(second);
+            first.Nonce.Should().NotBe(second.Nonce);
 
-            var third = () => guard.TryAcquireAsync(null, deviceId, prefix);
-            await third.Should().ThrowAsync<DailyLimitExceededException>();
+            var rejected = () => guard.TryAcquireAsync(null, "device", prefix);
+            await rejected.Should().ThrowAsync<DailyLimitExceededException>();
+
+            var database = redis.Multiplexer!.GetDatabase();
+            (await database.HashGetAsync(first.RedisKey, "count")).Should().Be((RedisValue)2);
+            (await database.KeyTimeToLiveAsync(first.RedisKey)).Should().BeGreaterThan(TimeSpan.FromHours(47));
+
+            await guard.ReleaseAsync(first);
+            await guard.ReleaseAsync(first); // same nonce cannot decrement twice
+            (await database.HashGetAsync(first.RedisKey, "count")).Should().Be((RedisValue)1);
+
+            var replacement = await guard.TryAcquireAsync(null, "device", prefix);
+            leases.Add(replacement);
+            (await database.HashGetAsync(first.RedisKey, "count")).Should().Be((RedisValue)2);
         }
         finally
         {
-            // Sayaç key'ini temizle (TTL gece yarısı; testler arası birikmesin). Guard
-            // TimeProvider.System ile yazdı → aynı UTC gününün key'i (test saniyeler sürer).
-            var key = DailyLimitGuard.BuildUsageKey(null, deviceId, prefix, DateTime.UtcNow);
-            await redis.Multiplexer!.GetDatabase().KeyDeleteAsync(key);
+            foreach (var key in leases.Select(lease => (RedisKey)lease.RedisKey).Distinct())
+                await redis.Multiplexer!.GetDatabase().KeyDeleteAsync(key);
         }
+    }
+
+    [SkippableFact]
+    public async Task TwoGuardInstances_ShareOneAtomicCap()
+    {
+        Skip.IfNot(redis.Available, redis.SkipReason);
+        var prefix = $"usage:replica-itest:{Guid.NewGuid():N}:";
+        var firstGuard = CreateGuard(limit: 25);
+        var secondGuard = CreateGuard(limit: 25);
+        var leases = new List<QuotaLease>();
+
+        try
+        {
+            var attempts = Enumerable.Range(0, 60).Select(async index =>
+            {
+                try
+                {
+                    var lease = await (index % 2 == 0 ? firstGuard : secondGuard)
+                        .TryAcquireAsync(null, "shared-device", prefix);
+                    lock (leases) leases.Add(lease);
+                    return true;
+                }
+                catch (DailyLimitExceededException)
+                {
+                    return false;
+                }
+            });
+
+            var results = await Task.WhenAll(attempts);
+            results.Count(allowed => allowed).Should().Be(25);
+            results.Count(allowed => !allowed).Should().Be(35);
+        }
+        finally
+        {
+            foreach (var key in leases.Select(lease => (RedisKey)lease.RedisKey).Distinct())
+                await redis.Multiplexer!.GetDatabase().KeyDeleteAsync(key);
+        }
+    }
+
+    [SkippableFact]
+    public async Task AcquireScript_ReplayWithSameNonce_DoesNotIncrementAgain()
+    {
+        Skip.IfNot(redis.Available, redis.SkipReason);
+        var prefix = $"usage:replay-itest:{Guid.NewGuid():N}:";
+        var guard = CreateGuard(limit: 2);
+        var lease = await guard.TryAcquireAsync(null, "device", prefix);
+        var database = redis.Multiplexer!.GetDatabase();
+
+        try
+        {
+            var time = (RedisResult[]?)await database.ExecuteAsync("TIME")
+                ?? throw new InvalidOperationException("Redis TIME returned no values.");
+            var day = long.Parse(time[0].ToString(), System.Globalization.CultureInfo.InvariantCulture) / 86400;
+            var replay = (RedisResult[]?)await database.ScriptEvaluateAsync(
+                DailyLimitGuard.AcquireScript,
+                [lease.RedisKey],
+                [day, 2, lease.Nonce, 172_800_000L])
+                ?? throw new InvalidOperationException("Quota replay returned no values.");
+
+            replay[0].ToString().Should().Be("1");
+            (await database.HashGetAsync(lease.RedisKey, "count")).Should().Be((RedisValue)1);
+        }
+        finally
+        {
+            await database.KeyDeleteAsync(lease.RedisKey);
+        }
+    }
+
+    private DailyLimitGuard CreateGuard(int limit) => new(
+        redis.Multiplexer!,
+        Microsoft.Extensions.Options.Options.Create(new PlanOptions
+        {
+            Free = new TierOptions { DailyCalculationLimit = limit },
+        }),
+        new FixedQuotaSubjectPseudonymizer(),
+        TimeProvider.System,
+        NullLogger<DailyLimitGuard>.Instance);
+
+    private sealed class FixedQuotaSubjectPseudonymizer : IQuotaSubjectPseudonymizer
+    {
+        public string PseudonymizeQuotaSubject(string subject) =>
+            "q1:" + Convert.ToHexStringLower(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(subject))).Substring(0, 32);
     }
 }
