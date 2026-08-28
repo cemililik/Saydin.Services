@@ -34,11 +34,27 @@ public sealed class TestLogger<T> : ILogger<T>
         Exception? exception,
         Func<TState, Exception?, string> formatter)
     {
-        _entries.Enqueue(new LogEntry(logLevel, eventId, formatter(state, exception), exception));
+        var properties = state is IEnumerable<KeyValuePair<string, object?>> structuredState
+            ? structuredState
+                .Where(property => property.Key != "{OriginalFormat}")
+                .ToDictionary(property => property.Key, property => property.Value)
+            : new Dictionary<string, object?>();
+
+        _entries.Enqueue(new LogEntry(
+            logLevel,
+            eventId,
+            formatter(state, exception),
+            exception,
+            properties));
     }
 
     /// <summary>Yakalanan tek bir log kaydı.</summary>
-    public sealed record LogEntry(LogLevel Level, EventId EventId, string Message, Exception? Exception);
+    public sealed record LogEntry(
+        LogLevel Level,
+        EventId EventId,
+        string Message,
+        Exception? Exception,
+        IReadOnlyDictionary<string, object?> Properties);
 }
 
 /// <summary>

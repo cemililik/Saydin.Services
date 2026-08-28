@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
+using Saydin.Api.Models;
 using Saydin.Api.Models.Requests;
 using Saydin.Api.Models.Responses;
 using Saydin.Api.Options;
@@ -14,12 +15,17 @@ namespace Saydin.Api.Services;
 public sealed class SavedScenarioService(
     ISavedScenarioRepository repository,
     ILastSeenThrottle lastSeenThrottle,
-    IDeviceContext deviceContext,
+    IInstallationPrincipalContext principalContext,
     TimeProvider timeProvider,
     IOptions<PlanOptions> options,
     IStringLocalizer<ErrorMessages> localizer,
     ILogger<SavedScenarioService> logger) : ISavedScenarioService
 {
+    internal const int LegacyListHardLimit = ScenarioLimits.LegacyListHardLimit;
+    internal const int DefaultPageSize = ScenarioLimits.DefaultPageSize;
+    internal const int MaxPageSize = ScenarioLimits.MaxPageSize;
+    internal const int SystemSaveHardLimit = ScenarioLimits.SystemSaveHardLimit;
+
     // DB kolon kapasiteleri ile uyumlu max length validasyonu.
     private const int MaxSymbolLength      = 64;
     private const int MaxDisplayNameLength = 200;
@@ -27,31 +33,57 @@ public sealed class SavedScenarioService(
 
     public async Task<IReadOnlyList<ScenarioResponse>> GetScenariosAsync(CancellationToken ct)
     {
-        var deviceId = deviceContext.DeviceId;
-        // F2.2-13 ([C-B-SavedScenario-4]): GET path'inde user yaratma side-effect'i yok.
-        // Cihaz hiç POST atmadan listele çağırdıysa boş liste döner ve users tablosu
-        // gereksiz kayıt biriktirmez.
-        var user = await repository.GetUserByDeviceIdAsync(deviceId, ct);
-        if (user is null)
-        {
-            logger.LogInformation("Senaryo listesi: {DeviceId} için kullanıcı kaydı yok — boş döndü", deviceId);
-            return Array.Empty<ScenarioResponse>();
-        }
+        var user = await GetAuthenticatedUserAsync(ct);
 
         await TryTouchLastSeenAsync(user, ct);
-        var scenarios = await repository.GetByUserIdAsync(user.Id, ct);
+        var scenarios = await repository.GetByUserIdAsync(user.Id, LegacyListHardLimit, ct);
 
-        logger.LogInformation(
-            "Senaryo listesi alındı: {DeviceId} → {Count} senaryo",
-            deviceId, scenarios.Count);
+        logger.LogInformation("Senaryo listesi alındı: {Count} senaryo", scenarios.Count);
 
         return scenarios.Select(ToResponse).ToList();
+    }
+
+    public async Task<ScenarioPageResponse> GetScenarioPageAsync(
+        int? limit,
+        string? cursor,
+        CancellationToken ct)
+    {
+        var pageSize = limit ?? DefaultPageSize;
+        if (pageSize is < 1 or > MaxPageSize)
+            throw new ValidationException(
+                string.Format(localizer["ScenarioPageLimitInvalid"], MaxPageSize), field: "limit");
+
+        ScenarioCursor? boundary = null;
+        if (cursor is not null)
+        {
+            if (!ScenarioCursorCodec.TryDecode(cursor, out var decoded))
+                throw new ValidationException(localizer["ScenarioCursorInvalid"], field: "cursor");
+            boundary = decoded;
+        }
+
+        var user = await GetAuthenticatedUserAsync(ct);
+
+        await TryTouchLastSeenAsync(user, ct);
+
+        // One extra row is the only look-ahead needed to determine nextCursor.
+        var scenarios = await repository.GetPageByUserIdAsync(user.Id, boundary, pageSize + 1, ct);
+        var hasNextPage = scenarios.Count > pageSize;
+        var pageEntities = hasNextPage ? scenarios.Take(pageSize).ToList() : scenarios;
+        var items = pageEntities.Select(ToResponse).ToList();
+        var nextCursor = hasNextPage
+            ? ScenarioCursorCodec.Encode(new ScenarioCursor(pageEntities[^1].CreatedAt, pageEntities[^1].Id))
+            : null;
+
+        logger.LogInformation(
+            "Sayfalı senaryo listesi alındı: {Count} senaryo, devam={HasNextPage}",
+            items.Count, hasNextPage);
+
+        return new ScenarioPageResponse(items, nextCursor);
     }
 
     public async Task<ScenarioResponse> SaveScenarioAsync(
         SaveScenarioRequest request, CancellationToken ct)
     {
-        var deviceId = deviceContext.DeviceId;
         // Codacy follow-up: Tüm request-shape validasyonu user upsert/last_seen
         // touch'tan ÖNCE yapılır. Aksi halde malformed bir request (örn. invalid
         // Type, negatif Amount) yine de users tablosuna bir kayıt yaratıyor +
@@ -59,29 +91,32 @@ public sealed class SavedScenarioService(
         // EnforceScenarioLimitAsync user gerektirdiği için upsert SONRASI kalır.
         ValidateRequestNotNull(request);
         var normalizedType = NormalizeAndValidateType(request);
+        ScenarioExtraDataValidator.Validate(request.ExtraData, normalizedType, localizer);
         var (trimmedSymbol, requiresAssetSymbol) = ValidateAssetSymbol(request, normalizedType);
         ValidateOptionalFields(request);
         ValidateQuantity(request);
+        ValidateDates(request);
+        var normalizedQuantityUnit = NormalizeAndValidateQuantityUnit(request, normalizedType);
 
-        // Save path'inde user atomik upsert + select — request artık geçerli.
-        var user = await repository.GetOrCreateUserAsync(deviceId, ct);
-        await TryTouchLastSeenAsync(user, ct);
-
-        await EnforceScenarioLimitAsync(user, ct);
-
-        // F2.3-6 ([C-C-29]): client-tarafı AssetDisplayName artık güven kaynağı değil —
-        // server-side resolve.
+        // Asset existence is also request validity. Resolve it before user upsert
+        // so an unknown symbol cannot create/touch a user row.
         Asset? asset = null;
-        string canonicalSymbol       = trimmedSymbol.ToUpperInvariant();
-        string  canonicalDisplayName = canonicalSymbol;
-
+        string canonicalSymbol = trimmedSymbol.ToUpperInvariant();
+        string canonicalDisplayName = canonicalSymbol;
         if (requiresAssetSymbol)
         {
             asset = await repository.GetActiveAssetBySymbolAsync(canonicalSymbol, ct)
                 ?? throw new AssetNotFoundException(trimmedSymbol);
-            canonicalSymbol      = asset.Symbol;
+            canonicalSymbol = asset.Symbol;
             canonicalDisplayName = asset.DisplayName;
         }
+
+        // Registration creates the principal. Saving must never manufacture or
+        // claim a legacy device-owned user as a side effect.
+        var user = await GetAuthenticatedUserAsync(ct);
+        await TryTouchLastSeenAsync(user, ct);
+        var configuredLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
+        var scenarioLimit = ScenarioLimits.GetEffectiveSaveLimit(configuredLimit);
 
         var scenario = new SavedScenario
         {
@@ -95,26 +130,23 @@ public sealed class SavedScenarioService(
             BuyDate = request.BuyDate,
             SellDate = request.SellDate,
             Quantity = request.Amount,
-            QuantityUnit = request.AmountType,
+            QuantityUnit = normalizedQuantityUnit,
             Label = request.Label,
             CreatedAt = timeProvider.GetUtcNow(),
         };
 
-        await repository.CreateAsync(scenario, ct);
+        await repository.CreateWithinLimitAsync(scenario, scenarioLimit, ct);
 
         logger.LogInformation(
-            "Senaryo kaydedildi: {DeviceId} → {Type} {AssetSymbol} {BuyDate}",
-            deviceId, normalizedType, canonicalSymbol, request.BuyDate);
+            "Senaryo kaydedildi: {Type} {AssetSymbol} {BuyDate}",
+            normalizedType, canonicalSymbol, request.BuyDate);
 
         return ToResponse(scenario);
     }
 
     public async Task DeleteScenarioAsync(Guid scenarioId, CancellationToken ct)
     {
-        var deviceId = deviceContext.DeviceId;
-        // F2.2-13: DELETE path'inde user yaratma side-effect'i yok. Kullanıcı kaydı
-        // hiç yoksa senaryo da yok → 404. (ScenarioNotFound semantik olarak doğru.)
-        var user = await repository.GetUserByDeviceIdAsync(deviceId, ct)
+        var user = await repository.GetUserByIdAsync(principalContext.PrincipalId, ct)
             ?? throw new ScenarioNotFoundException(scenarioId);
         await TryTouchLastSeenAsync(user, ct);
 
@@ -123,10 +155,12 @@ public sealed class SavedScenarioService(
 
         await repository.DeleteAsync(scenario, ct);
 
-        logger.LogInformation(
-            "Senaryo silindi: {DeviceId} → {ScenarioId}",
-            deviceId, scenarioId);
+        logger.LogInformation("Senaryo silindi: {ScenarioId}", scenarioId);
     }
+
+    private async Task<User> GetAuthenticatedUserAsync(CancellationToken ct)
+        => await repository.GetUserByIdAsync(principalContext.PrincipalId, ct)
+           ?? throw new InvalidOperationException("Authenticated installation principal is missing.");
 
     /// <summary>
     /// F2.2-12: last_seen_at UPDATE'lerini throttling yapar. Hata kullanıcı yoluna sızmaz.
@@ -173,16 +207,6 @@ public sealed class SavedScenarioService(
         if (request is null)
             throw new ValidationException(
                 string.Format(localizer["RequestPayloadMissing"], "request"), field: "request");
-    }
-
-    private async Task EnforceScenarioLimitAsync(User user, CancellationToken ct)
-    {
-        var scenarioLimit = options.Value.GetTierOptions(user.Tier).MaxSavedScenarios;
-        if (scenarioLimit <= 0) return;
-
-        var count = await repository.CountByUserIdAsync(user.Id, ct);
-        if (count >= scenarioLimit)
-            throw new ScenarioLimitExceededException(scenarioLimit);
     }
 
     private string NormalizeAndValidateType(SaveScenarioRequest request)
@@ -242,5 +266,35 @@ public sealed class SavedScenarioService(
         if (request.Amount <= 0m)
             throw new ValidationException(
                 localizer["AmountMustBePositive"], field: nameof(request.Amount));
+    }
+
+    private void ValidateDates(SaveScenarioRequest request)
+    {
+        if (request.SellDate is not null && request.SellDate <= request.BuyDate)
+            throw new ValidationException(
+                localizer["SellDateMustBeAfterBuyDate"], field: nameof(request.SellDate));
+    }
+
+    private string NormalizeAndValidateQuantityUnit(
+        SaveScenarioRequest request,
+        string normalizedType)
+    {
+        if (string.IsNullOrWhiteSpace(request.AmountType))
+            throw new ValidationException(
+                string.Format(localizer["RequestPayloadMissing"], nameof(request.AmountType)),
+                field: nameof(request.AmountType));
+
+        var normalizedUnit = request.AmountType.Trim().ToLowerInvariant();
+        if (!QuantityUnits.Lookup.Contains(normalizedUnit))
+            throw new ValidationException(
+                string.Format(localizer["InvalidAmountType"], request.AmountType),
+                field: nameof(request.AmountType));
+
+        if (normalizedType == ScenarioTypes.Dca && normalizedUnit != QuantityUnits.Try)
+            throw new ValidationException(
+                string.Format(localizer["InvalidDcaAmountType"], request.AmountType),
+                field: nameof(request.AmountType));
+
+        return normalizedUnit;
     }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using Saydin.Api.Repositories;
 using Saydin.Shared.Entities;
 
 namespace Saydin.Api.Services;
@@ -24,6 +25,7 @@ public interface IAssetSymbolIndex
     /// indeksler ve sembol için asset'i döner. Listenin imzası değişmediyse
     /// snapshot reuse edilir.</summary>
     Asset? Lookup(IReadOnlyList<Asset> assets, string symbol);
+    Asset? Lookup(IReadOnlyList<Asset> assets, string symbol, AssetCatalogVersion catalogVersion);
 }
 
 public sealed class AssetSymbolIndex : IAssetSymbolIndex
@@ -31,18 +33,30 @@ public sealed class AssetSymbolIndex : IAssetSymbolIndex
     private Snapshot? _current;
 
     public Asset? Lookup(IReadOnlyList<Asset> assets, string symbol)
+        => LookupCore(assets, symbol, $"legacy:{ComputeSignature(assets)}");
+
+    public Asset? Lookup(
+        IReadOnlyList<Asset> assets,
+        string symbol,
+        AssetCatalogVersion catalogVersion)
+    {
+        ArgumentNullException.ThrowIfNull(catalogVersion);
+        return LookupCore(assets, symbol, catalogVersion.Token);
+    }
+
+    private Asset? LookupCore(IReadOnlyList<Asset> assets, string symbol, string signature)
     {
         var upper = symbol.ToUpperInvariant();
-        var hash = ComputeSignature(assets);
 
         var snapshot = Volatile.Read(ref _current);
-        if (snapshot is null || snapshot.Signature != hash)
+        if (snapshot is null || !string.Equals(snapshot.Signature, signature, StringComparison.Ordinal))
         {
-            // Bir önceki snapshot'tan kötümser shapeshift'i kabul ederek
-            // yeniden inşa et; CompareExchange ile atomik swap.
-            var built = new Snapshot(hash, BuildIndex(assets));
-            Interlocked.CompareExchange(ref _current, built, snapshot);
-            snapshot = Volatile.Read(ref _current);
+            // Return the snapshot built from this call's list even if another
+            // catalog publication wins the singleton swap immediately afterward.
+            // Re-reading the global slot here can cross catalog versions.
+            var built = new Snapshot(signature, BuildIndex(assets));
+            Interlocked.Exchange(ref _current, built);
+            snapshot = built;
         }
 
         return snapshot is not null && snapshot.Index.TryGetValue(upper, out var found)
@@ -80,5 +94,5 @@ public sealed class AssetSymbolIndex : IAssetSymbolIndex
         return HashCode.Combine(hash, assets.Count);
     }
 
-    private sealed record Snapshot(int Signature, FrozenDictionary<string, Asset> Index);
+    private sealed record Snapshot(string Signature, FrozenDictionary<string, Asset> Index);
 }

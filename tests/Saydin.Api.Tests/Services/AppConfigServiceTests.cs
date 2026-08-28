@@ -10,14 +10,16 @@ namespace Saydin.Api.Tests.Services;
 
 /// <summary>
 /// TSTR-010: AppConfigService.GetConfigAsync için unit test (CLAUDE.md "her public method
-/// için unit test zorunlu"). Tier → feature-flag çözümü ve null-user "free" fallback'i doğrular.
+/// için unit test zorunlu"). Doğrulanmış installation principal'inin tier →
+/// feature-flag çözümünü doğrular.
 /// </summary>
 public class AppConfigServiceTests
 {
-    private const string DeviceId = "test-device-001";
+    private static readonly Guid PrincipalId = Guid.Parse("11111111-1111-4111-8111-111111111111");
 
     private readonly ISavedScenarioRepository _repository = Substitute.For<ISavedScenarioRepository>();
-    private readonly IDeviceContext _deviceContext = Substitute.For<IDeviceContext>();
+    private readonly IInstallationPrincipalContext _principalContext =
+        Substitute.For<IInstallationPrincipalContext>();
     private readonly AppConfigService _sut;
 
     private static readonly PlanOptions Plans = new()
@@ -36,15 +38,16 @@ public class AppConfigServiceTests
 
     public AppConfigServiceTests()
     {
-        _deviceContext.DeviceId.Returns(DeviceId);
-        _sut = new AppConfigService(_repository, _deviceContext, Microsoft.Extensions.Options.Options.Create(Plans));
+        _principalContext.PrincipalId.Returns(PrincipalId);
+        _sut = new AppConfigService(
+            _repository, _principalContext, Microsoft.Extensions.Options.Options.Create(Plans));
     }
 
     [Fact]
     public async Task GetConfigAsync_FreeUser_ReturnsFreeTierConfig()
     {
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>())
-                   .Returns(new User { Id = Guid.NewGuid(), DeviceId = DeviceId, Tier = "free" });
+        _repository.GetUserByIdAsync(PrincipalId, Arg.Any<CancellationToken>())
+                   .Returns(new User { Id = PrincipalId, DeviceId = null, Tier = "free" });
 
         var config = await _sut.GetConfigAsync(CancellationToken.None);
 
@@ -58,25 +61,27 @@ public class AppConfigServiceTests
     [Fact]
     public async Task GetConfigAsync_PremiumUser_ReturnsPremiumTierConfig()
     {
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>())
-                   .Returns(new User { Id = Guid.NewGuid(), DeviceId = DeviceId, Tier = "premium" });
+        _repository.GetUserByIdAsync(PrincipalId, Arg.Any<CancellationToken>())
+                   .Returns(new User { Id = PrincipalId, DeviceId = null, Tier = "premium" });
 
         var config = await _sut.GetConfigAsync(CancellationToken.None);
 
         config.Tier.Should().Be("premium");
         config.DailyCalculationLimit.Should().Be(0);
+        config.MaxSavedScenarios.Should().Be(100,
+            "plan 0 olsa da API sistem hard cap'ini effective contract olarak dönmeli");
         config.Features.Dca.Should().BeTrue();
         config.Features.PriceHistoryMonths.Should().Be(0);
     }
 
     [Fact]
-    public async Task GetConfigAsync_UnknownDevice_FallsBackToFreeTier()
+    public async Task GetConfigAsync_MissingAuthenticatedPrincipal_Throws()
     {
-        _repository.GetUserByDeviceIdAsync(DeviceId, Arg.Any<CancellationToken>()).Returns((User?)null);
+        _repository.GetUserByIdAsync(PrincipalId, Arg.Any<CancellationToken>()).Returns((User?)null);
 
-        var config = await _sut.GetConfigAsync(CancellationToken.None);
+        var act = () => _sut.GetConfigAsync(CancellationToken.None);
 
-        config.Tier.Should().Be("free");
-        config.DailyCalculationLimit.Should().Be(20);
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Authenticated installation principal is missing.");
     }
 }
